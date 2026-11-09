@@ -260,7 +260,7 @@ fn ini_directives_ares_append_entries_load_each_own_file_in_order() {
         "root.ini",
         |name| {
             reads.push(name.to_owned());
-            Ok(Some(IniFile::from_str(&format!("[Unit]\n{name}=yes\n"))))
+            Ok(Some(format!("[Unit]\n{name}=yes\n").into_bytes()))
         },
         DirectiveOptions::default(),
     )
@@ -284,7 +284,7 @@ fn ini_directives_ares_append_entries_share_the_read_once_record() {
         "root.ini",
         |name| {
             reads.push(name.to_owned());
-            Ok(Some(IniFile::from_str("[Unit]\nValue=yes\n")))
+            Ok(Some("[Unit]\nValue=yes\n".as_bytes().to_vec()))
         },
         DirectiveOptions::default(),
     )
