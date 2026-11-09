@@ -83,6 +83,18 @@ Windows 上需先准备 MSVC 14.44 / Windows SDK 10.0.22621 的 `PATH` / `INCLUD
 （替换前建议备份旧 exe）。编译收尾若出现 `reg.exe` 被安全策略拦截，属于编译完成后的
 磁盘检查，不影响产物。
 
+## 脚本化扩展层（阶段 0a）
+
+为「模组用脚本写行为、不必 fork 引擎」预留的引擎能力，首个目标是完整复刻一份
+多幕蓄能演出脚本。设计与分阶段路线见 **`docs/scripting-extension.md`**。
+
+- 已交付：`src/sim/scripting.rs`（`Script` trait、`ScriptEvent` / `EventMask`、
+  `ScriptContext` + `SimCommand` / `LaserBirth`、`ScriptStateStore`、`ScriptRegistry`）、
+  `Simulation::script_states` 字段（`#[serde(default)]`，存档兼容）及单元测试。
+- 架构：扩展点位于 sim 层，表现副作用通过 `LifecycleOutput` 指令下发，保证确定性。
+- **阶段 0a 不改变任何帧行为**：注册表为空、状态表为空，自动派发与 state hash
+  接入属于阶段 0b。
+
 ## 已知待验证项
 
 - 上游本次新增的 Tunnel 地下移动、Carryall 吊运、色觉滤镜、DX12 只读着色器修复等

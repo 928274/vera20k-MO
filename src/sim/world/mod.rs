@@ -1590,6 +1590,13 @@ pub struct Simulation {
     /// the render-side fire-event approximation.
     #[serde(default)]
     pub(crate) projectiles: crate::sim::projectile::ProjectileStore,
+    /// Sim-layer script states, keyed by (stable entity id, ScriptId).
+    /// `#[serde(default)]` keeps older saves loadable. Stage 0b wires this
+    /// into `state_hash_owners` and installs the per-frame dispatcher; until
+    /// then no script runs, the store stays empty, and frame behaviour is
+    /// unchanged. See `docs/scripting-extension.md`.
+    #[serde(default)]
+    pub(crate) script_states: crate::sim::scripting::ScriptStateStore,
     /// Phobos per-warhead-type animation creation counters.
     #[cfg(feature = "phobos")]
     #[serde(default)]
@@ -4615,6 +4622,7 @@ impl Simulation {
             terrain_objects: Default::default(),
             ore_growth_config: crate::sim::ore_growth::OreGrowthConfig::disabled(),
             ore_growth_state: crate::sim::ore_growth::OreGrowthState::new(0, 0),
+            script_states: Default::default(),
             session,
             #[cfg(feature = "debug-tools")]
             debug_tools: Default::default(),

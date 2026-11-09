@@ -128,6 +128,7 @@ pub mod scenario_session; // app->sim launch descriptor (per-match seed pipeline
 pub mod score;
 pub(crate) mod secret_lab;
 pub mod sensor_lifecycle;
+pub mod scripting; // sim-layer script extension points (docs/scripting-extension.md)
 pub mod spy_infiltration; // BuildingClass::Infiltrate (a spy's effects on the building it enters)
 pub(crate) mod stage;
 pub use stage::StageClass;
