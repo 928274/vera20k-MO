@@ -519,8 +519,8 @@ mod tests {
 mod source;
 
 pub use source::{
-    ScriptDirectory, ScriptEntry, ScriptFile, ScriptFileKind, ScriptManifest, LEGACY_EXT,
-    MANIFEST_NAME, MODULE_EXT, SCRIPT_DIR,
+    LEGACY_EXT, MANIFEST_NAME, MODULE_EXT, SCRIPT_DIR, SOURCE_EXT, ScriptDirectory, ScriptEntry,
+    ScriptFile, ScriptFileKind, ScriptManifest,
 };
 
 /// Process-wide registry. Native scripts are installed before the first
@@ -543,12 +543,44 @@ mod runtime;
 #[path = "scripting/gbion.rs"]
 mod gbion;
 
+#[path = "scripting/file.rs"]
+mod file;
+
+pub use file::{FileScript, discover as discover_file_scripts};
 pub use gbion::GbionIonShow;
 
-/// Install the built-in native scripts once, before the first frame. A second
-/// call is harmless: the registry is a process-wide OnceLock.
-pub fn install_builtin_scripts() {
+/// Install the script registry once, before the first frame.
+///
+/// File scripts discovered in `<game>/vera20k/DynamicPatcher` are registered
+/// first so a `.rhai` file wins over the built-in copy of the same binding: that
+/// is the whole point of shipping them as editable text. Native scripts fill
+/// the bindings no file provides, so a fresh install (or a file with a syntax
+/// error) still plays the built-in show instead of nothing.
+pub fn install_scripts(directory: Option<&ScriptDirectory>) {
     let mut registry = ScriptRegistry::new();
-    registry.register(Box::new(GbionIonShow));
-    let _ = install_script_registry(registry);
+    if let Some(directory) = directory {
+        let (scripts, diagnostics) = file::discover(directory);
+        for diagnostic in &diagnostics {
+            log::warn!("script: {diagnostic}");
+        }
+        if !scripts.is_empty() {
+            log::info!(
+                "script: {} file script(s) from {}",
+                scripts.len(),
+                directory.root.display()
+            );
+        }
+        for script in scripts {
+            registry.register(Box::new(script));
+        }
+    }
+    if registry.binding_for(GbionIonShow.binding_name()).is_none() {
+        registry.register(Box::new(GbionIonShow));
+    }
+    if let Err(returned) = install_script_registry(registry) {
+        log::warn!(
+            "script registry already installed; {} script(s) dropped",
+            returned.len()
+        );
+    }
 }

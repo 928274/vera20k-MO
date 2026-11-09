@@ -580,18 +580,20 @@ impl App {
             .as_ref()
             .map(|cfg| u64::from(cfg.gameplay.input_delay_ticks))
             .unwrap_or_else(|| u64::from(crate::util::config::default_input_delay_ticks()));
-        // Native scripts must be installed before the first frame. Stage 2
-        // will install WASM-backed scripts through the same registry.
-        crate::sim::scripting::install_builtin_scripts();
-        // Discover the optional script directory once at startup. Diagnostics
-        // are advisory: a missing or broken directory never prevents launch.
-        if let Some(config) = game_config.as_ref() {
-            let scripts =
-                crate::sim::scripting::ScriptDirectory::discover(&config.paths.ra2_dir);
+        // Scripts must be installed before the first frame. The optional
+        // directory is discovered first: its `.rhai` files are the live copies
+        // of a show, and the native scripts only fill the bindings no file
+        // provides. Diagnostics are advisory: a missing or broken directory
+        // never prevents launch.
+        let script_directory = game_config
+            .as_ref()
+            .map(|config| crate::sim::scripting::ScriptDirectory::discover(&config.paths.ra2_dir));
+        if let Some(scripts) = script_directory.as_ref() {
             if scripts.present {
                 log::info!(
-                    "Script directory {}: {} module(s), {} file(s)",
+                    "Script directory {}: {} source(s), {} module(s), {} file(s)",
                     scripts.root.display(),
+                    scripts.source_count(),
                     scripts.module_count(),
                     scripts.files.len()
                 );
@@ -600,6 +602,7 @@ impl App {
                 log::info!("Script directory: {diagnostic}");
             }
         }
+        crate::sim::scripting::install_scripts(script_directory.as_ref());
         let sidebar_layout_spec = SidebarChromeLayoutSpec::stock();
         let mut startup_asset_manager = game_config.as_ref().and_then(|config| {
             startup_asset_or_error(

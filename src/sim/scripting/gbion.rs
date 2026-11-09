@@ -206,6 +206,7 @@ fn emit_beam(
     from: (i32, i32, i32),
     to: (i32, i32, i32),
     width: i32,
+    duration: i32,
     house: bool,
 ) {
     let color = if house {
@@ -222,7 +223,7 @@ fn emit_beam(
         from: ProjectileCoord::new(from.0, from.1, from.2),
         to: ProjectileCoord::new(to.0, to.1, to.2),
         z_adjust: 0,
-        duration: 2,
+        duration,
         width,
         supported: false,
         color,
@@ -270,7 +271,7 @@ fn beams(show: &mut Show, ctx: &mut ScriptContext<'_>) {
         if show.beams[index] {
             let x = cx + dx;
             let y = cy + dy;
-            emit_beam(ctx, (x, y, cz + BEAM_HEIGHT), (x, y, floor), 4, false);
+            emit_beam(ctx, (x, y, cz + BEAM_HEIGHT), (x, y, floor), 4, 2, false);
             ctx.detonate(
                 "GBIONBeamLowWH",
                 if show.ready > 60 { 120 } else { 20 },
@@ -329,7 +330,16 @@ fn release(show: &mut Show, ctx: &mut ScriptContext<'_>) {
             // `IsHouseColor = true` + `Thickness = 40`: the house-colour arm
             // is the only one that widens by thickness, so these 3x3 parallel
             // beams overlap into one solid column.
-            emit_beam(ctx, (x, y, cz + BEAM_HEIGHT), (x, y, floor), 40, true);
+            // `LaserDuration=30` on the original `GBIONIonBigLaser`: the
+            // column must outlive the single frame that created it.
+            emit_beam(
+                ctx,
+                (x, y, cz + BEAM_HEIGHT),
+                (x, y, floor),
+                40,
+                30,
+                true,
+            );
         }
     }
 

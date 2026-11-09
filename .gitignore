@@ -70,6 +70,10 @@ Thumbs.db
 !/docs/ini-shp-turret-anims.md
 !/docs/scripting-extension.md
 !/docs/scripts.example.json
+# The editable script that the game loads from vera20k/DynamicPatcher at run
+# time; kept in the repository as the reference copy and the test fixture.
+!/docs/scripts/
+!/docs/scripts/GBIONIonShowScript.rhai
 !/docs/phobos-ai-dehardcode.md
 !/docs/phobos-parallel-ai-queues.md
 !/docs/phobos-skirmish-unlimited-colors.md

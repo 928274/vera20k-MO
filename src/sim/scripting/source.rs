@@ -17,7 +17,11 @@ use serde::{Deserialize, Serialize};
 /// stay separate from the original DynamicPatcher's top-level folder.
 pub const SCRIPT_DIR: &str = "vera20k/DynamicPatcher";
 pub const MANIFEST_NAME: &str = "scripts.json";
+/// A compiled module (stage 2b, not loadable yet).
 pub const MODULE_EXT: &str = "wasm";
+/// An editable script source: plain text, re-read from disk when it changes.
+pub const SOURCE_EXT: &str = "rhai";
+/// A DynamicPatcher C# source, kept as a migration reference only.
 pub const LEGACY_EXT: &str = "cs";
 
 /// `scripts.json`: the mapping between a `[Unit] Script=` value and a module
@@ -39,8 +43,10 @@ pub struct ScriptEntry {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScriptFileKind {
-    /// A loadable WASM module (stage 2).
+    /// A loadable WASM module (stage 2b).
     Module,
+    /// An editable script source (`*.rhai`), loaded by `scripting::file`.
+    Source,
     /// A DynamicPatcher C# source file: kept as a migration reference, never
     /// executed by VERA.
     LegacyCSharp,
@@ -114,6 +120,7 @@ impl ScriptDirectory {
                 .and_then(|ext| ext.to_str())
             {
                 Some(ext) if ext.eq_ignore_ascii_case(MODULE_EXT) => ScriptFileKind::Module,
+                Some(ext) if ext.eq_ignore_ascii_case(SOURCE_EXT) => ScriptFileKind::Source,
                 Some(ext) if ext.eq_ignore_ascii_case(LEGACY_EXT) => {
                     ScriptFileKind::LegacyCSharp
                 }
@@ -125,7 +132,7 @@ impl ScriptDirectory {
         for file in &out.files {
             if file.kind == ScriptFileKind::LegacyCSharp {
                 out.diagnostics.push(format!(
-                    "{}: DynamicPatcher C# source; migrate it to a WASM module before it can run",
+                    "{}: DynamicPatcher C# source; port it to a .{SOURCE_EXT} script to run it",
                     file.file_name
                 ));
             }
@@ -133,7 +140,8 @@ impl ScriptDirectory {
         if let Some(manifest) = &out.manifest {
             for entry in &manifest.scripts {
                 let found = out.files.iter().any(|file| {
-                    file.file_name == entry.module && file.kind == ScriptFileKind::Module
+                    file.file_name == entry.module
+                        && matches!(file.kind, ScriptFileKind::Module | ScriptFileKind::Source)
                 });
                 if !found {
                     out.diagnostics.push(format!(
@@ -162,6 +170,14 @@ impl ScriptDirectory {
         self.files
             .iter()
             .filter(|file| file.kind == ScriptFileKind::Module)
+            .count()
+    }
+
+    /// Editable script sources the host can load without recompiling.
+    pub fn source_count(&self) -> usize {
+        self.files
+            .iter()
+            .filter(|file| file.kind == ScriptFileKind::Source)
             .count()
     }
 }
@@ -219,7 +235,7 @@ mod tests {
         assert!(dir
             .diagnostics
             .iter()
-            .any(|d| d.contains("migrate it to a WASM module")));
+            .any(|d| d.contains("port it to a .rhai script")));
         assert!(!dir
             .diagnostics
             .iter()

@@ -88,7 +88,7 @@ Windows 上需先准备 MSVC 14.44 / Windows SDK 10.0.22621 的 `PATH` / `INCLUD
 （替换前建议备份旧 exe）。编译收尾若出现 `reg.exe` 被安全策略拦截，属于编译完成后的
 磁盘检查，不影响产物。
 
-## 脚本化扩展层（阶段 0a）
+## 脚本化扩展层（阶段 0a → 2a）
 
 为「模组用脚本写行为、不必 fork 引擎」预留的引擎能力，首个目标是完整复刻一份
 多幕蓄能演出脚本。设计与分阶段路线见 **`docs/scripting-extension.md`**。
@@ -97,16 +97,21 @@ Windows 上需先准备 MSVC 14.44 / Windows SDK 10.0.22621 的 `PATH` / `INCLUD
   `ScriptContext` + `SimCommand` / `LaserBirth`、`ScriptStateStore`、`ScriptRegistry`）、
   `Simulation::script_states` 字段（`#[serde(default)]`，存档兼容）及单元测试。
 - 架构：扩展点位于 sim 层，表现副作用通过 `LifecycleOutput` 指令下发，保证确定性。
-- **阶段 0a 不改变任何帧行为**：注册表为空、状态表为空。
 - **阶段 0b 已完成**：`src/sim/scripting/runtime.rs` 在 `advance_master_frame` 的固定
   位置按 stable-id 顺序派发 `Update`；`fold_state()` 末尾把 `script_states` 纳入 state
   hash；`app/initialize.rs` 启动时发现脚本目录并输出诊断日志。
-- **阶段 1（首版）已完成**：`src/sim/scripting/gbion.rs` 迁移了四幕蓄能演出
-  （旋转激光 → 蓄力 → 3×3 光柱 + 蓝色照明 + 主波 → 结束）；`ApplyWarhead` 已接到
-  `world_receiver::apply_area_damage` 真实伤害链；启动时 `install_builtin_scripts()`
-  安装注册表。已知差异：触发条件暂用 90 帧 fallback（原版为地震炮命中 2 次）、
-  锚点取单位自身坐标而非跟随目标、对空分支未启用 —— 详见设计文档「阶段 1 实现状态」。
-  **注意：注册表现在非空，派发器每帧会遍历实体**，不再是零开销。
+- **阶段 1 已完成**：`src/sim/scripting/gbion.rs` 迁移了四幕蓄能演出
+  （旋转激光 → 蓄力 → 3×3 光柱 + 蓝色照明 + 主波 → 结束）；`Detonate` 命令复刻
+  `BulletClass::DetonateAtCoord`，动画/音效/震屏/冲击光都来自弹头自身；触发对齐
+  原版（地震炮同目标命中 2 次 / 锁定飞行目标 60 帧），锚点跟随目标、绝不回落自身。
+- **阶段 2a 已完成（本轮）**：演出搬到
+  **`<游戏目录>/vera20k/DynamicPatcher/GBIONIonShowScript.rhai`** —— 文件名即
+  `[Unit] Script=` 绑定名，保存文件后重新造一个单位即生效，不用重编译。
+  解释器是纯 Rust 的 `rhai`，宿主 API 为 `laser` / `laser_rgb` / `detonate` /
+  `damage` / `flash` / `superweapon` / `log` 与几何辅助 `ring_point` 等；
+  状态仍是 `ScriptState` 的 JSON，照旧存档与进 hash。文件缺失或有语法错误时
+  自动回落到内置原生版。
+- **注意：注册表现在非空，派发器每帧会遍历实体**，不再是零开销。
 
 ## 上游构建修复
 

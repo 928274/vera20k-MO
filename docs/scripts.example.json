@@ -1,8 +1,9 @@
 {
+  "_readme": "Optional manifest. A .rhai file already binds by its own file name (GBIONIonShowScript.rhai -> Script=GBIONIonShowScript), so this file is only needed to bind a different name or to point at a .wasm module. See docs/scripting-extension.md.",
   "scripts": [
     {
       "name": "ExampleScript",
-      "module": "example_script.wasm"
+      "module": "example_script.rhai"
     }
   ]
 }

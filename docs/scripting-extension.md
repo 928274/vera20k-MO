@@ -175,7 +175,8 @@ pub struct ScriptContext<'a> {
 | --- | --- | --- |
 | 0（本轮） | 设计文档 + `Script` trait、`ScriptEvent`、`ScriptContext`、`ScriptStateStore`；`advance_tick` 挂事件分发；`GameEntity` 状态字段 | 编译通过；一个最小脚本能收到 `Update` 并存/读状态 |
 | 1 | 用阶段 0 框架完整实现 GBION 4 幕演出（原生脚本） | 游戏内演出与 DP 版一致，伤害确定性可回放 |
-| 2 | WASM ABI + `wasmtime` 加载器 + 帧边界热重载 | 用外部 `.wasm` 复现同一演出，换文件即生效 |
+| 2a（本轮） | 文件脚本 `.rhai`：目录即绑定、热读取、宿主 API | 改脚本文件即改演出，无需重编译 |
+| 2b | WASM ABI + `wasmtime` 加载器 + 帧边界热重载 | 用外部 `.wasm` 复现同一演出，换文件即生效 |
 | 3 | 模组 SDK、文档与示例 | 第三方模组能不 fork 引擎写出脚本 |
 
 ### 阶段 0a 实现状态（本轮）
@@ -235,7 +236,8 @@ pub struct ScriptContext<'a> {
 
 ```
 <游戏目录>/vera20k/DynamicPatcher/
-├── scripts.json                 ← 清单：脚本名 ↔ 模块文件
+├── GBIONIonShowScript.rhai      ← 可编辑脚本，文件名即 Script= 绑定名（阶段 2a）
+├── scripts.json                 ← 可选清单：脚本名 ↔ 文件（覆盖文件名绑定）
 ├── gbion_ion_show.wasm          ← 将来的 WASM 模块，直接平铺
 ├── other_script.wasm
 └── GBIONIonShowScript.cs        ← 现有 DP 源码，留作迁移参考，引擎不加载
@@ -268,23 +270,26 @@ ScriptStateStore / 事件派发              ← 实例状态 + 每帧更新
 名字只产生诊断，绝不阻止类型加载（与之前删掉的 no-op `Script=` 空桩不同，
 这次有真实消费者 `ScriptRegistry::binding_for`）。
 
-### 发现行为（阶段 0a）
+### 发现行为（阶段 0a / 2a）
 
-`ScriptDirectory::discover()` 只做只读扫描与校验，**不加载、不执行**：
+`ScriptDirectory::discover()` 只做只读扫描与校验，**不执行**：
 
 - 目录不存在 / `scripts.json` 缺失 / JSON 非法 / 清单引用了不存在的模块
   → 记入 `diagnostics`，游戏照常启动；
-- `*.cs` → 标为 `LegacyCSharp`，提示"需迁移成 WASM 模块才能运行"；
-- `*.wasm` → 标为 `Module`，是阶段 2 加载器的候选；
+- `*.rhai` → 标为 `Source`，由 `scripting::file` 编译并按需执行；
+- `*.cs` → 标为 `LegacyCSharp`，提示"需迁移成 `.rhai` 脚本才能运行"；
+- `*.wasm` → 标为 `Module`，是阶段 2b 加载器的候选；
 - 文件列表排序后输出，保证诊断在不同文件系统上一致。
 
-**注意**：阶段 0/1 的脚本仍是编译进引擎的原生 Rust，此时把文件放进目录**不会生效**；
-真正从目录加载 WASM 是阶段 2。
+`install_scripts(&ScriptDirectory)` 在启动时把文件脚本装进注册表，再用原生脚本
+补齐文件没有覆盖的绑定；重建注册表是不可能的（进程级 `OnceLock`），因此它是
+"启动时装一次、运行中按文件时间戳重新编译"的模型。
 
 ### 阶段 1 实现状态（首个原生脚本）
 
 `src/sim/scripting/gbion.rs` 完整迁移了四幕演出，`runtime.rs` 把命令接到了真实
-sim 入口，`initialize.rs` 在启动时 `install_builtin_scripts()` 安装注册表。
+sim 入口，`initialize.rs` 在启动时 `install_scripts(...)` 安装注册表（先文件脚本、
+后原生兜底）。
 
 - **状态机**：`Show`（serde → `ScriptState`）保存 `stage / delay / radius / angle /
   line_speed / rot_speed / ready / charge / beams[8]`，加上触发与锚点状态
@@ -322,10 +327,60 @@ sim 入口，`initialize.rs` 在启动时 `install_builtin_scripts()` 安装注�
   取阵营色，`projectile` 是该次 `BulletDetonated` 的抛射体规则名（脚本据此只
   统计 `AAW`）。
 
-**仍与 DP 版有差异**：粗光柱的实际像素宽度取决于阵营色的亮度（`LaserDraw`
-阵营色臂每加宽一圈把 side 色右移一位，过暗即停），换浅色阵营会更粗；
-DP 版还会给中心光束挂 `GBIONION` 枪口动画（`Anim=GBIONION`，自带 `Report`），
-本移植的 `EarthQuake` 开火表现由武器本身的 `Anim=` 提供，未额外补。
+**仍与 DP 版有差异**：DP 版还会给中心光束挂 `GBIONION` 枪口动画
+（`Anim=GBIONION`，自带 `Report`），本移植的 `EarthQuake` 开火表现由武器本身的
+`Anim=` 提供，未额外补。
+
+### 阶段 2a 实现状态（文件脚本 `.rhai`）
+
+把演出从 Rust 搬到 `<游戏目录>/vera20k/DynamicPatcher/*.rhai`：**文件名就是
+`[Unit] Script=` 的绑定名**，保存文件后重新造一个该单位即生效，不需要重编译引擎。
+实现落在 `src/sim/scripting/file.rs`，用 `rhai`（纯 Rust 解释器，无 C 依赖、
+无动态库）解释执行。
+
+- **绑定**：`file::discover()` 扫目录里的 `*.rhai`，`scripts.json` 里的
+  `{name, module}` 可以覆盖文件名（`module` 允许 `.rhai`）；没有清单时用文件名
+  （去扩展名），大小写不敏感。文件脚本先注册，原生脚本只补文件没占用的绑定 ——
+  所以文件坏掉/删掉时仍回落到内置版，不会变成"没有演出"。
+- **入口**（都可选，按 AST 里实际存在的函数决定订阅哪些事件）：
+
+  | 函数 | 触发 | 必须返回 |
+  | --- | --- | --- |
+  | `default_state()` | 新单位第一次派发前 | 初始状态 map |
+  | `on_update(ctx, state)` | 每帧 | 更新后的 state |
+  | `on_detonate(ctx, state)` | 本单位抛射体引爆一次 | 同上 |
+  | `on_constructed(ctx, state)` | 建造完成 | 同上 |
+
+- **`ctx`（只读）**：`event / frame / has_target / air / height / anchor[x,y,z] /
+  target / projectile / impact[x,y,z]`，与原 `ScriptContext` 一一对应。
+- **调参位置**：Rhai 的函数看不到文件顶层作用域，`const` 因此**不能**在函数里用；
+  可调参数统一写在 `fn cfg() { #{ ... } }` 里，各幕开头 `let cfg = cfg();`。
+  写错时不会在编译期报错，只会在运行时抛"变量未找到"，所以仓库里那条跑真题的单测
+  （见下）是必要的保险。
+- **宿主函数**：`laser(from, to, width, duration)`（阵营色，只有它按 width 加宽）、
+  `laser_rgb(...)`（显式色）、`detonate(warhead, damage, coord)`（= DP 的
+  `CreateBullet(..).Detonate`）、`damage(...)`（纯伤害）、
+  `flash(sw, frames)`、`superweapon(name, cx, cy)`、`log(text)`，以及整数几何
+  `ring_point / cos_int / sin_int / cell_center`（内部用 `libm`，跨平台结果一致）。
+  所有效果仍写进同一个 `ScriptContext` 命令队列，**脚本不接触世界对象**。
+- **状态**：`state` 是 rhai map，宿主每次调用前后在 `ScriptState` 的 JSON 字节之间
+  转换，因此照旧存档、参与 state hash。非法的 state 值不会被写回。
+- **热读取**：每次派发前 `metadata().modified()` 比对缓存，时间戳变了就重编译；
+  启动时还会把每个文件编译一遍，语法错误直接进日志（带行号），不拖到战斗中。
+- **安全阀**：`set_max_operations(200_000)` / `max_call_levels(16)` /
+  `max_expr_depths(64, 32)` —— 脚本里写出死循环只会报错，不会卡住 tick。
+- **仓库内真题**：`docs/scripts/GBIONIonShowScript.rhai` 是移植后的完整演出，
+  并有单测 `the_shipped_gbion_script_plays_all_three_acts` 真正跑它——引擎没法给
+  脚本做类型检查，这条测试就是它的编译期保护。
+
+**这一轮顺带修掉的两个视觉问题**（都写进脚本参数里了）：
+
+1. **粗光柱消失太快**：首版 `LaserDuration` 写成 2 帧。`[GBIONIonBigLaser]
+   LaserDuration=30`，脚本现在用 `COLUMN_DURATION = 30`。
+2. **粗光柱偏细**：`render/laser.rs` 阵营色臂每加宽一圈把 side 色右移一位，
+   宽度 40 时几圈就掉到全黑提前 `break`，等于把 thickness 丢掉。现在
+   `width > 8` 的光柱改成在全部圈数上线性衰减（零售宽度 1–5 的路径逐字节不变），
+   40 圈才画得出实心柱体。`COLUMN_WIDTH` 默认仍按原脚本的 40，可自行调大。
 
 ## 十、风险与约束
 
