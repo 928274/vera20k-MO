@@ -30,6 +30,9 @@ impl Simulation {
         overlay_registry: Option<&OverlayTypeRegistry>,
         effects: FrameEffects<'_>,
     ) {
+        // One-frame channel: drain it even when no script is installed, so a
+        // long battle cannot grow the list without bound.
+        let hits = std::mem::take(&mut self.script_bullet_hits);
         let registry = script_registry();
         if registry.is_empty() {
             return;
@@ -42,12 +45,12 @@ impl Simulation {
         // contract.
         //
         // The anchor is the scripted Techno's *target* (`GetCoords` of the
-        // Techno's `Target`), falling back to the entity itself when it holds
-        // none; `is_air_target` is that target's `GetHeight() > 0`. The
-        // DynamicPatcher original re-read both every frame, which is why the
-        // presentation follows a moving target.
+        // Techno's `Target`), and `has_target` says whether there is one at
+        // all: the DynamicPatcher original reads `Owner.Ref.Target` every
+        // frame and never falls back to the owner's own coords, so a show
+        // must not be able to detonate on the caster.
         let terrain = self.resolved_terrain.as_ref();
-        let mut bound: Vec<(u64, InternedId, (i32, i32, i32), bool, i32)> = Vec::new();
+        let mut bound: Vec<BoundEntity> = Vec::new();
         for entity in self.substrate.entities.values() {
             let Some(object) = self.interner.object_type(entity.type_ref(), rules) else {
                 continue;
@@ -55,54 +58,75 @@ impl Simulation {
             let Some(binding) = object.script.as_deref() else {
                 continue;
             };
-            if registry.binding_for(binding).is_some() {
-                let own = crate::sim::movement::ground_pose::object_get_coords(entity, terrain);
-                let mut anchor = (own.x, own.y, own.z);
-                let mut is_air_target = false;
-                let mut target_height = 0;
-                match entity.attack_target.target() {
-                    Some(crate::sim::combat::TargetKind::Entity(id)) => {
-                        if let Some(target) = self.substrate.entities.get(id) {
-                            let coord = crate::sim::movement::ground_pose::object_get_coords(
-                                target, terrain,
-                            );
-                            anchor = (coord.x, coord.y, coord.z);
-                            target_height = crate::sim::movement::air_movement::current_fly_height(
-                                target, terrain,
-                            );
-                            is_air_target = target_height > 0;
-                        }
-                    }
-                    Some(crate::sim::combat::TargetKind::Cell(rx, ry)) => {
-                        let x = i32::from(rx) * LEPTONS_PER_CELL + LEPTONS_PER_CELL / 2;
-                        let y = i32::from(ry) * LEPTONS_PER_CELL + LEPTONS_PER_CELL / 2;
-                        let z = crate::sim::projectile::projectile_ground_z(
-                            terrain,
-                            &self.effective_shared_cell_dummy(),
-                            ProjectileCoord::new(x, y, 0),
-                        );
-                        anchor = (x, y, z);
-                    }
-                    None => {}
-                }
-                bound.push((
-                    entity.stable_id(),
-                    entity.owner(),
-                    anchor,
-                    is_air_target,
-                    target_height,
-                ));
+            if registry.binding_for(binding).is_none() {
+                continue;
             }
+            let mut facts = BoundEntity {
+                entity: entity.stable_id(),
+                owner: entity.owner(),
+                anchor: (0, 0, 0),
+                target_height: 0,
+                is_air_target: false,
+                has_target: false,
+                target_entity: None,
+            };
+            match entity.attack_target.target() {
+                Some(crate::sim::combat::TargetKind::Entity(id)) => {
+                    if let Some(target) = self.substrate.entities.get(id) {
+                        let coord = crate::sim::movement::ground_pose::object_get_coords(
+                            target, terrain,
+                        );
+                        facts.anchor = (coord.x, coord.y, coord.z);
+                        facts.target_height =
+                            crate::sim::movement::air_movement::current_fly_height(target, terrain);
+                        facts.is_air_target = facts.target_height > 0;
+                        facts.target_entity = Some(id);
+                        facts.has_target = true;
+                    }
+                }
+                Some(crate::sim::combat::TargetKind::Cell(rx, ry)) => {
+                    let x = i32::from(rx) * LEPTONS_PER_CELL + LEPTONS_PER_CELL / 2;
+                    let y = i32::from(ry) * LEPTONS_PER_CELL + LEPTONS_PER_CELL / 2;
+                    let z = crate::sim::projectile::projectile_ground_z(
+                        terrain,
+                        &self.effective_shared_cell_dummy(),
+                        ProjectileCoord::new(x, y, 0),
+                    );
+                    facts.anchor = (x, y, z);
+                    facts.has_target = true;
+                }
+                None => {}
+            }
+            bound.push(facts);
         }
-        bound.sort_unstable_by_key(|(id, _, _, _, _)| *id);
+        bound.sort_unstable_by_key(|facts| facts.entity);
 
-        for (entity, owner, anchor, is_air_target, target_height) in bound {
-            let mut ctx = ScriptContext::new(rules, frame);
-            ctx.anchor = anchor;
-            ctx.is_air_target = is_air_target;
-            ctx.target_height = target_height;
-            ctx.has_target = true;
-            let event = ScriptEvent::Update { entity, frame };
+        // Detonations the logic steps committed this tick, in detonation
+        // order: the DynamicPatcher scripts polled their own bullets for
+        // exactly these events.
+        for hit in hits {
+            let Some(facts) = bound.iter().find(|facts| facts.entity == hit.owner) else {
+                continue;
+            };
+            let projectile = self.interner.resolve(hit.projectile).to_owned();
+            let mut ctx = facts.context(rules, frame);
+            ctx.projectile = Some(&projectile);
+            let event = ScriptEvent::BulletDetonated {
+                owner: hit.owner,
+                projectile: hit.projectile,
+                impact: hit.impact,
+            };
+            let ScriptContext { commands, .. } =
+                registry.dispatch_with(&event, &mut self.script_states, ctx);
+            self.run_script_commands(commands, facts.owner, rules, overlay_registry, effects);
+        }
+
+        for facts in bound {
+            let ctx = facts.context(rules, frame);
+            let event = ScriptEvent::Update {
+                entity: facts.entity,
+                frame,
+            };
             let ScriptContext {
                 commands, lasers, ..
             } = registry.dispatch_with(&event, &mut self.script_states, ctx);
@@ -114,72 +138,111 @@ impl Simulation {
                     .emit(LifecycleOutput::LaserCreated(birth));
             }
 
-            for command in commands {
-                match command {
-                    SimCommand::FireSuperWeapon {
-                        super_weapon,
+            self.run_script_commands(commands, facts.owner, rules, overlay_registry, effects);
+        }
+    }
+
+    /// Execute a script's queued side effects in the order the script built
+    /// them. Split out so both `Update` and `BulletDetonated` run the same
+    /// chain.
+    fn run_script_commands(
+        &mut self,
+        commands: Vec<SimCommand>,
+        owner: InternedId,
+        rules: &RuleSet,
+        overlay_registry: Option<&OverlayTypeRegistry>,
+        effects: FrameEffects<'_>,
+    ) {
+        for command in commands {
+            match command {
+                SimCommand::FireSuperWeapon {
+                    super_weapon,
+                    cell,
+                } => {
+                    let sw_id = self.interner.intern(&super_weapon);
+                    self.fire_super_weapon(
+                        rules,
+                        owner,
+                        sw_id,
                         cell,
-                    } => {
-                        let sw_id = self.interner.intern(&super_weapon);
-                        self.fire_super_weapon(
-                            rules,
-                            owner,
-                            sw_id,
-                            cell,
-                            overlay_registry,
-                            effects,
-                            true,
-                        );
-                    }
-                    SimCommand::ApplyWarhead {
-                        warhead,
+                        overlay_registry,
+                        effects,
+                        true,
+                    );
+                }
+                SimCommand::ApplyWarhead {
+                    warhead,
+                    damage,
+                    coord,
+                } => {
+                    // Same call shape as AnimClass's own DetonateAt path:
+                    // (RAD_NO_ATTACKER, source house, warhead id).
+                    let Some(warhead_type) = rules.warhead(&warhead) else {
+                        log::debug!("script warhead '{warhead}' is not registered; skipped");
+                        continue;
+                    };
+                    let warhead_id = self.interner.intern(&warhead);
+                    apply_area_damage(
+                        self,
+                        rules,
+                        overlay_registry,
+                        ProjectileCoord::new(coord.0, coord.1, coord.2),
                         damage,
-                        coord,
-                    } => {
-                        // Same call shape as AnimClass's own DetonateAt path:
-                        // (RAD_NO_ATTACKER, source house, warhead id).
-                        let Some(warhead_type) = rules.warhead(&warhead) else {
-                            log::debug!("script warhead '{warhead}' is not registered; skipped");
-                            continue;
-                        };
-                        let warhead_id = self.interner.intern(&warhead);
-                        apply_area_damage(
-                            self,
-                            rules,
-                            overlay_registry,
-                            ProjectileCoord::new(coord.0, coord.1, coord.2),
-                            damage,
-                            warhead_type,
-                            true,
-                            (RAD_NO_ATTACKER, Some(owner), warhead_id),
-                            effects,
-                        );
-                    }
-                    SimCommand::Detonate {
-                        warhead,
+                        warhead_type,
+                        true,
+                        (RAD_NO_ATTACKER, Some(owner), warhead_id),
+                        effects,
+                    );
+                }
+                SimCommand::Detonate {
+                    warhead,
+                    damage,
+                    coord,
+                } => {
+                    detonate_invisible_bullet(
+                        self,
+                        rules,
+                        overlay_registry,
+                        &warhead,
                         damage,
-                        coord,
-                    } => {
-                        detonate_invisible_bullet(
-                            self,
-                            rules,
-                            overlay_registry,
-                            &warhead,
-                            damage,
-                            ProjectileCoord::new(coord.0, coord.1, coord.2),
-                            owner,
-                            effects,
-                        );
-                    }
-                    SimCommand::NukeFlash {
-                        super_weapon,
-                        frames,
-                    } => {
-                        start_super_weapon_light(self, rules, &super_weapon, frames);
-                    }
+                        ProjectileCoord::new(coord.0, coord.1, coord.2),
+                        owner,
+                        effects,
+                    );
+                }
+                SimCommand::NukeFlash {
+                    super_weapon,
+                    frames,
+                } => {
+                    start_super_weapon_light(self, rules, &super_weapon, frames);
                 }
             }
         }
+    }
+}
+
+/// One scripted entity's facts for this frame.
+#[derive(Debug, Clone, Copy)]
+struct BoundEntity {
+    entity: u64,
+    owner: InternedId,
+    anchor: (i32, i32, i32),
+    target_height: i32,
+    is_air_target: bool,
+    has_target: bool,
+    target_entity: Option<u64>,
+}
+
+impl BoundEntity {
+    fn context<'a>(self, rules: &'a RuleSet, frame: i32) -> ScriptContext<'a> {
+        let mut ctx = ScriptContext::new(rules, frame);
+        ctx.owner = self.owner;
+        ctx.anchor = self.anchor;
+        ctx.target_height = self.target_height;
+        ctx.is_air_target = self.is_air_target;
+        ctx.has_target = self.has_target;
+        ctx.target_entity = self.target_entity;
+        ctx
     }
 }
 

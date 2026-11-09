@@ -32,35 +32,74 @@ impl Script for GbionIonShow {
         let mut show: Show = serde_json::from_slice(&state.0).unwrap_or_default();
 
         match event {
-            ScriptEvent::BulletDetonated { .. } => {
-                // The original script polls BulletClass.Array for its AAW
-                // projectiles disappearing, then triggers after two hits. The
-                // sim now delivers the detonation directly.
-                if !show.active && show.quake_hits < QUAKE_HITS_TO_SHOW {
+            ScriptEvent::BulletDetonated { impact, .. } => {
+                // The original polled `BulletClass.Array` for its own AAW
+                // shells leaving the active list; the sim reports that same
+                // moment here. Two hits on one target start the show.
+                if !show.active
+                    && ctx
+                        .projectile
+                        .is_some_and(|name| name.eq_ignore_ascii_case(QUAKE_PROJECTILE))
+                {
+                    if show.quake_target != ctx.target_entity {
+                        show.quake_hits = 0;
+                        show.quake_target = ctx.target_entity;
+                    }
+                    if ctx.has_target {
+                        latch(&mut show, ctx);
+                    } else {
+                        // No live target: the shell's own impact is the only
+                        // truthful centre, and it is never the caster.
+                        show.center = *impact;
+                        show.height = 0;
+                        show.air = false;
+                    }
                     show.quake_hits += 1;
+                    if show.quake_hits >= QUAKE_HITS_TO_SHOW {
+                        start(&mut show);
+                    }
                 }
             }
             ScriptEvent::Update { .. } => {
-                if !show.active {
-                    // Stage-1 fallback while BulletDetonated dispatch is still
-                    // being wired: keep the presentation observable on units
-                    // that never fire a projectile the sim reports.
+                if show.active {
+                    // Every frame re-reads `Owner.Ref.Target`: the show walks
+                    // with the target, and keeps its last centre if the target
+                    // is gone. It never falls back to the caster.
                     if ctx.has_target {
-                        show.idle_frames += 1;
+                        latch(&mut show, ctx);
                     }
-                    let ready = show.quake_hits >= QUAKE_HITS_TO_SHOW
-                        || show.idle_frames >= FALLBACK_TRIGGER_FRAMES;
-                    if ready {
-                        start(&mut show);
+                    if show.delay > 0 {
+                        show.delay -= 1;
+                    } else {
+                        match show.stage {
+                            1 => beams(&mut show, ctx),
+                            2 => charge(&mut show, ctx),
+                            3 => release(&mut show, ctx),
+                            _ => reset(&mut show),
+                        }
                     }
-                } else if show.delay > 0 {
-                    show.delay -= 1;
                 } else {
-                    match show.stage {
-                        1 => beams(&mut show, ctx),
-                        2 => charge(&mut show, ctx),
-                        3 => release(&mut show, ctx),
-                        _ => reset(&mut show),
+                    // The quake count does not span two targets.
+                    if show.quake_target != ctx.target_entity {
+                        show.quake_hits = 0;
+                        show.quake_target = ctx.target_entity;
+                    }
+                    // The quake gun cannot reach aircraft, so a flying target
+                    // held for AIR_ATTACK_FRAMES is the original's other
+                    // trigger. A target switch or landing restarts the count.
+                    if ctx.has_target && ctx.is_air_target {
+                        if show.air_target != ctx.target_entity {
+                            show.air_frames = 0;
+                            show.air_target = ctx.target_entity;
+                        }
+                        show.air_frames += 1;
+                        if show.air_frames >= AIR_ATTACK_FRAMES {
+                            latch(&mut show, ctx);
+                            start(&mut show);
+                        }
+                    } else {
+                        show.air_frames = 0;
+                        show.air_target = None;
                     }
                 }
             }
@@ -71,11 +110,14 @@ impl Script for GbionIonShow {
     }
 }
 
+const QUAKE_PROJECTILE: &str = "AAW";
 const QUAKE_HITS_TO_SHOW: i32 = 2;
-const FALLBACK_TRIGGER_FRAMES: i32 = 90;
+const AIR_ATTACK_FRAMES: i32 = 60;
 const BLUE_INNER: [u8; 3] = [0, 35, 180];
 const BLUE_SPREAD: [u8; 3] = [0, 20, 90];
 const BEAM_HEIGHT: i32 = 50_000;
+/// 256 leptons per cell, same as `Position::rx/ry` and `Coord2Cell`.
+const LEPTONS_PER_CELL: i32 = 256;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Show {
@@ -89,8 +131,18 @@ struct Show {
     ready: i32,
     charge: i32,
     beams: [bool; 8],
+    /// Quake shells that have gone off on the current target.
     quake_hits: i32,
-    idle_frames: i32,
+    /// Target the quake count belongs to; a switch clears the count.
+    quake_target: Option<u64>,
+    /// Frames a flying target has been held (second trigger).
+    air_frames: i32,
+    air_target: Option<u64>,
+    /// Latched target coords in leptons, with its `GetHeight()`: the ground
+    /// under an air target sits `center.2 - height`.
+    center: (i32, i32, i32),
+    height: i32,
+    air: bool,
 }
 
 impl Default for Show {
@@ -107,9 +159,21 @@ impl Default for Show {
             charge: 0,
             beams: [false; 8],
             quake_hits: 0,
-            idle_frames: 0,
+            quake_target: None,
+            air_frames: 0,
+            air_target: None,
+            center: (0, 0, 0),
+            height: 0,
+            air: false,
         }
     }
+}
+
+/// `center = target.GetCoords(); height = target.GetHeight()`.
+fn latch(show: &mut Show, ctx: &ScriptContext<'_>) {
+    show.center = ctx.anchor;
+    show.height = ctx.target_height;
+    show.air = ctx.is_air_target;
 }
 
 fn start(show: &mut Show) {
@@ -124,16 +188,35 @@ fn start(show: &mut Show) {
     show.charge = 0;
     show.beams = [false; 8];
     show.quake_hits = 0;
-    show.idle_frames = 0;
+    show.air_frames = 0;
 }
 
 fn reset(show: &mut Show) {
     show.active = false;
     show.stage = 0;
-    show.idle_frames = 0;
+    show.air_frames = 0;
 }
 
-fn emit_beam(ctx: &mut ScriptContext<'_>, from: (i32, i32, i32), to: (i32, i32, i32), width: i32) {
+/// `GameCreateLaser` with the script's `Thickness`. `house` selects
+/// `IsHouseColor = true`: only the house-colour arm of the beam draw widens by
+/// thickness, which is why the original's 3x3 release beams are a solid column
+/// while the act-1 ring stays a hairline.
+fn emit_beam(
+    ctx: &mut ScriptContext<'_>,
+    from: (i32, i32, i32),
+    to: (i32, i32, i32),
+    width: i32,
+    house: bool,
+) {
+    let color = if house {
+        LaserColor::House(ctx.owner)
+    } else {
+        LaserColor::Explicit {
+            inner: BLUE_INNER,
+            outer: BLUE_INNER,
+            spread: BLUE_SPREAD,
+        }
+    };
     ctx.emit_laser(LaserBirth {
         frame: ctx.frame,
         from: ProjectileCoord::new(from.0, from.1, from.2),
@@ -142,11 +225,7 @@ fn emit_beam(ctx: &mut ScriptContext<'_>, from: (i32, i32, i32), to: (i32, i32, 
         duration: 2,
         width,
         supported: false,
-        color: LaserColor::Explicit {
-            inner: BLUE_INNER,
-            outer: BLUE_INNER,
-            spread: BLUE_SPREAD,
-        },
+        color,
         fade_start: NativeF32Bits::ONE,
         fade_end: NativeF32Bits::POSITIVE_ZERO,
     });
@@ -179,9 +258,9 @@ fn beams(show: &mut Show, ctx: &mut ScriptContext<'_>) {
         }
     }
 
-    let (cx, cy, cz) = ctx.anchor;
+    let (cx, cy, cz) = show.center;
     // GetCoords Z less GetHeight: the ground under an air target.
-    let floor = cz - ctx.target_height;
+    let floor = cz - show.height;
     let mut index = 0usize;
     for step in 0..8 {
         let degrees = show.angle + step * 45;
@@ -191,12 +270,7 @@ fn beams(show: &mut Show, ctx: &mut ScriptContext<'_>) {
         if show.beams[index] {
             let x = cx + dx;
             let y = cy + dy;
-            emit_beam(
-                ctx,
-                (x, y, cz + BEAM_HEIGHT),
-                (x, y, floor),
-                4,
-            );
+            emit_beam(ctx, (x, y, cz + BEAM_HEIGHT), (x, y, floor), 4, false);
             ctx.detonate(
                 "GBIONBeamLowWH",
                 if show.ready > 60 { 120 } else { 20 },
@@ -223,8 +297,8 @@ fn beams(show: &mut Show, ctx: &mut ScriptContext<'_>) {
 /// Act 2: charge, with the zero-damage charge warhead at frame 5.
 fn charge(show: &mut Show, ctx: &mut ScriptContext<'_>) {
     if show.charge == 5 {
-        let (x, y, z) = ctx.anchor;
-        ctx.detonate("GBIONChargeWH", 0, (x, y, z - ctx.target_height));
+        let (x, y, z) = show.center;
+        ctx.detonate("GBIONChargeWH", 0, (x, y, z - show.height));
     }
     show.charge += 1;
     if show.charge >= 20 {
@@ -234,9 +308,12 @@ fn charge(show: &mut Show, ctx: &mut ScriptContext<'_>) {
 
 /// Act 3: lighting superweapon, a 3x3 bundle of thick beams, and the main wave.
 fn release(show: &mut Show, ctx: &mut ScriptContext<'_>) {
-    let (cx, cy, cz) = ctx.anchor;
-    // GetCoords Z less GetHeight: the ground under an air target.
-    let floor = cz - ctx.target_height;
+    let (cx, cy, cz) = show.center;
+    let floor = cz - show.height;
+    // `beamCenter = Cell2Coord(Coord2Cell(center), center.Z)`: the beams and
+    // the explosion anim both snap to the same cell, so they stay aligned.
+    let cell_x = cx.div_euclid(LEPTONS_PER_CELL) * LEPTONS_PER_CELL + LEPTONS_PER_CELL / 2;
+    let cell_y = cy.div_euclid(LEPTONS_PER_CELL) * LEPTONS_PER_CELL + LEPTONS_PER_CELL / 2;
 
     // The blue map lighting. The original launched a `Type=MultiMissile`
     // superweapon whose payload cannot spawn, so its only effect was the
@@ -247,18 +324,21 @@ fn release(show: &mut Show, ctx: &mut ScriptContext<'_>) {
     const OFFSETS: [i32; 3] = [-20, 0, 20];
     for ox in OFFSETS {
         for oy in OFFSETS {
-            let x = cx + ox;
-            let y = cy + oy;
-            emit_beam(ctx, (x, y, cz + BEAM_HEIGHT), (x, y, floor), 40);
+            let x = cell_x + ox;
+            let y = cell_y + oy;
+            // `IsHouseColor = true` + `Thickness = 40`: the house-colour arm
+            // is the only one that widens by thickness, so these 3x3 parallel
+            // beams overlap into one solid column.
+            emit_beam(ctx, (x, y, cz + BEAM_HEIGHT), (x, y, floor), 40, true);
         }
     }
 
-    if ctx.is_air_target {
-        ctx.detonate("GBIONWaveAirWH", 700, (cx, cy, cz));
+    if show.air {
+        ctx.detonate("GBIONWaveAirWH", 700, (cell_x, cell_y, cz));
     }
     // NUKEANIM plus ShakeX/Y=20: the explosion animation, its Report sound
     // and the screen shake all come from this detonation.
-    ctx.detonate("GBIONWaveWH", 700, (cx, cy, floor));
+    ctx.detonate("GBIONWaveWH", 700, (cell_x, cell_y, floor));
 
     show.stage = 4;
 }
@@ -267,37 +347,88 @@ fn release(show: &mut Show, ctx: &mut ScriptContext<'_>) {
 mod tests {
     use super::*;
     use crate::rules::ruleset::RuleSet;
+    use crate::sim::intern::InternedId;
     use crate::sim::scripting::{ScriptRegistry, ScriptStateStore, SimCommand};
 
+    const SELF: u64 = 7;
+    const TARGET: u64 = 9;
+    const AIM: (i32, i32, i32) = (1000, 2000, 0);
+
+    fn context<'a>(rules: &'a RuleSet, frame: i32) -> ScriptContext<'a> {
+        let mut ctx = ScriptContext::new(rules, frame);
+        ctx.has_target = true;
+        ctx.target_entity = Some(TARGET);
+        ctx.anchor = AIM;
+        ctx
+    }
+
+    fn quake_hit(registry: &ScriptRegistry, states: &mut ScriptStateStore, frame: i32) {
+        let rules = RuleSet::empty_for_test();
+        let mut ctx = context(&rules, frame);
+        ctx.projectile = Some("AAW");
+        registry.dispatch_with(
+            &ScriptEvent::BulletDetonated {
+                owner: SELF,
+                projectile: InternedId::default(),
+                impact: (500, 600, 0),
+            },
+            states,
+            ctx,
+        );
+    }
+
     #[test]
-    fn show_advances_through_all_four_acts_and_resets() {
+    fn two_quake_hits_start_the_show_at_the_target_not_the_caster() {
         let rules = RuleSet::empty_for_test();
         let mut registry = ScriptRegistry::new();
         registry.register(Box::new(GbionIonShow));
         let mut states = ScriptStateStore::default();
-        let entity = 7u64;
+
+        // A held target alone never starts the show: the old fallback did, and
+        // it detonated on the caster during construction.
+        for frame in 0..600 {
+            let out = registry.dispatch_with(
+                &ScriptEvent::Update {
+                    entity: SELF,
+                    frame,
+                },
+                &mut states,
+                context(&rules, frame),
+            );
+            assert!(
+                out.commands.is_empty() && out.lasers.is_empty(),
+                "no presentation without a quake hit"
+            );
+        }
+
+        quake_hit(&registry, &mut states, 600);
+        quake_hit(&registry, &mut states, 601);
 
         let mut saw_lasers = false;
         let mut saw_detonation = false;
         let mut saw_flash = false;
-        for frame in 0..400 {
-            let mut ctx = ScriptContext::new(&rules, frame);
-            ctx.has_target = true;
-            ctx.anchor = (1000, 2000, 0);
+        for frame in 602..1000 {
             let out = registry.dispatch_with(
-                &ScriptEvent::Update { entity, frame },
+                &ScriptEvent::Update {
+                    entity: SELF,
+                    frame,
+                },
                 &mut states,
-                ctx,
+                context(&rules, frame),
             );
             saw_lasers |= !out.lasers.is_empty();
-            saw_detonation |= out
-                .commands
-                .iter()
-                .any(|c| matches!(c, SimCommand::Detonate { .. }));
-            saw_flash |= out
-                .commands
-                .iter()
-                .any(|c| matches!(c, SimCommand::NukeFlash { .. }));
+            for command in &out.commands {
+                if let SimCommand::Detonate { coord, .. } = command {
+                    // Never the caster's own coords (the latched target plus
+                    // the ring offsets, never the entity's position).
+                    assert!(
+                        (coord.0 - AIM.0).abs() <= 200 && (coord.1 - AIM.1).abs() <= 200,
+                        "detonation at {coord:?} is not on the target"
+                    );
+                    saw_detonation = true;
+                }
+                saw_flash |= matches!(command, SimCommand::NukeFlash { .. });
+            }
         }
         assert!(saw_lasers, "act 1/3 must emit laser births");
         assert!(
@@ -306,5 +437,49 @@ mod tests {
         );
         assert!(saw_flash, "act 3 must start the blue map lighting");
         assert_eq!(registry.binding_for("gbionionshowscript"), Some(ScriptId(1)));
+    }
+
+    #[test]
+    fn a_lone_quake_hit_without_a_target_anchors_on_the_impact() {
+        let rules = RuleSet::empty_for_test();
+        let mut registry = ScriptRegistry::new();
+        registry.register(Box::new(GbionIonShow));
+        let mut states = ScriptStateStore::default();
+
+        for frame in 0..2 {
+            let mut ctx = ScriptContext::new(&rules, frame);
+            ctx.projectile = Some("AAW");
+            registry.dispatch_with(
+                &ScriptEvent::BulletDetonated {
+                    owner: SELF,
+                    projectile: InternedId::default(),
+                    impact: (3000, 4000, 0),
+                },
+                &mut states,
+                ctx,
+            );
+        }
+
+        let mut first = None;
+        for frame in 2..40 {
+            let mut ctx = ScriptContext::new(&rules, frame);
+            ctx.projectile = Some("AAW");
+            let out = registry.dispatch_with(
+                &ScriptEvent::Update {
+                    entity: SELF,
+                    frame,
+                },
+                &mut states,
+                ctx,
+            );
+            if let Some(SimCommand::Detonate { coord, .. }) = out.commands.first() {
+                first = Some(*coord);
+            }
+        }
+        let coord = first.expect("act 1 must detonate");
+        assert!(
+            (coord.0 - 3000).abs() <= 200 && (coord.1 - 4000).abs() <= 200,
+            "impact {coord:?} must anchor the show when no target is held"
+        );
     }
 }

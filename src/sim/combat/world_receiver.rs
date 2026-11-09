@@ -4392,6 +4392,18 @@ pub(crate) fn commit_projectile_detonations_inline(
             .payload
             .projectile_type()
             .and_then(|projectile| rules.projectile(world.interner.resolve(projectile)));
+        // One script event per shot, not per cluster: the DynamicPatcher
+        // scripts poll their own bullets leaving the active array, which is
+        // this same "the shot went off" moment.
+        if let Some(projectile) = detonation.payload.projectile_type() {
+            world
+                .script_bullet_hits
+                .push(crate::sim::scripting::BulletHit {
+                    owner: detonation.source_id,
+                    projectile,
+                    impact: (detonation.impact.x, detonation.impact.y, detonation.impact.z),
+                });
+        }
         // A death weapon and a Phobos instant AttachEffect shot both skip the
         // BulletClass cluster loop and its draws.
         let single_detonation = matches!(

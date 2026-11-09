@@ -70,6 +70,11 @@ pub enum ScriptEvent {
     BulletDetonated {
         owner: EntityId,
         projectile: InternedId,
+        /// Where the bullet went off, in world leptons. The DynamicPatcher
+        /// original read its target's coords at this moment; a detonation's
+        /// impact is never the shooter's own position, so it is the safer
+        /// anchor when no target is held.
+        impact: (i32, i32, i32),
     },
     Damaged {
         entity: EntityId,
@@ -103,6 +108,19 @@ impl ScriptEvent {
             Self::Destroyed { .. } => EventMask::DESTROYED,
         }
     }
+}
+
+/// One projectile detonation reported to the script layer this tick.
+///
+/// `world_receiver::commit_projectile_detonations_inline` pushes one per
+/// detonation; `dispatch_script_frame` drains the list into `BulletDetonated`.
+/// A one-frame channel like the presentation ones, so it is never saved and
+/// never part of the state hash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BulletHit {
+    pub owner: EntityId,
+    pub projectile: InternedId,
+    pub impact: (i32, i32, i32),
 }
 
 /// A script's per-entity state. Opaque bytes: stage 0 native scripts choose
@@ -213,13 +231,22 @@ pub enum SimCommand {
 pub struct ScriptContext<'a> {
     pub rules: &'a RuleSet,
     pub frame: i32,
-    /// World-space anchor of the subject entity, in leptons.
+    /// The scripted entity's owner house. Lasers drawn in house colour need it.
+    pub owner: InternedId,
+    /// World-space anchor of the subject's *target*, in leptons. Only
+    /// meaningful while [`Self::has_target`]; never the subject itself, so a
+    /// script that damages at `anchor` cannot hit its own owner.
     pub anchor: (i32, i32, i32),
     /// `GetHeight()` of the anchor: the ground under an air target sits
     /// `anchor.2 - target_height`.
     pub target_height: i32,
     pub is_air_target: bool,
+    /// `TechnoClass+0x2B4` is non-null and names a live target.
     pub has_target: bool,
+    /// Stable id of the target object, when the target is an object.
+    pub target_entity: Option<EntityId>,
+    /// Rule name of the projectile for `BulletDetonated`; `None` otherwise.
+    pub projectile: Option<&'a str>,
     /// Deterministic side effects, executed by the host after dispatch.
     pub commands: Vec<SimCommand>,
     /// Presentation-only side effects, emitted into the frame channel.
@@ -231,10 +258,13 @@ impl<'a> ScriptContext<'a> {
         Self {
             rules,
             frame,
+            owner: InternedId::default(),
             anchor: (0, 0, 0),
             target_height: 0,
             is_air_target: false,
             has_target: false,
+            target_entity: None,
+            projectile: None,
             commands: Vec::new(),
             lasers: Vec::new(),
         }

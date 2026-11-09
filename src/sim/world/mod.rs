@@ -1597,6 +1597,11 @@ pub struct Simulation {
     /// unchanged. See `docs/scripting-extension.md`.
     #[serde(default)]
     pub(crate) script_states: crate::sim::scripting::ScriptStateStore,
+    /// Projectile detonations committed this tick, drained by
+    /// `dispatch_script_frame` into `ScriptEvent::BulletDetonated`. A
+    /// one-frame channel: never saved, never hashed.
+    #[serde(skip)]
+    pub(crate) script_bullet_hits: Vec<crate::sim::scripting::BulletHit>,
     /// Phobos per-warhead-type animation creation counters.
     #[cfg(feature = "phobos")]
     #[serde(default)]
@@ -4623,6 +4628,7 @@ impl Simulation {
             ore_growth_config: crate::sim::ore_growth::OreGrowthConfig::disabled(),
             ore_growth_state: crate::sim::ore_growth::OreGrowthState::new(0, 0),
             script_states: Default::default(),
+            script_bullet_hits: Vec::new(),
             session,
             #[cfg(feature = "debug-tools")]
             debug_tools: Default::default(),
