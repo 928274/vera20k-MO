@@ -1832,6 +1832,9 @@ fn hash_entity(entity: &GameEntity, frame: u32, hasher: &mut StateHasher) {
         entity.sinking.hash(hasher);
     }
     entity.is_mission_only().hash(hasher);
+    if entity.on_carryall.get() {
+        b"foot-on-carryall-v1".hash(hasher);
+    }
     entity.move_sound.countdown().hash(hasher);
     entity.position.rx().hash(hasher);
     entity.position.ry().hash(hasher);
@@ -2712,6 +2715,10 @@ fn hash_locomotor_payload(
         }
         LocomotorRuntimePayload::Jumpjet(state) => {
             10u8.hash(hasher);
+            state.hash(hasher);
+        }
+        LocomotorRuntimePayload::Tunnel(state) => {
+            11u8.hash(hasher);
             state.hash(hasher);
         }
     }

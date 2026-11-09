@@ -64,6 +64,9 @@ Supported extensions:
 - [EVA voice tags and Side selection](ares-eva.md)
 - [Per-type promotion sounds](ares-promotion-sounds.md)
   (`Promote.VeteranSound`, `Promote.EliteSound`)
+- [Subterranean dig effects](ares-subterranean.md) (`DigIn`, `DigOut`,
+  `DigInSound`, `DigOutSound`) on the stock Tunnel locomotor, which every
+  build ports for mods that select it
 - [Finite infantry ammo](../src/sim/ammo.rs): Ares' Infantry reload dispatch
   runs through the shared Techno reload owner before the scatter/fire suffix,
   and per-weapon `Ammo` shares one count across admission, debit and reload
@@ -196,8 +199,7 @@ Supported extensions:
   passive acquisition, `CivilianEnemy`, damage smoke and sparks,
   `CrashSpin`, `PassengerTurret`, self-healing rates and combat delay, fall
   rates, `AirRate`, `NoManualUnload`/`NoManualEnter`, the Desolator, cow and
-  bomb roles, drain keys and building reload. Carryall totes remain outside
-  this chain.
+  bomb roles, drain keys and building reload.
 - [Superweapon retail types](ares-superweapon-types.md): Ares handlers for
   the Chronosphere and ChronoWarp (`Chronosphere.*`, `Chronoshift.*`), Nuke
   (`Nuke.*`, `NukeFlash.Duration`, `PreImpactAnim`), Psychic Dominator
@@ -268,7 +270,9 @@ Supported extensions:
   `SpyEffect.UndoReverseEngineer`, `UnitSell`/`Unsellable` sales on a depot,
   the ProduceCash rework with `ProduceCashDisplay`, and `SecretLab.*`.
 - [Transports and payloads](ares-transports.md): `InitialPayload.*`,
-  `Convert.Deploy` and Hospital/Armory eviction on sale and capture.
+  `Convert.Deploy`, Hospital/Armory eviction on sale and capture, Carryall
+  totes (`Carryall.Allowed`, `Carryall.SizeLimit` and the 3.0 drop hooks) and
+  `Passengers.Allowed`/`.Disallowed` on aircraft transports.
 - [Warhead, AI and techno residuals](ares-warhead-residuals.md): airborne
   victims of the curtain, EMP and AttachEffect, PoweredBy team, spawn and slave
   updates, `TeamRetaliate`, `AIInnerBase`, `EVA.Lost`, EMP on Fly and Jumpjet
@@ -282,6 +286,8 @@ Supported extensions:
   [remaining work](ares-remaining.md).
 - [INI Include and inheritance](ini-directives.md). The read-only `asset ini-expand` probe works
   in every build.
+- [INI syntax](ares-ini-syntax.md): `+=` keys, `[Child]:[Base]` sections and later-wins
+  repeated keys in every INI load, with included files loaded into the INI that lists them.
 - [Extended authored House ally lists](../tools/input_oracle/ares_allies_reader.md).
 
 ## VERA20K porting credits

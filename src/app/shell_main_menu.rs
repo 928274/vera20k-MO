@@ -100,6 +100,12 @@ impl crate::app::persistence::options::launcher::LauncherPreviewOperations for A
         // strip policy; Options' accept writes it out.
         self.persistence.options_profile.health_bars = mode;
     }
+    fn store_color_vision(&mut self, mode: crate::ui::main_menu_dialogs::options::ColorVisionMode) {
+        // The final-frame pass reads the profile every frame, so the very next
+        // frame is corrected; no atlas or ramp has to be rebuilt. Options'
+        // accept writes it out.
+        self.persistence.options_profile.color_vision = mode;
+    }
     fn set_display(&mut self, display: crate::ui::main_menu_dialogs::options::DisplayTarget) {
         // Applied at once, like Full Screen: the window moves to the picked
         // screen (or back to the system's choice) before the page is accepted.
@@ -233,10 +239,6 @@ impl crate::app::persistence::options::launcher::LauncherPreviewOperations for A
         if !enabled {
             crate::app::input::camera::reset_view_distance(self);
         }
-    }
-    fn store_wol_test_service(&mut self, wol_test_service: bool) {
-        // The next Internet visit picks its provider from it.
-        self.persistence.options_profile.wol_test_service = wol_test_service;
     }
     fn store_house_color_strength(&mut self, strength: u8) {
         // Baked into a battle's colour tables when it loads, like the

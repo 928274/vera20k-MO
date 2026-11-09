@@ -365,6 +365,12 @@ pub struct GameEntity {
     /// [`MissionOnly`]: crate::sim::aircraft::MissionOnly
     #[serde(default)]
     pub mission_only: crate::sim::aircraft::MissionOnly,
+    /// Foot `+0x424` IsOnCarryall, an [`OnCarryall`] that
+    /// `sim::aircraft::carryall` owns.
+    ///
+    /// [`OnCarryall`]: crate::sim::aircraft::carryall::OnCarryall
+    #[serde(default)]
+    pub(crate) on_carryall: crate::sim::aircraft::carryall::OnCarryall,
     /// The type facts the removal paths read (Limbo's dirty-rect branch and
     /// `Occupier=`), a [`RemovalFacts`] that `world::lifecycle` owns.
     ///
@@ -1381,6 +1387,17 @@ impl GameEntity {
         owned_by_current_house: bool,
         query: crate::sim::cloak_disguise::VisualCharacterQuery,
     ) -> u8 {
+        // FootClass::VisualCharacter (`0x004DA4E0`) takes a nonzero answer of
+        // the locomotor's first: Tunnel's (`0x007291D0`) is Ripple (4), or
+        // Hidden (5) for a forced query, while it travels underground.
+        if self
+            .locomotor
+            .as_ref()
+            .and_then(|locomotor| locomotor.tunnel_runtime())
+            .is_some_and(crate::sim::movement::tunnel_movement::TunnelRuntime::underground)
+        {
+            return 4 + u8::from(query.forced());
+        }
         let stage = self.building_cloak_stage();
         if stage != 0 {
             return crate::sim::cloak_disguise::building_stage_visual_character(
@@ -1662,6 +1679,12 @@ impl GameEntity {
     /// [`MissionOnly`]: crate::sim::aircraft::MissionOnly
     pub const fn is_mission_only(&self) -> bool {
         self.mission_only.get()
+    }
+
+    /// Foot `+0x424` IsOnCarryall: a Carryall carries this object
+    /// (`sim::aircraft::carryall`).
+    pub const fn is_on_carryall(&self) -> bool {
+        self.on_carryall.get()
     }
 
     /// AircraftUnlimbo4143A8..4143F2, only after Foot placement succeeds.
@@ -2232,6 +2255,7 @@ impl GameEntity {
             lifecycle: ObjectLifecycle::default(),
             in_playfield: Default::default(),
             mission_only: Default::default(),
+            on_carryall: Default::default(),
             removal_facts: Default::default(),
             kill_record: Default::default(),
             foot_air: foot_air::FootAirState::new(stable_id),

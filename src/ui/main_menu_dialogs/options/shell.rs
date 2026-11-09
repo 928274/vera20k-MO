@@ -8,9 +8,10 @@
 //! one column at the places retail's first band uses.
 
 use super::{
-    CHECK_FOR_UPDATES_HELP, CHECK_FOR_UPDATES_LABEL, CONTROLS_LABEL, CUSTOM_END_GAME_BANNER_HELP,
-    CUSTOM_END_GAME_BANNER_LABEL, CUSTOM_END_GAME_MOVIE_HELP, CUSTOM_END_GAME_MOVIE_LABEL,
-    CUSTOM_END_GAME_SCORE_HELP, CUSTOM_END_GAME_SCORE_LABEL, Category, DETAILED_EVA_TEXT_HELP,
+    CHECK_FOR_UPDATES_HELP, CHECK_FOR_UPDATES_LABEL, COLOR_VISION_HELP, COLOR_VISION_LABEL,
+    CONTROLS_LABEL, CUSTOM_END_GAME_BANNER_HELP, CUSTOM_END_GAME_BANNER_LABEL,
+    CUSTOM_END_GAME_MOVIE_HELP, CUSTOM_END_GAME_MOVIE_LABEL, CUSTOM_END_GAME_SCORE_HELP,
+    CUSTOM_END_GAME_SCORE_LABEL, Category, ColorVisionMode, DETAILED_EVA_TEXT_HELP,
     DETAILED_EVA_TEXT_LABEL, DEVELOPER_OPTIONS_LABEL, DISPLAY_AUTO_LABEL, DISPLAY_HELP,
     DISPLAY_LABEL, DisplayTarget, FULL_SCREEN_HELP, FULL_SCREEN_LABEL, HAS_CHECK_FOR_UPDATES,
     HAS_SET_WINDOW_SIZE, HD_MAP_PREVIEWS_HELP, HD_MAP_PREVIEWS_LABEL, HD_RADAR_HELP,
@@ -25,9 +26,8 @@ use super::{
     SHOW_STRING_KEYS_HELP, SHOW_STRING_KEYS_LABEL, SIDEBAR_HELP, SIDEBAR_LABEL, SKIP_INTRO_HELP,
     SKIP_INTRO_LABEL, SMOOTH_ONLINE_MENUS_HELP, SMOOTH_ONLINE_MENUS_LABEL, SMOOTH_SIDEBAR_HELP,
     SMOOTH_SIDEBAR_LABEL, Setting, SidebarSize, TERRAIN_DEFORMATION_HELP,
-    TERRAIN_DEFORMATION_LABEL, VERA_ICON_HELP, VERA_ICON_LABEL, WOL_TEST_SERVICE_HELP,
-    WOL_TEST_SERVICE_LABEL, YR_ORIGINAL_STYLE_HELP, YR_ORIGINAL_STYLE_LABEL, ZOOM_HELP, ZOOM_LABEL,
-    Zoom,
+    TERRAIN_DEFORMATION_LABEL, VERA_ICON_HELP, VERA_ICON_LABEL, YR_ORIGINAL_STYLE_HELP,
+    YR_ORIGINAL_STYLE_LABEL, ZOOM_HELP, ZOOM_LABEL, Zoom,
 };
 use std::borrow::Cow;
 
@@ -591,7 +591,6 @@ impl OptionsDialogState {
             LauncherCheckboxId::HdMapPreviews => HD_MAP_PREVIEWS_LABEL,
             LauncherCheckboxId::ShiftQueue => SHIFT_QUEUE_LABEL,
             LauncherCheckboxId::TerrainDeformation => TERRAIN_DEFORMATION_LABEL,
-            LauncherCheckboxId::WolTestService => WOL_TEST_SERVICE_LABEL,
             LauncherCheckboxId::PerformanceStats => PERFORMANCE_STATS_LABEL,
             LauncherCheckboxId::ShowStringKeys => SHOW_STRING_KEYS_LABEL,
             LauncherCheckboxId::SkipIntro => SKIP_INTRO_LABEL,
@@ -664,7 +663,6 @@ impl OptionsDialogState {
             LauncherCheckboxId::HdMapPreviews => self.values.hd_map_previews,
             LauncherCheckboxId::ShiftQueue => self.values.shift_queue,
             LauncherCheckboxId::TerrainDeformation => self.values.terrain_deformation,
-            LauncherCheckboxId::WolTestService => self.values.wol_test_service,
             LauncherCheckboxId::PerformanceStats => self.values.performance_stats,
             LauncherCheckboxId::ShowStringKeys => self.values.show_string_keys,
             LauncherCheckboxId::SkipIntro => self.values.skip_intro,
@@ -700,6 +698,11 @@ impl OptionsDialogState {
     /// The Health Bars face's text: the retained choice.
     pub(crate) fn shell_selected_health_bars(&self) -> HealthBarMode {
         self.values.health_bars
+    }
+
+    /// The Colour Vision face's text: the retained choice.
+    pub(crate) fn shell_selected_color_vision(&self) -> ColorVisionMode {
+        self.values.color_vision
     }
 
     /// The Display list's rows, top to bottom: Auto, then every screen the
@@ -789,6 +792,13 @@ impl OptionsDialogState {
                 let selected = choices
                     .iter()
                     .position(|mode| *mode == self.values.health_bars);
+                (choices.len(), selected)
+            }
+            LauncherComboId::ColorVision => {
+                let choices = ColorVisionMode::choices();
+                let selected = choices
+                    .iter()
+                    .position(|mode| *mode == self.values.color_vision);
                 (choices.len(), selected)
             }
             LauncherComboId::Language => {
@@ -914,9 +924,6 @@ impl OptionsDialogState {
                 LauncherCheckboxId::TerrainDeformation => {
                     LauncherStatusHelp::Vera(TERRAIN_DEFORMATION_HELP)
                 }
-                LauncherCheckboxId::WolTestService => {
-                    LauncherStatusHelp::Vera(WOL_TEST_SERVICE_HELP)
-                }
                 LauncherCheckboxId::PerformanceStats => {
                     LauncherStatusHelp::Vera(PERFORMANCE_STATS_HELP)
                 }
@@ -948,6 +955,7 @@ impl OptionsDialogState {
                     LauncherComboId::Sidebar => SIDEBAR_HELP,
                     LauncherComboId::Display => DISPLAY_HELP,
                     LauncherComboId::HealthBars => HEALTH_BARS_HELP,
+                    LauncherComboId::ColorVision => COLOR_VISION_HELP,
                     LauncherComboId::Language => LANGUAGE_HELP,
                 })
             })
@@ -987,6 +995,12 @@ impl OptionsDialogState {
                 LauncherComboId::HealthBars => {
                     match row.and_then(|row| HealthBarMode::choices().get(row).copied()) {
                         Some(mode) => self.select_health_bars(mode),
+                        None => self.open_combo = None,
+                    }
+                }
+                LauncherComboId::ColorVision => {
+                    match row.and_then(|row| ColorVisionMode::choices().get(row).copied()) {
+                        Some(mode) => self.select_color_vision(mode),
                         None => self.open_combo = None,
                     }
                 }
@@ -1081,6 +1095,7 @@ fn list_caption(id: LauncherComboId) -> String {
         LauncherComboId::Sidebar => SIDEBAR_LABEL,
         LauncherComboId::Display => DISPLAY_LABEL,
         LauncherComboId::HealthBars => HEALTH_BARS_LABEL,
+        LauncherComboId::ColorVision => COLOR_VISION_LABEL,
         LauncherComboId::Language => LANGUAGE_LABEL,
     })
 }
@@ -2089,18 +2104,8 @@ mod tests {
     }
 
     #[test]
-    fn the_developer_page_cannot_toggle_the_diagnostic_wol_test_service() {
+    fn the_developer_page_boxes_send_their_events() {
         let mut state = state();
-        state.values.wol_test_service = true;
-        for category in Category::ALL {
-            assert!(
-                page(category)
-                    .checkboxes
-                    .iter()
-                    .all(|(id, _)| *id != LauncherCheckboxId::WolTestService),
-                "{category:?}"
-            );
-        }
         // The Developer page holds FPS, String Keys and Skip Startup Logo only.
         let layout = page(Category::Developer);
         for (id, event) in [
@@ -2124,7 +2129,6 @@ mod tests {
                 [LauncherOptionsEvent::Cue(LauncherCue::Checkbox), event]
             );
         }
-        assert!(state.shell_checkbox_checked(LauncherCheckboxId::WolTestService));
     }
 
     #[test]

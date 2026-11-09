@@ -291,7 +291,8 @@ pub(crate) struct ResidualTypeRules {
     #[serde(default)]
     unsellable: Option<bool>,
     /// `Carryall.Allowed` (+0x2F8, Nullable<bool>) and `Carryall.SizeLimit`
-    /// (+0x2FC, Nullable<int>), unset.
+    /// (+0x2FC, Nullable<int>), unset; consumed by
+    /// `Simulation::ares_carryall_can_lift`.
     carryall_allowed: Option<bool>,
     carryall_size_limit: Option<i32>,
     /// `EVA.Lost` (+0x394, ValueableIdx<VoxClass>): Initialize seeds a
@@ -311,10 +312,11 @@ pub(crate) struct ResidualTypeRules {
     /// `NoSelfGuardArea` (+0x4C8, false).
     no_self_guard_area: bool,
     /// `DigInSound`/`DigOutSound` (+0x550/+0x558, NullableIdx<VocClass>),
-    /// bound with the type's other sounds.
+    /// bound with the type's other sounds. Consumed by the Tunnel
+    /// locomotor's dig effects ([`AresTechnoTypeRules::dig_effects`]).
     dig_sounds: [Option<Option<String>>; 2],
     /// `DigIn`/`DigOut` (+0x560/+0x568, Nullable<AnimTypeClass*>, Find
-    /// only): `Some(None)` is an explicit none.
+    /// only): `Some(None)` is an explicit none. Consumed with the sounds.
     dig_anims: [Option<Option<String>>; 2],
     /// `FakeOf` (+0x600) and `Convert.Deploy` (+0x60C), Find-only
     /// Valueable<TechnoTypeClass*>, null; `Convert.Deploy` is consumed by
@@ -1159,6 +1161,20 @@ impl AresTechnoTypeRules {
             .then(|| self.residual.unit_lost_eva.as_deref())
     }
 
+    /// `PlayDigEffects` (Ares.dll `0x100443E0`): the sound and anim of a
+    /// dig-in or dig-out, `DigInSound`/`DigIn` or `DigOutSound`/`DigOut`
+    /// (`+0x550 + (digIn ^ 1) * 8`, `+0x560 + (digIn ^ 1) * 8`). `None` is
+    /// unset, which plays the `[AudioVisual]` value; `Some(None)` is an
+    /// explicit none.
+    #[cfg(feature = "ares")]
+    pub(crate) fn dig_effects(&self, dig_in: bool) -> [Option<Option<&str>>; 2] {
+        let slot = usize::from(!dig_in);
+        [
+            self.residual.dig_sounds[slot].as_ref().map(|sound| sound.as_deref()),
+            self.residual.dig_anims[slot].as_ref().map(|anim| anim.as_deref()),
+        ]
+    }
+
     #[cfg(feature = "ares")]
     pub(crate) fn presentation(&self) -> &PresentationTypeRules {
         &self.presentation
@@ -1231,6 +1247,20 @@ impl AresTechnoTypeRules {
             self.residual.can_be_reversed,
             self.residual.reversed_as.as_ref(),
         )
+    }
+
+    /// `Carryall.Allowed` (+0x2F8): whether a Carryall may lift a Unit of
+    /// this type, when set.
+    #[cfg(feature = "ares")]
+    pub(crate) fn carryall_allowed(&self) -> Option<bool> {
+        self.residual.carryall_allowed
+    }
+
+    /// `Carryall.SizeLimit` (+0x2FC): the largest `Size=` this Carryall
+    /// lifts, when set.
+    #[cfg(feature = "ares")]
+    pub(crate) fn carryall_size_limit(&self) -> Option<i32> {
+        self.residual.carryall_size_limit
     }
 
     /// `Unsellable.Get(UnitsUnsellable)`: a unit of this type cannot be sold
