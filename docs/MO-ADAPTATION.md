@@ -46,29 +46,34 @@
   `InitialPayload`、中立磁能球体等 MO 玩法与表现适配。
 - 三个游戏 bug 修复（矿石、建造厂、cameo / 武器动画列表）。
 
-## 与上游功能重叠的部分（整合重点）
+## INI 语法层：已改为只以上游为准
 
 上游 `56fa9bb59 "Ares INI syntax: += keys, [Child]:[Base] sections and later-wins keys (#4130)"`
-在解析层新增了 `src/rules/ini_ares_syntax.rs`：`+=` 会被展开成 `var_<n>` 键，
-`[Child]:[Base]` 继承与 later-wins 重复键也在 `IniFile::from_str/from_bytes` 统一处理。
-这与本 fork `bad857e1e` 早期的 `APPEND_KEY` / `physical_entries` /
-`apply_ares_section_inheritance` 实现功能重叠。
+在解析层新增了 `src/rules/ini_ares_syntax.rs`：`+=` 展开成 `var_<n>` 键，
+`[Child]:[Base]` 继承与 later-wins 重复键在 `IniFile::from_str/from_bytes` 统一处理。
+本 fork `bad857e1e` 早期也实现过同一套语法（`APPEND_KEY`、`physical_entries()`、
+`apply_ares_section_inheritance`），曾短暂与上游并存；**现已全部移除**，
+`ini_parser.rs` / `ini_directives.rs` / `docs/ini-directives.md` 恢复为纯上游版本。
 
-本次整合按「保留本 fork 实现」处理：
+移除前逐条核对，四条路径均由上游完整覆盖，无功能缺口：
 
-- `include_list()` 采用上游的 `Vec<String>` 签名与 `load_listed()` 调用链
-  （否则类型不匹配），但保留本 fork 对字面 `+` 键的逐条 stored-value 读取
-  （`APPEND_KEY` + `strtrim_ascii` / `truncate_native_bytes`），作为未经过
-  Ares 语法展开的 INI 的兜底路径。
-- `ini_parser.rs` 的 `parse_line()` / `ares_header_parent()` 与
-  `ini_directives.rs` 的 `apply_ares_section_inheritance()` 原样保留，
-  前两者标记为 `#[allow(dead_code)]`：Ares 构建现在走
-  `ares_syntax::load_fresh()`，不再经过这条逐行解析路径。
-- `header_parent` 字段保留，供 directive-pass 继承逻辑读取。
+| 路径 | 上游机制 |
+| --- | --- |
+| `[#include] +=` | `load_fresh` / `load_into` 把 `+` 展开成 `var_<n>`，`include_list()` 遍历全部 stored value |
+| `[CHILD]:[PARENT]` | 两个 arm 都执行 `pre_process` + `copy_section`；`load_into` 用 `LiveSectionIndex::resume(ini)`，父段可来自先前的 include 文件 |
+| `+=` 类型注册表 | 展开成 `var_<n>` 后，`allocate_explicit_family()` 的 `keys()` + `read_string(key,32)` 读到全部条目，顺序由 `key_order` 保证 |
+| later-wins 重复键 | `put_string` 原生处理 |
 
-**注意**：这是两套实现并存的状态。Ares 构建下 `+=` 与 `[Child]:[Base]`
-理论上由上游解析层处理，本 fork 的兜底分支只在遇到字面 `+` 键时生效。
-仍需实测确认没有双重展开，尤其是 `[#include] +=` 与类型注册表 `+=` 两类列表。
+`native_processing.rs::allocate_explicit_family` 里本 fork 的 Ares/Phobos `+` 键
+特殊分支也一并删除（该文件其余 MO 适配保留）。本 fork 新增的 5 个 INI 相关测试
+仍保留，断言在上游实现下依然成立。
+
+**唯一行为差异**：不带 `--features ares` 的构建不再有 `+=` 兜底，会退回原版
+「同名 `+` 键只读最后一个」的原生行为。MO 必须使用 `--features ares,phobos`，
+因此不受影响。
+
+仍属本 fork 独有的 INI 能力在别的文件，未受影响：`ares_tolerant_root_is_usable`
+（悬空引用容忍）、`expandmo##.mix` / `thememo.ini` / `artmo` / `aimo` 根加载与根选择。
 
 ## 构建与部署
 
@@ -99,6 +104,7 @@ Windows 上需先准备 MSVC 14.44 / Windows SDK 10.0.22621 的 `PATH` / `INCLUD
 
 - 上游本次新增的 Tunnel 地下移动、Carryall 吊运、色觉滤镜、DX12 只读着色器修复等
   功能，尚未在 MO 环境下实测。
-- INI 语法层两套实现并存（见上），需验证 `+=` / `[Child]:[Base]` 没有被双重处理。
+- INI 语法层已改为只以上游为准，需实测 `[#include] +=`、类型注册表 `+=` 与
+  `[CHILD]:[PARENT]` 在真实 MO 数据上行为一致（静态核对已通过）。
 - 后续每次合并上游时，需重新检查上表「上游没有、必须保留的适配点」是否被上游吸收，
   一旦上游原生支持，应删除本 fork 的对应实现。

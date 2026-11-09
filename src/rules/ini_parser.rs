@@ -85,13 +85,6 @@ pub struct IniSection {
     /// mutable index/cache. The physical payload remains in the fields above.
     #[serde(skip)]
     fresh_index: Option<Vec<(i32, PhysicalEntry)>>,
-    /// Ares `[CHILD]:[PARENT]` header annotation. The native lexer keeps only
-    /// `CHILD` as the section name and ignores the tail; VERA retains the
-    /// suffix as opt-in parse metadata for `ini_directives`. It is not
-    /// serialized, not part of physical-payload equality, and never reaches
-    /// `SaveToPipe`, so stock YR parses and hashes exactly as before.
-    #[serde(skip)]
-    header_parent: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -143,7 +136,6 @@ impl<'de> serde::Deserialize<'de> for IniSection {
             projected_values: saved.projected_values,
             duplicate_entries: Vec::new(),
             fresh_index: None,
-            header_parent: None,
         })
     }
 }
@@ -157,7 +149,6 @@ impl IniSection {
             projected_values: HashMap::new(),
             duplicate_entries: Vec::new(),
             fresh_index: None,
-            header_parent: None,
         }
     }
 
@@ -272,9 +263,7 @@ impl IniSection {
     }
 
     /// Every loaded entry in file order, without resolving lookup winners.
-    /// Registry readers need the stored value of each appended `+` occurrence,
-    /// which a name lookup cannot distinguish.
-    pub(crate) fn physical_entries(&self) -> impl Iterator<Item = (&str, &str)> {
+    fn physical_entries(&self) -> impl Iterator<Item = (&str, &str)> {
         self.physical_slots().map(|slot| self.physical_entry(slot))
     }
 
@@ -536,69 +525,6 @@ impl IniFile {
         }
     }
 
-    /// Parse the Ares `[CHILD]:[PARENT]` tail that the native lexer discards.
-    /// Only an exact `:[PARENT]` annotation is retained; anything else (a
-    /// trailing comment, a second `=`-style tail) leaves the section inert.
-    /// Retained from the MO INI adaptation; Ares builds now apply this syntax
-    /// in `ares_syntax::load_fresh`, so this path serves non-Ares callers.
-    #[allow(dead_code)]
-    fn ares_header_parent(tail: &str) -> Option<String> {
-        let tail = strtrim_ascii(tail);
-        let inside = strtrim_ascii(tail.strip_prefix(':')?).strip_prefix('[')?;
-        let end = inside.find(']')?;
-        let parent = strtrim_ascii(&inside[..end]);
-        (!parent.is_empty()).then(|| parent.to_owned())
-    }
-
-    /// Legacy per-line parser from the MO INI adaptation. Ares loads now go
-    /// through `ares_syntax::load_fresh`; kept so the `+=` and colon-header
-    /// handling remains available to non-Ares callers and tests.
-    #[allow(dead_code)]
-    fn parse_line(ini: &mut Self, current_section: &mut Option<usize>, raw_line: &str) {
-        let line = strtrim_ascii(raw_line);
-        if line.is_empty() {
-            return;
-        }
-
-        if line.starts_with('[')
-            && let Some(end) = line.find(']')
-        {
-            let name = &line[1..end];
-            // `INIClass__LoadFromStraw` @ `0x00525A60` keeps only the text up
-            // to the first `]`. Ares' `[CHILD]:[PARENT]` extension is resolved
-            // from the tail while the section is parsed; VERA stores that tail
-            // for the opted-in directive pass without changing the section
-            // name, lookup index or physical payload.
-            let header_parent = Self::ares_header_parent(&line[end + 1..]);
-            let index = ini.sections.len();
-            let mut section = IniSection::new(name.to_string());
-            section.header_parent = header_parent;
-            ini.sections.push(section);
-            ini.first_section.entry(name.to_string()).or_insert(index);
-            *current_section = Some(index);
-            return;
-        }
-
-        // Semicolon truncation happens before the first-equals split, and
-        // only a cut line is trimmed whole (`0x00525F3A`): otherwise the key
-        // and value are trimmed alone, so `strtrim`'s trailing bound applies
-        // to the value's own leading run. `#` has no comment meaning in the
-        // active parser.
-        let payload = raw_line
-            .split_once(';')
-            .map_or(raw_line, |(head, _)| strtrim_ascii(head));
-        let Some((key, value)) = payload.split_once('=') else {
-            return;
-        };
-        let key = strtrim_ascii(key);
-        let value = strtrim_ascii(value);
-        if key.is_empty() || value.is_empty() {
-            return;
-        }
-        if let Some(index) = *current_section {
-            ini.sections[index].insert_initial(key, value);
-        }
-    }
     fn section_position(&self, name: &str) -> Option<usize> {
         if let Some(index) = &self.fresh_section_index {
             find_crc_index_value(index, ini_name_crc(name)).copied()

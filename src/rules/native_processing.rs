@@ -6661,34 +6661,9 @@ impl RulesPassProcessor {
         let Some(section) = pass.section(registry) else {
             return;
         };
-        // Ares/Phobos `+=name` list-append syntax stores every appended entry
-        // under the same `+` key. RulesClass::Process walks the stored entry
-        // list with GetKeyName and reads each value through ReadString's
-        // 32-byte buffer; a name lookup returns one winner for the whole list,
-        // so each appended occurrence takes its own stored value with the same
-        // cut and trim. Other keys keep the native name lookup. A mod's
-        // custom rules file registers all of its custom vehicles, infantry,
-        // animations, warheads and superweapons this way. Stock YR has no such
-        // lists, so the gate leaves its registry walk byte-for-byte unchanged.
-        if crate::rules::ARES_ENABLED || crate::rules::PHOBOS_ENABLED {
-            for (key, value) in section.physical_entries() {
-                let identity = if key == "+" {
-                    let cut = crate::rules::ini_value::strtrim_ascii(
-                        crate::rules::ini_value::truncate_native_bytes(value, 31),
-                    );
-                    if cut.is_empty() {
-                        continue;
-                    }
-                    cut.to_owned()
-                } else {
-                    section.read_string(key, "", 32)
-                };
-                if !identity.is_empty() {
-                    self.find_or_allocate(family, &identity);
-                }
-            }
-            return;
-        }
+        // Ares builds expand `+=name` into `var_<n>` keys in the parser
+        // (`ini_ares_syntax.rs`), so the ordinary native name walk already sees
+        // every appended entry; stock builds keep the single `+` key.
         for key in section.keys() {
             let identity = section.read_string(key, "", 32);
             if !identity.is_empty() {
