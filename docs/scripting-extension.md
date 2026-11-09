@@ -180,18 +180,37 @@ pub struct ScriptContext<'a> {
 - **与设计的一处偏差**：状态放在 **Simulation 级 store**（按 `(stable_id, ScriptId)`
   索引），未下沉到 `GameEntity`。`GameEntity` 构造/快照点极多，下沉会带来大范围改动与
   存档兼容风险；Simulation 级 store 语义等价、改动面小，将来可无痛迁移。
-- **尚未完成（阶段 0b）**：
-  1. `state_hash_owners()` 加入 `script_states.checksum()` —— 该数组是固定 15 项，
-     且 `hash_owner_diagnostics_for_test()` 依赖 `[1..]` 的 14 项切片，需配套更新快照测试；
-  2. `advance_master_frame` 里按固定阶段自动派发 `Constructed` / `Update` 等事件；
-  3. `SimCommand` 的宿主执行（伤害走 `receive_damage`、超武走 `fire_super_weapon`、
-     激光走 `LifecycleOutput::LaserCreated`）；
-  4. `Destroyed` 时清理实体状态（已在 `ScriptRegistry::dispatch` 内实现，待派发接入后生效）；
-  5. 启动时调用 `ScriptDirectory::discover(&config.paths.ra2_dir)` 并把
-     `diagnostics` 输出到日志 —— 本轮 `discover()` 已实现且有单元测试，但**尚未
-     接入启动流程**（`app/initialize.rs` 中 `AssetManager::new` 附近是预定接入点），
-     所以目前丢文件进目录引擎不会主动读取。
 - 因此阶段 0a **不改变任何帧行为**：注册表为空、store 为空，现有游戏与测试逐字节不变。
+
+### 阶段 0b 实现状态
+
+`src/sim/scripting/runtime.rs` + 四处接入，**已全部完成**：
+
+1. **state hash**：在真正的确定性折叠 `Simulation::fold_state()` 末尾追加
+   `script_states.checksum().hash(hasher)`。`state_hash_owners()` 只是只读诊断投影
+   （固定 15 项，且被 `hash_owner_diagnostics_for_test()` 的 `[1..]` 切片依赖），
+   因此**不动该数组**，快照测试不受影响；追加在末尾也不改变任何已有折叠结果。
+2. **自动派发**：`advance_master_frame` 在 `LOGIC_STEPS` 之后、`run_late_region`
+   之前调用 `dispatch_script_frame()`。它按 stable-id 顺序收集声明了已注册
+   `Script=` 的实体，逐个派发 `Update`；顺序固定，可回放、可联机。
+   **注册表为空时立即返回，零每帧开销**。
+3. **SimCommand 宿主执行**：
+   - `LaserBirth` → `lifecycle_outputs.emit(LifecycleOutput::LaserCreated)`（纯表现）✅
+   - `FireSuperWeapon` → `Simulation::fire_super_weapon(..., automatic=true)` ✅
+   - `ApplyWarhead` → **本阶段输出结构化 `log::debug!` 诊断，不施加伤害**。
+     完整链路 `combat::world_receiver::apply_area_damage` 的 `origin` 三元组与
+     `affects_tiberium` 语义需要结合首个真实脚本（GBION 演出）实测确定，
+     猜测着接线会让回放分叉；留到阶段 1 与演出一起接通。
+4. **Destroyed 清理**：已在 `ScriptRegistry::dispatch` 内实现。
+5. **启动发现**：`app/initialize.rs` 在拿到 `game_config` 后调用
+   `ScriptDirectory::discover(&config.paths.ra2_dir)`，把模块数与全部 diagnostics
+   以 `log::info!` 输出；目录异常只记日志，绝不阻止启动。
+
+进程级注册表（`script_registry()` / `install_script_registry()`）已就位；阶段 1 的
+原生脚本、阶段 2 的 WASM 加载器都往同一个注册表安装。
+
+**仍未改变帧行为**：注册表为空 → `dispatch_script_frame` 直接返回；`script_states`
+为空 → state hash 追加的是一个常量。用户可见的唯一变化是启动日志里多一条脚本目录报告。
 
 ## 九、脚本目录约定
 

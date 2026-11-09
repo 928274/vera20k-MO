@@ -587,6 +587,23 @@ impl App {
             .as_ref()
             .map(|cfg| u64::from(cfg.gameplay.input_delay_ticks))
             .unwrap_or_else(|| u64::from(crate::util::config::default_input_delay_ticks()));
+        // Discover the optional script directory once at startup. Diagnostics
+        // are advisory: a missing or broken directory never prevents launch.
+        if let Some(config) = game_config.as_ref() {
+            let scripts =
+                crate::sim::scripting::ScriptDirectory::discover(&config.paths.ra2_dir);
+            if scripts.present {
+                log::info!(
+                    "Script directory {}: {} module(s), {} file(s)",
+                    scripts.root.display(),
+                    scripts.module_count(),
+                    scripts.files.len()
+                );
+            }
+            for diagnostic in &scripts.diagnostics {
+                log::info!("Script directory: {diagnostic}");
+            }
+        }
         let sidebar_layout_spec = SidebarChromeLayoutSpec::stock();
         let mut startup_asset_manager = game_config.as_ref().and_then(|config| {
             startup_asset_or_error(

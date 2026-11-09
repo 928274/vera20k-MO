@@ -13,6 +13,7 @@
 //! existing frame behaviour byte-for-byte unchanged.
 
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
@@ -437,3 +438,20 @@ pub use source::{
     ScriptDirectory, ScriptEntry, ScriptFile, ScriptFileKind, ScriptManifest, LEGACY_EXT,
     MANIFEST_NAME, MODULE_EXT, SCRIPT_DIR,
 };
+
+/// Process-wide registry. Native scripts are installed before the first
+/// frame; stage 2 will populate the same registry from WASM modules.
+static SCRIPT_REGISTRY: OnceLock<ScriptRegistry> = OnceLock::new();
+
+pub fn script_registry() -> &'static ScriptRegistry {
+    SCRIPT_REGISTRY.get_or_init(ScriptRegistry::new)
+}
+
+/// Install once, before any frame runs. A second install returns the registry
+/// back so the caller can report it instead of silently dropping scripts.
+pub fn install_script_registry(registry: ScriptRegistry) -> Result<(), ScriptRegistry> {
+    SCRIPT_REGISTRY.set(registry)
+}
+
+#[path = "scripting/runtime.rs"]
+mod runtime;

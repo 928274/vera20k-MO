@@ -97,8 +97,21 @@ Windows 上需先准备 MSVC 14.44 / Windows SDK 10.0.22621 的 `PATH` / `INCLUD
   `ScriptContext` + `SimCommand` / `LaserBirth`、`ScriptStateStore`、`ScriptRegistry`）、
   `Simulation::script_states` 字段（`#[serde(default)]`，存档兼容）及单元测试。
 - 架构：扩展点位于 sim 层，表现副作用通过 `LifecycleOutput` 指令下发，保证确定性。
-- **阶段 0a 不改变任何帧行为**：注册表为空、状态表为空，自动派发与 state hash
-  接入属于阶段 0b。
+- **阶段 0a 不改变任何帧行为**：注册表为空、状态表为空。
+- **阶段 0b 已完成**：`src/sim/scripting/runtime.rs` 在 `advance_master_frame` 的固定
+  位置按 stable-id 顺序派发 `Update`；`fold_state()` 末尾把 `script_states` 纳入 state
+  hash；`app/initialize.rs` 启动时发现脚本目录并输出诊断日志；激光与超武命令已接到
+  真实 sim 入口，`ApplyWarhead` 暂时输出结构化诊断（完整 receiver 链留阶段 1 与
+  GBION 演出一起接通）。注册表为空时派发器直接返回，帧行为仍不变。
+
+## 上游构建修复
+
+合并 `3a05cc27d` 后，上游新增的 Ares RMG 代码在
+`--no-default-features --features ares,phobos`（本 fork 的发布配置）下无法编译：
+`map/rmg/pipeline.rs` 引用了 `RmgConstructionOutcome`，但 `map/rmg/mod.rs` 只在
+`cfg(any(test, feature="test-support"))` 下 re-export 它。上游最新 `86b33c8be`
+仍未修复。本 fork 把该类型改为无条件 re-export（类型本身在
+`construction_trace.rs` 里就是无条件定义的），只保留 `RmgConstructionEvent` 继续 gate。
 
 ## 已知待验证项
 
