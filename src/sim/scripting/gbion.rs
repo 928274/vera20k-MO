@@ -180,7 +180,8 @@ fn beams(show: &mut Show, ctx: &mut ScriptContext<'_>) {
     }
 
     let (cx, cy, cz) = ctx.anchor;
-    let floor = cz;
+    // GetCoords Z less GetHeight: the ground under an air target.
+    let floor = cz - ctx.target_height;
     let mut index = 0usize;
     for step in 0..8 {
         let degrees = show.angle + step * 45;
@@ -196,7 +197,7 @@ fn beams(show: &mut Show, ctx: &mut ScriptContext<'_>) {
                 (x, y, floor),
                 4,
             );
-            ctx.apply_warhead(
+            ctx.detonate(
                 "GBIONBeamLowWH",
                 if show.ready > 60 { 120 } else { 20 },
                 (x, y, floor),
@@ -212,7 +213,7 @@ fn beams(show: &mut Show, ctx: &mut ScriptContext<'_>) {
         }
         show.radius -= show.line_speed;
         show.angle -= show.rot_speed;
-        ctx.apply_warhead("GBIONBeamLowWH", 100, (cx, cy, floor));
+        ctx.detonate("GBIONBeamLowWH", 100, (cx, cy, floor));
         if show.radius < 0 {
             show.stage = 2;
         }
@@ -223,7 +224,7 @@ fn beams(show: &mut Show, ctx: &mut ScriptContext<'_>) {
 fn charge(show: &mut Show, ctx: &mut ScriptContext<'_>) {
     if show.charge == 5 {
         let (x, y, z) = ctx.anchor;
-        ctx.apply_warhead("GBIONChargeWH", 0, (x, y, z));
+        ctx.detonate("GBIONChargeWH", 0, (x, y, z - ctx.target_height));
     }
     show.charge += 1;
     if show.charge >= 20 {
@@ -234,11 +235,14 @@ fn charge(show: &mut Show, ctx: &mut ScriptContext<'_>) {
 /// Act 3: lighting superweapon, a 3x3 bundle of thick beams, and the main wave.
 fn release(show: &mut Show, ctx: &mut ScriptContext<'_>) {
     let (cx, cy, cz) = ctx.anchor;
-    let floor = cz;
+    // GetCoords Z less GetHeight: the ground under an air target.
+    let floor = cz - ctx.target_height;
 
-    // Coord2Cell(center): 256 leptons per cell in VERA's world space.
-    let cell = ((cx / 256).clamp(0, u16::MAX as i32) as u16, (cy / 256).clamp(0, u16::MAX as i32) as u16);
-    ctx.fire_super_weapon("GBIONBlueLight", cell);
+    // The blue map lighting. The original launched a `Type=MultiMissile`
+    // superweapon whose payload cannot spawn, so its only effect was the
+    // `ScreenNukeFlash` with that type's `Light.*` tint; ask for it directly
+    // instead of depending on a silo the player does not own.
+    ctx.nuke_flash("GBIONBlueLight", 100);
 
     const OFFSETS: [i32; 3] = [-20, 0, 20];
     for ox in OFFSETS {
@@ -250,9 +254,11 @@ fn release(show: &mut Show, ctx: &mut ScriptContext<'_>) {
     }
 
     if ctx.is_air_target {
-        ctx.apply_warhead("GBIONWaveAirWH", 700, (cx, cy, cz));
+        ctx.detonate("GBIONWaveAirWH", 700, (cx, cy, cz));
     }
-    ctx.apply_warhead("GBIONWaveWH", 700, (cx, cy, floor));
+    // NUKEANIM plus ShakeX/Y=20: the explosion animation, its Report sound
+    // and the screen shake all come from this detonation.
+    ctx.detonate("GBIONWaveWH", 700, (cx, cy, floor));
 
     show.stage = 4;
 }
@@ -272,8 +278,8 @@ mod tests {
         let entity = 7u64;
 
         let mut saw_lasers = false;
-        let mut saw_warhead = false;
-        let mut saw_super = false;
+        let mut saw_detonation = false;
+        let mut saw_flash = false;
         for frame in 0..400 {
             let mut ctx = ScriptContext::new(&rules, frame);
             ctx.has_target = true;
@@ -284,18 +290,21 @@ mod tests {
                 ctx,
             );
             saw_lasers |= !out.lasers.is_empty();
-            saw_warhead |= out
+            saw_detonation |= out
                 .commands
                 .iter()
-                .any(|c| matches!(c, SimCommand::ApplyWarhead { .. }));
-            saw_super |= out
+                .any(|c| matches!(c, SimCommand::Detonate { .. }));
+            saw_flash |= out
                 .commands
                 .iter()
-                .any(|c| matches!(c, SimCommand::FireSuperWeapon { .. }));
+                .any(|c| matches!(c, SimCommand::NukeFlash { .. }));
         }
         assert!(saw_lasers, "act 1/3 must emit laser births");
-        assert!(saw_warhead, "acts must apply warheads");
-        assert!(saw_super, "act 3 must launch the lighting superweapon");
+        assert!(
+            saw_detonation,
+            "acts must detonate warheads so their AnimList and Report play"
+        );
+        assert!(saw_flash, "act 3 must start the blue map lighting");
         assert_eq!(registry.binding_for("gbionionshowscript"), Some(ScriptId(1)));
     }
 }

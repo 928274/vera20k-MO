@@ -110,8 +110,11 @@ pub struct ScriptContext<'a> {
 - `read_rules()`：`weapon(id)` / `warhead(id)` / `super_weapon(id)` / `object(id)`
 - `entity_coord(id)` / `entity_target(id)` / `entity_height(id)`
 - `emit_laser(LaserBirth)`、`emit_anim(...)`、`emit_sound(...)`
-- `apply_warhead(warhead, damage, coord)` → 转成 `SimCommand`，宿主在事件分发结束后统一执行
+- `apply_warhead(warhead, damage, coord)` → 只结算范围伤害，不产生动画/音效/光照
+- `detonate(warhead, damage, coord)` → 等同 `CreateBullet(..).Detonate(coord)`：震屏、
+  范围伤害、`AnimList` 动画（自带 `Report=` 音效与动画光照）、冲击闪光
 - `fire_super_weapon(sw, cell)` → 同上
+- `nuke_flash(sw, frames)` → 以该超武类型的 `Light.*` 色调做 `ScreenNukeFlash`
 - `state::<T>()` / `set_state::<T>()`：按 `ScriptId` 存取该实体的脚本状态
 
 **事件分发约束**：脚本只在 `advance_tick` 的固定阶段被调用；脚本产生的 `SimCommand`
@@ -152,8 +155,8 @@ pub struct ScriptContext<'a> {
 | `SafeFind(ABSTRACTTYPE_ARRAY, ...)` 跳过 null | `RuleSet::weapon/warhead/super_weapon(id)` |
 | `GameCreateLaser @ 7328272` | `ctx.emit_laser(LaserBirth)` → `LifecycleOutput::LaserCreated` |
 | `LaserDrawClass.Thickness` / `IsHouseColor` | `LaserBirth.width` / `LaserColor::Explicit{ inner, outer, spread }` |
-| `CreateBullet + Detonate(coord)` | `ctx.apply_warhead(warhead, damage, coord)` |
-| `pSuper.Launch(cell, true)` | `ctx.fire_super_weapon(sw, cell)` |
+| `CreateBullet + Detonate(coord)` | `ctx.detonate(warhead, damage, coord)`（含 `AnimList` 动画与 `Report=` 音效、震屏、闪光） |
+| `pSuper.Launch(cell, true)`（照明型超武） | `ctx.nuke_flash(sw, frames)`（`Light.*` 色调的地图闪光） |
 | 主/副武器 `Report=` 放在枪口动画上 | 引擎既有动画 `Report=` 读取链（`art_data.rs`），无需脚本处理 |
 | 4 幕状态机（旋转激光 → 蓄力 → 起爆 → 结束） | `ScriptState` 里的 `stage / radius / angle / timers / beam_flags` |
 
@@ -282,16 +285,21 @@ sim 入口，`initialize.rs` 在启动时 `install_builtin_scripts()` 安装注�
   四幕 = 旋转激光收缩 → 蓄力 → 起爆 → 结束，每帧由 `Update` 推进。
 - **表现映射**：`emit_laser(LaserBirth)` 用 `LaserColor::Explicit` 的蓝白配色，
   第 1 幕 8 道细光束（width 4），第 3 幕 3×3 粗光柱（width 40）、偏移 ±20，
-  起点高度 50000；`fire_super_weapon("GBIONBlueLight", cell)` 对应全图照明；
-  `apply_warhead` 对应中心灼烧 / 蓄力 / 主波（对空额外一发）。
-- **真实执行**：`SimCommand::ApplyWarhead` 现在走
-  `combat::world_receiver::apply_area_damage`，origin 采用与 AnimClass 自身
-  DetonateAt 相同的 `(RAD_NO_ATTACKER, Some(owner), warhead_id)`，
-  `affects_tiberium=true`。`FireSuperWeapon` 走 `Simulation::fire_super_weapon`。
+  起点高度 50000；`nuke_flash("GBIONBlueLight", 100)` 对应蓝色全图照明
+  （`[GBIONLightWH] NukeFlash.Duration=100` + 超武 `Light.*` 色调）；
+  中心灼烧 / 蓄力 / 主波全部走 `detonate`，动画与音效由弹头自己的
+  `AnimList=`（`GBIONLSR` / `NUKEANIM` / `TWLT100`）和动画 `Report=` 提供。
+- **真实执行**：`SimCommand::Detonate` 复刻 `BulletClass::DetonateAtCoord` 的次序——
+  `ShakeX/Y` 主 RNG 抽两次 → `apply_area_damage` → `detonation_anim::effect`
+  （`SelectAnim` + `admit_explosion_effect`，动画 Start 时发 `AnimationStarted`
+  音效事件）→ `CombatLightRequest::Impact`。`ApplyWarhead` 保留为纯伤害版本。
+  `FireSuperWeapon` 仍走 `Simulation::fire_super_weapon`。
 - **命令改用规则名字符串**（不再是 `InternedId`），宿主执行时才 intern ——
   脚本层因此不需要接触 interner，也更容易跨 WASM ABI 传递。
-- `ScriptContext` 增加 `anchor` / `is_air_target` / `has_target`，由
-  `dispatch_with` 从 `entity.position` 填入（256 leptons/cell）。
+- `ScriptContext` 增加 `anchor` / `target_height` / `is_air_target` / `has_target`：
+  `runtime.rs` 每帧把 `entity.attack_target` 解析成目标 `GetCoords` 填进 `anchor`
+  （无目标时回落到自身坐标），`target_height` 取目标 `GetHeight()`，
+  因此演出会跟随移动目标、对空单位落点取目标下方地面。
 
 **已知差异（需下一轮收口）**：
 
@@ -300,10 +308,11 @@ sim 入口，`initialize.rs` 在启动时 `install_builtin_scripts()` 安装注�
    `Update`，因此首版还保留一个 90 帧的 fallback 触发，保证演出可见。接上
    `commit_projectile_detonations_inline` 的 `BulletDetonated` 派发后即可移除
    fallback，完全还原原版语义。
-2. **目标坐标跟随**。锚点当前取**单位自身** cell 坐标，未跟随当前攻击目标；
-   原脚本每帧把中心刷新到目标坐标。需要把 `Target` 解析成世界坐标后填入
-   `ctx.anchor`。
-3. `is_air_target` 目前恒为 false（未从目标高度派生），对空分支暂不会走。
+2. **粗光柱偏细**。原生 `Thickness=40` 的可见宽度依赖逐圈半衰的发光色：
+   `LaserDraw` 每加宽一圈把 side 色右移一位并在一处提前 `break`，而脚本用的是
+   `LaserColor::Explicit{ spread: [0,20,90] }`。原脚本用 `IsHouseColor=true`
+   取阵营色（更亮）才有满宽。后续改为 `LaserColor::House(owner)` 或提高 spread
+   亮度即可复原。
 
 ## 十、风险与约束
 

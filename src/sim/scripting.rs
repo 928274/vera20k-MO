@@ -180,8 +180,19 @@ impl ScriptStateStore {
 /// after dispatch in a fixed order. Scripts never mutate the world directly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SimCommand {
+    /// Pure area damage: `Apply_area_damage` alone, no animation, no sound,
+    /// no light and no screen shake.
     ApplyWarhead {
         /// Rule name; the host interns it when executing the command.
+        warhead: String,
+        damage: i32,
+        coord: (i32, i32, i32),
+    },
+    /// One invisible bullet's `Detonate` at `coord`: the warhead's screen
+    /// shake, the area damage, the `AnimList`/`SplashList` animation (which
+    /// carries its own `Report=` sound and light) and the impact flash.
+    /// This is the in-engine replacement for `CreateBullet(..).Detonate(at)`.
+    Detonate {
         warhead: String,
         damage: i32,
         coord: (i32, i32, i32),
@@ -189,6 +200,12 @@ pub enum SimCommand {
     FireSuperWeapon {
         super_weapon: String,
         cell: (u16, u16),
+    },
+    /// `ScreenNukeFlash` for `frames` frames with a superweapon type's
+    /// `Light.*` tint: the map-wide lighting the native nuke launch triggers.
+    NukeFlash {
+        super_weapon: String,
+        frames: i32,
     },
 }
 
@@ -198,6 +215,9 @@ pub struct ScriptContext<'a> {
     pub frame: i32,
     /// World-space anchor of the subject entity, in leptons.
     pub anchor: (i32, i32, i32),
+    /// `GetHeight()` of the anchor: the ground under an air target sits
+    /// `anchor.2 - target_height`.
+    pub target_height: i32,
     pub is_air_target: bool,
     pub has_target: bool,
     /// Deterministic side effects, executed by the host after dispatch.
@@ -212,6 +232,7 @@ impl<'a> ScriptContext<'a> {
             rules,
             frame,
             anchor: (0, 0, 0),
+            target_height: 0,
             is_air_target: false,
             has_target: false,
             commands: Vec::new(),
@@ -233,6 +254,27 @@ impl<'a> ScriptContext<'a> {
             warhead: warhead.to_owned(),
             damage,
             coord,
+        });
+    }
+
+    /// Replaces `CreateBullet(..).Detonate(coord)`: damage plus the warhead's
+    /// own presentation (AnimList animation, its `Report=` sound, screen
+    /// shake, impact flash). Use [`Self::apply_warhead`] only when the
+    /// original script suppressed the bullet's detonation effects.
+    pub fn detonate(&mut self, warhead: &str, damage: i32, coord: (i32, i32, i32)) {
+        self.commands.push(SimCommand::Detonate {
+            warhead: warhead.to_owned(),
+            damage,
+            coord,
+        });
+    }
+
+    /// Replaces `SuperClass::Launch` of a lighting superweapon: the scenario
+    /// flash with the type's `Light.*` tint for `frames` frames.
+    pub fn nuke_flash(&mut self, super_weapon: &str, frames: i32) {
+        self.commands.push(SimCommand::NukeFlash {
+            super_weapon: super_weapon.to_owned(),
+            frames,
         });
     }
 

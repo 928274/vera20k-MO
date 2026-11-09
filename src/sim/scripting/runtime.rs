@@ -11,7 +11,7 @@
 use crate::rules::overlay_types::OverlayTypeRegistry;
 use crate::rules::ruleset::RuleSet;
 use crate::sim::combat::world_receiver::apply_area_damage;
-use crate::sim::combat::RAD_NO_ATTACKER;
+use crate::sim::combat::{CombatLightRequest, RAD_NO_ATTACKER, ScreenShakeUpdate};
 use crate::sim::intern::InternedId;
 use crate::sim::projectile::ProjectileCoord;
 use crate::sim::world::{FrameEffects, LifecycleOutput, Simulation};
@@ -40,7 +40,14 @@ impl Simulation {
         // `lifecycle_outputs`, so the read-only entity walk must finish before
         // any of that starts. Stable-id order is part of the determinism
         // contract.
-        let mut bound: Vec<(u64, InternedId, (i32, i32, i32))> = Vec::new();
+        //
+        // The anchor is the scripted Techno's *target* (`GetCoords` of the
+        // Techno's `Target`), falling back to the entity itself when it holds
+        // none; `is_air_target` is that target's `GetHeight() > 0`. The
+        // DynamicPatcher original re-read both every frame, which is why the
+        // presentation follows a moving target.
+        let terrain = self.resolved_terrain.as_ref();
+        let mut bound: Vec<(u64, InternedId, (i32, i32, i32), bool, i32)> = Vec::new();
         for entity in self.substrate.entities.values() {
             let Some(object) = self.interner.object_type(entity.type_ref(), rules) else {
                 continue;
@@ -49,20 +56,51 @@ impl Simulation {
                 continue;
             };
             if registry.binding_for(binding).is_some() {
-                let position = &entity.position;
-                let anchor = (
-                    position.rx() as i32 * LEPTONS_PER_CELL,
-                    position.ry() as i32 * LEPTONS_PER_CELL,
-                    position.z() as i32,
-                );
-                bound.push((entity.stable_id(), entity.owner(), anchor));
+                let own = crate::sim::movement::ground_pose::object_get_coords(entity, terrain);
+                let mut anchor = (own.x, own.y, own.z);
+                let mut is_air_target = false;
+                let mut target_height = 0;
+                match entity.attack_target.target() {
+                    Some(crate::sim::combat::TargetKind::Entity(id)) => {
+                        if let Some(target) = self.substrate.entities.get(id) {
+                            let coord = crate::sim::movement::ground_pose::object_get_coords(
+                                target, terrain,
+                            );
+                            anchor = (coord.x, coord.y, coord.z);
+                            target_height = crate::sim::movement::air_movement::current_fly_height(
+                                target, terrain,
+                            );
+                            is_air_target = target_height > 0;
+                        }
+                    }
+                    Some(crate::sim::combat::TargetKind::Cell(rx, ry)) => {
+                        let x = i32::from(rx) * LEPTONS_PER_CELL + LEPTONS_PER_CELL / 2;
+                        let y = i32::from(ry) * LEPTONS_PER_CELL + LEPTONS_PER_CELL / 2;
+                        let z = crate::sim::projectile::projectile_ground_z(
+                            terrain,
+                            &self.effective_shared_cell_dummy(),
+                            ProjectileCoord::new(x, y, 0),
+                        );
+                        anchor = (x, y, z);
+                    }
+                    None => {}
+                }
+                bound.push((
+                    entity.stable_id(),
+                    entity.owner(),
+                    anchor,
+                    is_air_target,
+                    target_height,
+                ));
             }
         }
-        bound.sort_unstable_by_key(|(id, _, _)| *id);
+        bound.sort_unstable_by_key(|(id, _, _, _, _)| *id);
 
-        for (entity, owner, anchor) in bound {
+        for (entity, owner, anchor, is_air_target, target_height) in bound {
             let mut ctx = ScriptContext::new(rules, frame);
             ctx.anchor = anchor;
+            ctx.is_air_target = is_air_target;
+            ctx.target_height = target_height;
             ctx.has_target = true;
             let event = ScriptEvent::Update { entity, frame };
             let ScriptContext {
@@ -117,8 +155,138 @@ impl Simulation {
                             effects,
                         );
                     }
+                    SimCommand::Detonate {
+                        warhead,
+                        damage,
+                        coord,
+                    } => {
+                        detonate_invisible_bullet(
+                            self,
+                            rules,
+                            overlay_registry,
+                            &warhead,
+                            damage,
+                            ProjectileCoord::new(coord.0, coord.1, coord.2),
+                            owner,
+                            effects,
+                        );
+                    }
+                    SimCommand::NukeFlash {
+                        super_weapon,
+                        frames,
+                    } => {
+                        start_super_weapon_light(self, rules, &super_weapon, frames);
+                    }
                 }
             }
         }
     }
+}
+
+/// One invisible bullet's `Detonate` at `impact`, in the native order of
+/// `BulletClass::DetonateAtCoord`: the warhead's screen shake, then the area
+/// receivers, then the `AnimList` animation (whose `Report=`/`StartSound=`
+/// fires with it) and the impact flash. `CreateBullet(..).Detonate(coord)` in
+/// a DynamicPatcher script does exactly this, which is why a script that only
+/// calls `Apply_area_damage` gets no hit animation, no explosion sound and no
+/// shake.
+#[allow(clippy::too_many_arguments)]
+fn detonate_invisible_bullet(
+    sim: &mut Simulation,
+    rules: &RuleSet,
+    overlay_registry: Option<&OverlayTypeRegistry>,
+    warhead_name: &str,
+    damage: i32,
+    impact: ProjectileCoord,
+    owner: InternedId,
+    effects: FrameEffects<'_>,
+) {
+    let Some(warhead) = rules.warhead(warhead_name) else {
+        log::debug!("script warhead '{warhead_name}' is not registered; skipped");
+        return;
+    };
+    let warhead_ref = sim.interner.intern(warhead_name);
+
+    // BulletClass::DetonateAtCoord prologue: ShakeXlo/hi then ShakeYlo/hi,
+    // one MainRng draw per configured axis, X before Y.
+    let shake_x = (warhead.shake_x_lo != 0 || warhead.shake_x_hi != 0)
+        .then(|| sim.main_rng.next_range_i32_inclusive(warhead.shake_x_lo, warhead.shake_x_hi));
+    let shake_y = (warhead.shake_y_lo != 0 || warhead.shake_y_hi != 0)
+        .then(|| sim.main_rng.next_range_i32_inclusive(warhead.shake_y_lo, warhead.shake_y_hi));
+    if shake_x.is_some() || shake_y.is_some() {
+        sim.screen_shake_updates.emit(ScreenShakeUpdate {
+            x: shake_x,
+            y: shake_y,
+        });
+    }
+
+    let receipt = apply_area_damage(
+        sim,
+        rules,
+        overlay_registry,
+        impact,
+        damage,
+        warhead,
+        true,
+        (RAD_NO_ATTACKER, Some(owner), warhead_ref),
+        effects,
+    );
+
+    // `SelectAnim @ 0x0048A4F0` then the combat constructor: the animation
+    // resolves its own Report=/StartSound= through `AnimClass::Start`.
+    let land = crate::sim::combat::detonation_anim::land_at(sim, impact);
+    if let Some(effect) = crate::sim::combat::detonation_anim::effect(
+        sim,
+        rules,
+        warhead,
+        damage,
+        land,
+        impact,
+        impact,
+        receipt.crit_active,
+    ) {
+        crate::sim::world::damage_consequences::admit_explosion_effect(sim, rules, effect);
+    }
+
+    // `0x00469BD6..0x00469C41`: an impact flash, gated on the warhead's
+    // `Bright=` unless the caller forces it (our script never does).
+    sim.combat_light_requests.emit(CombatLightRequest::Impact {
+        target_id: None,
+        damage,
+        warhead_ref,
+        coord: impact,
+        force_create: false,
+        flags: 0,
+    });
+}
+
+/// `ScreenNukeFlash @ 0x0053AB70` plus Ares `SWTypeExt` lighting: the
+/// scenario flash fades in for `frames` frames with the named superweapon
+/// type's `Light.Red/Green/Blue/Ambient`, then the relight is published.
+/// A missing type still flashes with the stock nuke tint.
+fn start_super_weapon_light(
+    sim: &mut Simulation,
+    rules: &RuleSet,
+    super_weapon: &str,
+    frames: i32,
+) {
+    if frames <= 0 {
+        return;
+    }
+    let frame = sim.session.binary_frame() as i32;
+    sim.session
+        .lighting_mut()
+        .start_nuke_flash_for(frame, frames);
+    #[cfg(feature = "ares")]
+    {
+        let light = rules
+            .super_weapon_metadata(super_weapon)
+            .map(|metadata| metadata.launch().lighting());
+        sim.session
+            .lighting_mut()
+            .select_ares(crate::sim::scenario_session::ScenarioLightingProfile::Nuke, light);
+    }
+    sim.publish_global_lighting(
+        crate::sim::light_sources::PaletteUpdate::from_scenario(sim.session.lighting()),
+    );
 }
