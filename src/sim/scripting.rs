@@ -245,6 +245,13 @@ impl<'a> ScriptContext<'a> {
 /// implements this trait by calling a WASM module with the same ABI.
 pub trait Script: Send + Sync {
     fn id(&self) -> ScriptId;
+
+    /// The value a TechnoType's `Script=` key names. A stage-2 WASM adapter
+    /// takes this from the directory manifest's `name` field.
+    fn binding_name(&self) -> &str {
+        ""
+    }
+
     fn interests(&self) -> EventMask;
 
     /// `state` is the calling entity's slot; it is written back to the store
@@ -286,6 +293,16 @@ impl ScriptRegistry {
 
     pub fn len(&self) -> usize {
         self.scripts.len()
+    }
+
+    /// Resolve a TechnoType's `Script=` value to a registered script. An empty
+    /// registry (stage 0a) yields `None` for every binding; the host should
+    /// report that as a diagnostic rather than failing the load.
+    pub fn binding_for(&self, name: &str) -> Option<ScriptId> {
+        self.scripts
+            .iter()
+            .find(|script| script.binding_name().eq_ignore_ascii_case(name))
+            .map(|script| script.id())
     }
 
     /// Dispatch one event to every subscribed script owning a state slot (or
@@ -412,3 +429,11 @@ mod tests {
         assert_eq!(ctx.frame, 5);
     }
 }
+
+#[path = "scripting/source.rs"]
+mod source;
+
+pub use source::{
+    ScriptDirectory, ScriptEntry, ScriptFile, ScriptFileKind, ScriptManifest, LEGACY_EXT,
+    MANIFEST_NAME, MODULE_EXT, SCRIPT_DIR,
+};

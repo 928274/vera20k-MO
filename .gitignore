@@ -68,6 +68,7 @@ Thumbs.db
 !/docs/ini-anim-custom-palette.md
 !/docs/ini-shp-turret-anims.md
 !/docs/scripting-extension.md
+!/docs/scripts.example.json
 !/docs/phobos-ai-dehardcode.md
 !/docs/phobos-parallel-ai-queues.md
 !/docs/phobos-skirmish-unlimited-colors.md

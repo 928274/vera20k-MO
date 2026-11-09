@@ -173,8 +173,10 @@ pub struct ScriptContext<'a> {
 
 - **已交付**：`src/sim/scripting.rs`（`Script` / `ScriptEvent` / `EventMask` /
   `ScriptContext` / `SimCommand` / `ScriptStateStore` / `ScriptRegistry` + 单元测试）、
-  `Simulation::script_states` 字段（`#[serde(default)]`，存档兼容）、本文档与
-  `.gitignore` 白名单。
+  `src/sim/scripting/source.rs`（脚本目录发现、清单解析、诊断）、
+  `Simulation::script_states` 字段（`#[serde(default)]`，存档兼容）、
+  `ObjectType::script`（`Script=` 读取）、`Script::binding_name` /
+  `ScriptRegistry::binding_for`（名字 → ScriptId）、本文档与 `.gitignore` 白名单。
 - **与设计的一处偏差**：状态放在 **Simulation 级 store**（按 `(stable_id, ScriptId)`
   索引），未下沉到 `GameEntity`。`GameEntity` 构造/快照点极多，下沉会带来大范围改动与
   存档兼容风险；Simulation 级 store 语义等价、改动面小，将来可无痛迁移。
@@ -184,10 +186,74 @@ pub struct ScriptContext<'a> {
   2. `advance_master_frame` 里按固定阶段自动派发 `Constructed` / `Update` 等事件；
   3. `SimCommand` 的宿主执行（伤害走 `receive_damage`、超武走 `fire_super_weapon`、
      激光走 `LifecycleOutput::LaserCreated`）；
-  4. `Destroyed` 时清理实体状态（已在 `ScriptRegistry::dispatch` 内实现，待派发接入后生效）。
+  4. `Destroyed` 时清理实体状态（已在 `ScriptRegistry::dispatch` 内实现，待派发接入后生效）；
+  5. 启动时调用 `ScriptDirectory::discover(&config.paths.ra2_dir)` 并把
+     `diagnostics` 输出到日志 —— 本轮 `discover()` 已实现且有单元测试，但**尚未
+     接入启动流程**（`app/initialize.rs` 中 `AssetManager::new` 附近是预定接入点），
+     所以目前丢文件进目录引擎不会主动读取。
 - 因此阶段 0a **不改变任何帧行为**：注册表为空、store 为空，现有游戏与测试逐字节不变。
 
-## 九、风险与约束
+## 九、脚本目录约定
+
+**根目录**：`<游戏目录>/vera20k/DynamicPatcher/`（`src/sim/scripting/source.rs` 的
+`SCRIPT_DIR` 常量，相对 `ra2_dir`）。这个位置与 VERA 自己的
+`<游戏目录>/vera20k/` 用户数据目录同级，也**刻意区别于**顶层原版 DynamicPatcher 的
+`<游戏目录>/DynamicPatcher/` —— 两套目录可以共存、互不干扰。
+
+调用方可以改用 `ScriptDirectory::discover_at(root)` 覆盖根路径，因此该约定是
+**可配置的默认值**，不是写死的唯一路径。
+
+### 目录布局（扁平 + 清单）
+
+```
+<游戏目录>/vera20k/DynamicPatcher/
+├── scripts.json                 ← 清单：脚本名 ↔ 模块文件
+├── gbion_ion_show.wasm          ← 将来的 WASM 模块，直接平铺
+├── other_script.wasm
+└── GBIONIonShowScript.cs        ← 现有 DP 源码，留作迁移参考，引擎不加载
+```
+
+```json
+{
+  "scripts": [
+    { "name": "GBIONIonShowScript", "module": "gbion_ion_show.wasm" }
+  ]
+}
+```
+
+- `name`：与单位规则里的 `[Unit] Script=` 值大小写不敏感匹配。
+- `module`：相对本目录的文件名，必须是 `.wasm`。
+
+### 绑定闭环
+
+```
+[GBION] Script=GBIONIonShowScript        ← 规则层读进 ObjectType::script
+        ↓
+scripts.json  name → module              ← ScriptDirectory::module_for()
+        ↓
+ScriptRegistry::binding_for(name)        ← 解析成 ScriptId
+        ↓
+ScriptStateStore / 事件派发              ← 实例状态 + 每帧更新
+```
+
+`Script=` 由 `ObjectType::script` 统一读取，**不硬编码任何具体脚本名**；未注册的
+名字只产生诊断，绝不阻止类型加载（与之前删掉的 no-op `Script=` 空桩不同，
+这次有真实消费者 `ScriptRegistry::binding_for`）。
+
+### 发现行为（阶段 0a）
+
+`ScriptDirectory::discover()` 只做只读扫描与校验，**不加载、不执行**：
+
+- 目录不存在 / `scripts.json` 缺失 / JSON 非法 / 清单引用了不存在的模块
+  → 记入 `diagnostics`，游戏照常启动；
+- `*.cs` → 标为 `LegacyCSharp`，提示"需迁移成 WASM 模块才能运行"；
+- `*.wasm` → 标为 `Module`，是阶段 2 加载器的候选；
+- 文件列表排序后输出，保证诊断在不同文件系统上一致。
+
+**注意**：阶段 0/1 的脚本仍是编译进引擎的原生 Rust，此时把文件放进目录**不会生效**；
+真正从目录加载 WASM 是阶段 2。
+
+## 十、风险与约束
 
 - **state hash 兼容**：新增 `GameEntity` 字段会改变存档/校验布局，需要同步更新快照测试
   与存档版本；旧存档靠 `#[serde(default)]` 兼容。

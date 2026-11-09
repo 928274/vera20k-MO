@@ -1,0 +1,8 @@
+{
+  "scripts": [
+    {
+      "name": "ExampleScript",
+      "module": "example_script.wasm"
+    }
+  ]
+}

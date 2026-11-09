@@ -1883,6 +1883,12 @@ pub struct ObjectType {
     /// produced type. Only VehicleTypes may be cloned as vehicles.
     pub cloned_as: Option<String>,
 
+    /// Scripting extension binding: the `Script=` name declared on this
+    /// TechnoType. VERA stores the name only; `sim::scripting::ScriptRegistry`
+    /// resolves it against the script directory manifest when the unit is
+    /// constructed. An unregistered name is a diagnostic, never a load error.
+    pub script: Option<String>,
+
     /// Exit coordinate for produced units, in leptons relative to building origin.
     /// Parsed from `ExitCoord=X,Y,Z` in rules.ini. 256 leptons = 1 cell.
     /// Used by spawn logic to place newly built units near the correct factory exit.
@@ -5412,6 +5418,10 @@ impl ObjectType {
             } else {
                 None
             },
+            // Scripting extension binding. Read as a plain name; resolving it
+            // happens in the sim against the script directory, so an unknown
+            // name never prevents the type from loading.
+            script: section.read_name("Script", 0x40).map(str::to_owned),
             // Read3Int (`0x00460FCD`).
             exit_coord: section
                 .read_coord3_value("ExitCoord")
