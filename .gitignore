@@ -63,6 +63,10 @@ Thumbs.db
 !/docs/phobos-missing-cameo.md
 !/docs/phobos-power-plant-enhancer.md
 !/docs/phobos-building-queue.md
+# Fork-specific documentation (see docs/MO-ADAPTATION.md).
+!/docs/MO-ADAPTATION.md
+!/docs/ini-anim-custom-palette.md
+!/docs/ini-shp-turret-anims.md
 !/docs/phobos-ai-dehardcode.md
 !/docs/phobos-parallel-ai-queues.md
 !/docs/phobos-skirmish-unlimited-colors.md
