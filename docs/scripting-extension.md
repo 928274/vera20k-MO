@@ -272,6 +272,39 @@ ScriptStateStore / 事件派发              ← 实例状态 + 每帧更新
 **注意**：阶段 0/1 的脚本仍是编译进引擎的原生 Rust，此时把文件放进目录**不会生效**；
 真正从目录加载 WASM 是阶段 2。
 
+### 阶段 1 实现状态（首个原生脚本）
+
+`src/sim/scripting/gbion.rs` 完整迁移了四幕演出，`runtime.rs` 把命令接到了真实
+sim 入口，`initialize.rs` 在启动时 `install_builtin_scripts()` 安装注册表。
+
+- **状态机**：`Show`（serde → `ScriptState`）保存 `stage / delay / radius / angle /
+  line_speed / rot_speed / ready / charge / beams[8] / quake_hits / idle_frames`。
+  四幕 = 旋转激光收缩 → 蓄力 → 起爆 → 结束，每帧由 `Update` 推进。
+- **表现映射**：`emit_laser(LaserBirth)` 用 `LaserColor::Explicit` 的蓝白配色，
+  第 1 幕 8 道细光束（width 4），第 3 幕 3×3 粗光柱（width 40）、偏移 ±20，
+  起点高度 50000；`fire_super_weapon("GBIONBlueLight", cell)` 对应全图照明；
+  `apply_warhead` 对应中心灼烧 / 蓄力 / 主波（对空额外一发）。
+- **真实执行**：`SimCommand::ApplyWarhead` 现在走
+  `combat::world_receiver::apply_area_damage`，origin 采用与 AnimClass 自身
+  DetonateAt 相同的 `(RAD_NO_ATTACKER, Some(owner), warhead_id)`，
+  `affects_tiberium=true`。`FireSuperWeapon` 走 `Simulation::fire_super_weapon`。
+- **命令改用规则名字符串**（不再是 `InternedId`），宿主执行时才 intern ——
+  脚本层因此不需要接触 interner，也更容易跨 WASM ABI 传递。
+- `ScriptContext` 增加 `anchor` / `is_air_target` / `has_target`，由
+  `dispatch_with` 从 `entity.position` 填入（256 leptons/cell）。
+
+**已知差异（需下一轮收口）**：
+
+1. **触发条件近似**。原脚本用「同一目标地震炮命中 2 次」或「对空锁定满 60 帧」
+   触发。脚本已订阅并实现 `BulletDetonated` 计数分支，但 `runtime.rs` 目前只派发
+   `Update`，因此首版还保留一个 90 帧的 fallback 触发，保证演出可见。接上
+   `commit_projectile_detonations_inline` 的 `BulletDetonated` 派发后即可移除
+   fallback，完全还原原版语义。
+2. **目标坐标跟随**。锚点当前取**单位自身** cell 坐标，未跟随当前攻击目标；
+   原脚本每帧把中心刷新到目标坐标。需要把 `Target` 解析成世界坐标后填入
+   `ctx.anchor`。
+3. `is_air_target` 目前恒为 false（未从目标高度派生），对空分支暂不会走。
+
 ## 十、风险与约束
 
 - **state hash 兼容**：新增 `GameEntity` 字段会改变存档/校验布局，需要同步更新快照测试

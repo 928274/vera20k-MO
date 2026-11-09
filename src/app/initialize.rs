@@ -580,6 +580,9 @@ impl App {
             .as_ref()
             .map(|cfg| u64::from(cfg.gameplay.input_delay_ticks))
             .unwrap_or_else(|| u64::from(crate::util::config::default_input_delay_ticks()));
+        // Native scripts must be installed before the first frame. Stage 2
+        // will install WASM-backed scripts through the same registry.
+        crate::sim::scripting::install_builtin_scripts();
         // Discover the optional script directory once at startup. Diagnostics
         // are advisory: a missing or broken directory never prevents launch.
         if let Some(config) = game_config.as_ref() {

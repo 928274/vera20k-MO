@@ -1,4 +1,4 @@
-//! Per-frame script dispatch (stage 0b).
+//! Per-frame script dispatch (stage 0b / stage 1).
 //!
 //! Runs at a fixed point in `advance_master_frame`, after the ordered logic
 //! steps and before the late region. Everything here is deterministic: the
@@ -10,10 +10,16 @@
 
 use crate::rules::overlay_types::OverlayTypeRegistry;
 use crate::rules::ruleset::RuleSet;
+use crate::sim::combat::world_receiver::apply_area_damage;
+use crate::sim::combat::RAD_NO_ATTACKER;
 use crate::sim::intern::InternedId;
+use crate::sim::projectile::ProjectileCoord;
 use crate::sim::world::{FrameEffects, LifecycleOutput, Simulation};
 
 use super::{script_registry, ScriptContext, ScriptEvent, SimCommand};
+
+/// 256 leptons per cell; `Position::rx/ry` are cell coordinates.
+const LEPTONS_PER_CELL: i32 = 256;
 
 impl Simulation {
     /// Dispatch one `Update` per entity whose TechnoType declares a registered
@@ -34,7 +40,7 @@ impl Simulation {
         // `lifecycle_outputs`, so the read-only entity walk must finish before
         // any of that starts. Stable-id order is part of the determinism
         // contract.
-        let mut bound: Vec<(u64, InternedId)> = Vec::new();
+        let mut bound: Vec<(u64, InternedId, (i32, i32, i32))> = Vec::new();
         for entity in self.substrate.entities.values() {
             let Some(object) = self.interner.object_type(entity.type_ref(), rules) else {
                 continue;
@@ -43,16 +49,25 @@ impl Simulation {
                 continue;
             };
             if registry.binding_for(binding).is_some() {
-                bound.push((entity.stable_id(), entity.owner()));
+                let position = &entity.position;
+                let anchor = (
+                    position.rx() as i32 * LEPTONS_PER_CELL,
+                    position.ry() as i32 * LEPTONS_PER_CELL,
+                    position.z() as i32,
+                );
+                bound.push((entity.stable_id(), entity.owner(), anchor));
             }
         }
-        bound.sort_unstable_by_key(|(id, _)| *id);
+        bound.sort_unstable_by_key(|(id, _, _)| *id);
 
-        for (entity, owner) in bound {
+        for (entity, owner, anchor) in bound {
+            let mut ctx = ScriptContext::new(rules, frame);
+            ctx.anchor = anchor;
+            ctx.has_target = true;
             let event = ScriptEvent::Update { entity, frame };
             let ScriptContext {
                 commands, lasers, ..
-            } = registry.dispatch(&event, &mut self.script_states, rules, frame);
+            } = registry.dispatch_with(&event, &mut self.script_states, ctx);
 
             // Pure presentation. The sim keeps no handle to the laser, so a
             // dropped frame cannot desynchronise replays.
@@ -67,10 +82,11 @@ impl Simulation {
                         super_weapon,
                         cell,
                     } => {
+                        let sw_id = self.interner.intern(&super_weapon);
                         self.fire_super_weapon(
                             rules,
                             owner,
-                            super_weapon,
+                            sw_id,
                             cell,
                             overlay_registry,
                             effects,
@@ -82,20 +98,23 @@ impl Simulation {
                         damage,
                         coord,
                     } => {
-                        // Stage 1 wires this through
-                        // `combat::world_receiver::apply_area_damage`. Its
-                        // `origin` triple and `affects_tiberium` flag must be
-                        // pinned against a real script (the first one is the
-                        // GBION show) before damage is allowed to reach the
-                        // world; silently guessing them here would make
-                        // replays diverge. Until then this is an explicit,
-                        // structured diagnostic rather than a silent drop.
-                        log::debug!(
-                            "script command ApplyWarhead deferred (warhead={:?}, damage={}, coord={:?}); \
-                             stage 1 will route it through the receiver chain",
-                            warhead,
+                        // Same call shape as AnimClass's own DetonateAt path:
+                        // (RAD_NO_ATTACKER, source house, warhead id).
+                        let Some(warhead_type) = rules.warhead(&warhead) else {
+                            log::debug!("script warhead '{warhead}' is not registered; skipped");
+                            continue;
+                        };
+                        let warhead_id = self.interner.intern(&warhead);
+                        apply_area_damage(
+                            self,
+                            rules,
+                            overlay_registry,
+                            ProjectileCoord::new(coord.0, coord.1, coord.2),
                             damage,
-                            coord
+                            warhead_type,
+                            true,
+                            (RAD_NO_ATTACKER, Some(owner), warhead_id),
+                            effects,
                         );
                     }
                 }

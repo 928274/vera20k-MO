@@ -181,12 +181,13 @@ impl ScriptStateStore {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SimCommand {
     ApplyWarhead {
-        warhead: InternedId,
+        /// Rule name; the host interns it when executing the command.
+        warhead: String,
         damage: i32,
         coord: (i32, i32, i32),
     },
     FireSuperWeapon {
-        super_weapon: InternedId,
+        super_weapon: String,
         cell: (u16, u16),
     },
 }
@@ -195,6 +196,10 @@ pub enum SimCommand {
 pub struct ScriptContext<'a> {
     pub rules: &'a RuleSet,
     pub frame: i32,
+    /// World-space anchor of the subject entity, in leptons.
+    pub anchor: (i32, i32, i32),
+    pub is_air_target: bool,
+    pub has_target: bool,
     /// Deterministic side effects, executed by the host after dispatch.
     pub commands: Vec<SimCommand>,
     /// Presentation-only side effects, emitted into the frame channel.
@@ -206,6 +211,9 @@ impl<'a> ScriptContext<'a> {
         Self {
             rules,
             frame,
+            anchor: (0, 0, 0),
+            is_air_target: false,
+            has_target: false,
             commands: Vec::new(),
             lasers: Vec::new(),
         }
@@ -220,23 +228,18 @@ impl<'a> ScriptContext<'a> {
 
     /// Replaces `CreateBullet(...).Detonate(coord)`. Resolved against the
     /// frozen `RuleSet`, so an unknown warhead is a no-op instead of a crash.
-    pub fn apply_warhead(
-        &mut self,
-        warhead: InternedId,
-        damage: i32,
-        coord: (i32, i32, i32),
-    ) {
+    pub fn apply_warhead(&mut self, warhead: &str, damage: i32, coord: (i32, i32, i32)) {
         self.commands.push(SimCommand::ApplyWarhead {
-            warhead,
+            warhead: warhead.to_owned(),
             damage,
             coord,
         });
     }
 
     /// Reaches `Simulation::fire_super_weapon` through a host command.
-    pub fn fire_super_weapon(&mut self, super_weapon: InternedId, cell: (u16, u16)) {
+    pub fn fire_super_weapon(&mut self, super_weapon: &str, cell: (u16, u16)) {
         self.commands.push(SimCommand::FireSuperWeapon {
-            super_weapon,
+            super_weapon: super_weapon.to_owned(),
             cell,
         });
     }
@@ -316,7 +319,16 @@ impl ScriptRegistry {
         rules: &'r RuleSet,
         frame: i32,
     ) -> ScriptContext<'r> {
-        let mut ctx = ScriptContext::new(rules, frame);
+        self.dispatch_with(event, states, ScriptContext::new(rules, frame))
+    }
+
+    /// Dispatch with a host-prepared context (entity anchor, target facts).
+    pub fn dispatch_with<'r>(
+        &self,
+        event: &ScriptEvent,
+        states: &mut ScriptStateStore,
+        mut ctx: ScriptContext<'r>,
+    ) -> ScriptContext<'r> {
         if event.bit() == EventMask::DESTROYED {
             states.remove_entity(event.entity());
             return ctx;
@@ -423,8 +435,8 @@ mod tests {
     fn commands_and_lasers_are_collected_without_touching_the_world() {
         let rules = RuleSet::empty_for_test();
         let mut ctx = ScriptContext::new(&rules, 5);
-        ctx.apply_warhead(InternedId::default(), 100, (1, 2, 3));
-        ctx.fire_super_weapon(InternedId::default(), (4, 5));
+        ctx.apply_warhead("TestWH", 100, (1, 2, 3));
+        ctx.fire_super_weapon("TestSW", (4, 5));
         assert_eq!(ctx.commands.len(), 2);
         assert!(ctx.lasers.is_empty());
         assert_eq!(ctx.frame, 5);
@@ -455,3 +467,16 @@ pub fn install_script_registry(registry: ScriptRegistry) -> Result<(), ScriptReg
 
 #[path = "scripting/runtime.rs"]
 mod runtime;
+
+#[path = "scripting/gbion.rs"]
+mod gbion;
+
+pub use gbion::GbionIonShow;
+
+/// Install the built-in native scripts once, before the first frame. A second
+/// call is harmless: the registry is a process-wide OnceLock.
+pub fn install_builtin_scripts() {
+    let mut registry = ScriptRegistry::new();
+    registry.register(Box::new(GbionIonShow));
+    let _ = install_script_registry(registry);
+}

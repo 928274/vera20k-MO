@@ -9,7 +9,7 @@
 
 | 项目 | 值 |
 | --- | --- |
-| 当前合并基线 | `c8a3c916d`（tag `v0.2.8`，开发版 0.2.9） |
+| 当前合并基线 | `e60c34b83`（两次 merge：`c501635d2` 到 `3a05cc27d`，`61c10c66b` 到 `e60c34b83`） |
 | 上一次 rebase 基线 | `f5a28350f` |
 | 本次整合方式 | `git merge --no-ff upstream/main`，保留双方历史，不改写已推送历史 |
 | 上游相对旧基线 | 29 个提交，196 文件，+8772 / −1631 |
@@ -100,9 +100,13 @@ Windows 上需先准备 MSVC 14.44 / Windows SDK 10.0.22621 的 `PATH` / `INCLUD
 - **阶段 0a 不改变任何帧行为**：注册表为空、状态表为空。
 - **阶段 0b 已完成**：`src/sim/scripting/runtime.rs` 在 `advance_master_frame` 的固定
   位置按 stable-id 顺序派发 `Update`；`fold_state()` 末尾把 `script_states` 纳入 state
-  hash；`app/initialize.rs` 启动时发现脚本目录并输出诊断日志；激光与超武命令已接到
-  真实 sim 入口，`ApplyWarhead` 暂时输出结构化诊断（完整 receiver 链留阶段 1 与
-  GBION 演出一起接通）。注册表为空时派发器直接返回，帧行为仍不变。
+  hash；`app/initialize.rs` 启动时发现脚本目录并输出诊断日志。
+- **阶段 1（首版）已完成**：`src/sim/scripting/gbion.rs` 迁移了四幕蓄能演出
+  （旋转激光 → 蓄力 → 3×3 光柱 + 蓝色照明 + 主波 → 结束）；`ApplyWarhead` 已接到
+  `world_receiver::apply_area_damage` 真实伤害链；启动时 `install_builtin_scripts()`
+  安装注册表。已知差异：触发条件暂用 90 帧 fallback（原版为地震炮命中 2 次）、
+  锚点取单位自身坐标而非跟随目标、对空分支未启用 —— 详见设计文档「阶段 1 实现状态」。
+  **注意：注册表现在非空，派发器每帧会遍历实体**，不再是零开销。
 
 ## 上游构建修复
 
