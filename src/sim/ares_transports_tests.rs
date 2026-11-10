@@ -236,28 +236,9 @@ fn initial_payload_riders_of_an_open_topped_transport_fire_for_it() {
             target_id: target,
         },
     ));
-    for frame in 0..300 {
+    for _ in 0..300 {
         let commands = sim.take_due_commands();
         sim.advance_tick(&commands, Some(&rules), Some(&grid), None, 33);
-        if frame % 50 == 0 {
-            for rider in &riders {
-                let entity = sim.substrate.entities.get(*rider).unwrap();
-                println!(
-                    "f{frame} rider {rider} mission={:?} target={:?} in_open={} limbo={}",
-                    entity.mission.current().known(),
-                    entity.attack_target.target(),
-                    entity.passenger_role.in_open_transport(),
-                    entity.lifecycle.in_limbo()
-                );
-            }
-            let hull_entity = sim.substrate.entities.get(hull).unwrap();
-            println!(
-                "f{frame} hull mission={:?} target={:?} health={}",
-                hull_entity.mission.current().known(),
-                hull_entity.attack_target.target(),
-                health(&sim)
-            );
-        }
     }
     assert!(health(&sim) < before, "the riders did the damage");
 }
