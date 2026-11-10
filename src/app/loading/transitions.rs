@@ -85,6 +85,7 @@ pub(crate) fn fallback_map_load_result() -> init::MapLoadResult {
             bridge_atlas: None,
             sidebar_cameo_atlas: None,
             sidebar_chrome: None,
+            match_layouts: crate::ui::match_layout::MatchLayoutFile::none(),
             #[cfg(feature = "phobos")]
             sw_sidebar_ui: crate::rules::phobos_sw_sidebar::SuperWeaponSidebarUi::default(),
             #[cfg(feature = "phobos")]
@@ -217,6 +218,12 @@ pub(crate) fn install_world_presentation(
     state.match_state.match_presentation.bridge_atlas = assets.bridge_atlas;
     state.match_state.match_presentation.sidebar_cameo_atlas = assets.sidebar_cameo_atlas;
     state.match_state.match_presentation.sidebar_chrome = assets.sidebar_chrome;
+    state.match_state.match_presentation.match_layouts = assets.match_layouts;
+    // The side's layout sizes the sidebar, and with it the battlefield, from
+    // the world's first frame.
+    state.match_state.match_presentation.sidebar_layout_spec =
+        crate::app::presentation::sidebar_render::sidebar_layout_spec(state);
+    crate::app::presentation::sidebar_render::refresh_added_parts(state);
     #[cfg(feature = "phobos")]
     {
         state
@@ -663,15 +670,17 @@ pub(crate) fn apply_map_load_result(state: &mut AppState, result: init::MapLoadR
 
     // Map load hands over a world anchor point; the transition applies the
     // active tactical rectangle and live zoom.
-    let (tactical_width, tactical_height) =
-        crate::app::input::camera::tactical_viewport_size(state);
+    let (tactical_x, tactical_y, tactical_width, tactical_height) =
+        crate::app::input::camera::tactical_viewport_px(state);
+    let (centring_width, centring_height) =
+        crate::app::input::camera::tactical_centring_size(state);
     let (camera_x, camera_y) = crate::app::input::camera::tactical_camera_top_left(
         (
             result.scenario.camera_anchor_x,
             result.scenario.camera_anchor_y,
         ),
-        tactical_width as f32,
-        tactical_height as f32,
+        centring_width as f32,
+        centring_height as f32,
         state.match_state.input.zoom_level,
     );
     crate::app::input::camera::reset_camera_for_new_scenario(state);
@@ -700,6 +709,7 @@ pub(crate) fn apply_map_load_result(state: &mut AppState, result: init::MapLoadR
         message_list.set_width(tactical_width as i32);
     }
     state.match_state.match_presentation.message_list = message_list;
+    crate::app::input::messages::post_layout_problem(state);
     state.match_state.match_presentation.chat = Default::default();
     // Clear_Scene6851F0 -> 534450 resets BeaconManagerClass (53499B).
     // Display Init_Clear4A88C0 clears +11B0..+11B2, not beacon mode +11B4.
@@ -707,8 +717,8 @@ pub(crate) fn apply_map_load_result(state: &mut AppState, result: init::MapLoadR
     state.match_state.input.cancel_minimap_press();
     state.match_state.input.tactical_mouse.reset_for_new_view();
     state.match_state.input.keys_held.clear();
-    state.match_state.input.cursor_x = tactical_width as f32 * 0.5;
-    state.match_state.input.cursor_y = tactical_height as f32 * 0.5;
+    state.match_state.input.cursor_x = tactical_x as f32 + tactical_width as f32 * 0.5;
+    state.match_state.input.cursor_y = tactical_y as f32 + tactical_height as f32 * 0.5;
     state.platform.frame_pacer.reset_for_new_world();
     state
         .match_state

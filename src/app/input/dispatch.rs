@@ -59,7 +59,8 @@ mod mcv_group_tests;
 /// across the sidebar boundary). A `NotConsumed` click hits no live gadget — only
 /// the legacy dev/pause/producer press path runs; empty-sidebar / off-window
 /// clicks do nothing (gamemd's sidebar-body gadget swallows them, A6). The middle
-/// button has no tactical behavior. Right-press is owned by the tactical catcher
+/// button has no tactical behavior; with VERA's wheel zoom on, its press over
+/// the battlefield resets the view distance. Right-press is owned by the tactical catcher
 /// (viewport-only), so right-clicking dead sidebar chrome no longer deselects —
 /// matching gamemd.
 pub(crate) fn handle_mouse_input(
@@ -187,8 +188,12 @@ fn handle_mouse_input_inner(state: &mut AppState, button: MouseButton, btn_state
     if crate::app::input::campaign_input::is_locked(state) {
         return;
     }
-    // The stock tactical handler has no middle-button case.
+    // The stock tactical handler has no middle-button case. VERA's optional
+    // wheel zoom takes a press over the battlefield as its reset.
     if button == MouseButton::Middle {
+        if pressed {
+            crate::app::input::camera::middle_press_resets_view_distance(state);
+        }
         return;
     }
     // MessageList::Input 0x005D4510 ends an open chat edit on the right
@@ -490,13 +495,10 @@ fn tactical_left_up(state: &mut AppState) {
     // A pending press is still an ordinary click at the actual
     // release point, including after sticky capture routing.
     let release_point = if state.match_state.input.selection_state.is_band_box_active() {
-        let (tactical_width, tactical_height) =
-            crate::app::input::camera::tactical_viewport_size(state);
         clamp_tactical_drag_endpoint(
             state.match_state.input.cursor_x,
             state.match_state.input.cursor_y,
-            tactical_width,
-            tactical_height,
+            crate::app::input::camera::tactical_viewport_px(state),
         )
     } else {
         (
@@ -899,12 +901,12 @@ pub(crate) fn minimap_mouse(state: &mut AppState, button: MouseButton, btn_state
 fn clamp_tactical_drag_endpoint(
     cursor_x: f32,
     cursor_y: f32,
-    tactical_width: u32,
-    tactical_height: u32,
+    (left, top, width, height): (u32, u32, u32, u32),
 ) -> (f32, f32) {
+    let (left, top) = (left as f32, top as f32);
     (
-        cursor_x.clamp(0.0, tactical_width.saturating_sub(1) as f32),
-        cursor_y.clamp(0.0, tactical_height.saturating_sub(1) as f32),
+        cursor_x.clamp(left, left + width.saturating_sub(1) as f32),
+        cursor_y.clamp(top, top + height.saturating_sub(1) as f32),
     )
 }
 
@@ -989,13 +991,10 @@ pub(crate) fn handle_cursor_moved_in_game(state: &mut AppState) {
     if crate::app::input::campaign_input::is_locked(state) {
         return;
     }
-    let (tactical_width, tactical_height) =
-        crate::app::input::camera::tactical_viewport_size(state);
     let clamped_endpoint = clamp_tactical_drag_endpoint(
         state.match_state.input.cursor_x,
         state.match_state.input.cursor_y,
-        tactical_width,
-        tactical_height,
+        crate::app::input::camera::tactical_viewport_px(state),
     );
 
     // Activation arms the rectangle and nothing else. The call gamemd makes at
@@ -1019,8 +1018,19 @@ mod drag_tests {
 
     #[test]
     fn item82_captured_drag_live_and_release_endpoints_stop_at_tactical_rect() {
-        let endpoint = clamp_tactical_drag_endpoint(950.0, 650.0, 632, 568);
+        let endpoint = clamp_tactical_drag_endpoint(950.0, 650.0, (0, 0, 632, 568));
         assert_eq!(endpoint, (631.0, 567.0));
+        // A battlefield a layout sets in from the frame's corner clamps to
+        // its own rectangle.
+        let moved = (168, 32, 632, 568);
+        assert_eq!(
+            clamp_tactical_drag_endpoint(10.0, 5.0, moved),
+            (168.0, 32.0)
+        );
+        assert_eq!(
+            clamp_tactical_drag_endpoint(950.0, 650.0, moved),
+            (799.0, 599.0)
+        );
 
         let mut selection = SelectionState::new();
         selection.begin_drag(100.0, 100.0);
@@ -1087,6 +1097,31 @@ pub(crate) fn sidebar_scroll_command(state: &mut AppState, action: WheelAction) 
     else {
         return;
     };
+    // VERA: over a grid of build pictures the side's layout added, the wheel
+    // scrolls that grid, a row a notch; anywhere else it scrolls the
+    // sidebar's own strip as the original does.
+    let (x, y) = state.sidebar_frame().point_to_layout(
+        state.match_state.input.cursor_x,
+        state.match_state.input.cursor_y,
+    );
+    let over = current_sidebar_view(state).and_then(|view| {
+        view.added_grids
+            .iter()
+            .find(|grid| grid.rect.contains(x, y))
+            .copied()
+    });
+    if let Some(grid) = over {
+        let scroll = &mut state.match_state.match_presentation.added_grid_scroll;
+        if scroll.len() <= grid.part {
+            scroll.resize(grid.part + 1, 0);
+        }
+        scroll[grid.part] = if action == WheelAction::SidebarDown {
+            (grid.scroll_rows + 1).min(grid.max_scroll_rows)
+        } else {
+            grid.scroll_rows.saturating_sub(1)
+        };
+        return;
+    }
     let presentation = &mut state.match_state.match_presentation;
     presentation.sidebar_projection.queue_scroll(
         presentation.active_sidebar_tab,

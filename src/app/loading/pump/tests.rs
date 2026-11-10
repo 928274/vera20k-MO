@@ -414,6 +414,27 @@ fn campaign_preparation_failure_retires_the_lease_with_shell_retry_policy() {
     }
 }
 
+#[test]
+fn a_failed_campaign_or_network_load_tells_the_player_why() {
+    let err = anyhow::anyhow!("unknown theater").context("map MYMAP.MAP");
+    for policy in [
+        LoadingFailurePolicy::RetryCampaignShell,
+        LoadingFailurePolicy::RetryNetworkShell,
+    ] {
+        let text = failed_load_notice(policy, &err).expect("the shell shows a box");
+        assert!(text.contains("map MYMAP.MAP: unknown theater"), "{text}");
+    }
+    // Skirmish keeps its result card and the generic fallback installs a map.
+    assert!(failed_load_notice(LoadingFailurePolicy::ReportNativeFailure, &err).is_none());
+    assert!(failed_load_notice(LoadingFailurePolicy::InstallGenericFallback, &err).is_none());
+    let long = anyhow::anyhow!("x".repeat(5000));
+    let text = failed_load_notice(LoadingFailurePolicy::RetryNetworkShell, &long).unwrap();
+    assert!(
+        text.chars().count() < 500,
+        "a debug dump is cut to fit the box"
+    );
+}
+
 pub(super) fn unverified_seed(value: u32) -> crate::app::match_bootstrap::MatchSeed {
     crate::app::match_bootstrap::MatchSeed {
         value,
@@ -560,8 +581,8 @@ fn begin_loading_plays_loading_theme_and_polls_theme_through_the_lease() {
     );
     let assets = audio_service_asset_manager(&process_assets, Some(session))
         .expect("leased manager serves the Theme poll");
-    let mut frontend = crate::sim::rng::MainRng::new(1);
-    let mut main = crate::app::state::process_main_draws(None, &mut frontend);
+    let frontend = crate::sim::rng::MainRng::new(1);
+    let mut main = crate::app::state::process_main_draws(None, &frontend);
     audio.service_audio(600, false, Some(assets), None, &mut main);
     assert!(
         !audio.service_clock.admit(600),

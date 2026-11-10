@@ -43,6 +43,7 @@ Thumbs.db
 /docs/*
 !/docs/capabilities.md
 !/docs/wasm.md
+!/docs/sim-thread.md
 !/docs/ares.md
 !/docs/android.md
 !/docs/ares-side-defaults.md
@@ -100,6 +101,7 @@ Thumbs.db
 !/docs/personal-rules.md
 !/docs/modding.md
 !/docs/terrain-deformation.md
+!/docs/dormant-stock-rules.md
 !/docs/_config.yml
 !/docs/index.md
 !/docs/Networking.md
@@ -113,6 +115,8 @@ Thumbs.db
 !/docs/health-bars.md
 !/docs/color-vision-config.md
 !/docs/script-action-56.md
+!/docs/interface-layout.md
+!/docs/examples/
 !/docs/ar/
 !/docs/de/
 !/docs/ru/

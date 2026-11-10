@@ -69,7 +69,7 @@ impl Default for PendingCameraScroll {
 /// This is the inverse of the same viewport conversion every camera move uses.
 pub(crate) fn saved_tactical_view(state: &AppState) -> crate::sim::snapshot::SavedTacticalView {
     let input = &state.match_state.input;
-    let (width, height) = tactical_viewport_size(state);
+    let (width, height) = tactical_centring_size(state);
     let center = tactical_camera_center(
         (input.camera_x, input.camera_y),
         width as f32,
@@ -116,7 +116,7 @@ pub(crate) fn restore_tactical_view(
     let Some(saved) = saved else {
         return;
     };
-    let viewport = tactical_viewport_size(state);
+    let viewport = tactical_centring_size(state);
     restore_camera_input(
         &mut state.match_state.input,
         &saved,
@@ -805,7 +805,7 @@ impl ViewBookmarks {
 /// bookmark records where the player is looking rather than where the mouse
 /// happens to sit.
 pub(crate) fn tactical_centre_cell(state: &AppState) -> (u16, u16) {
-    let (tactical_w, tactical_h) = tactical_viewport_size(state);
+    let (tactical_w, tactical_h) = tactical_centring_size(state);
     let (world_x, world_y) = tactical_camera_center(
         (
             state.match_state.input.camera_x,
@@ -1466,7 +1466,7 @@ pub(crate) fn commit_camera_scroll(state: &mut AppState, mouse: (f32, f32)) {
 /// this visit sampled mouse input. `frame` is its pre-increment binary frame;
 /// the simulation has already committed N+1 by the time presentation runs.
 pub(crate) fn advance_camera_ai(state: &mut AppState, mouse: (f32, f32), frame: u32) {
-    let (width, height) = tactical_viewport_size(state);
+    let (width, height) = tactical_centring_size(state);
     let current = (
         state.match_state.input.camera_x,
         state.match_state.input.camera_y,
@@ -1512,7 +1512,7 @@ pub(crate) fn advance_camera_ai(state: &mut AppState, mouse: (f32, f32), frame: 
 /// SetViewToCoordInstant6D6070. Coordinates are resolved by simulation before
 /// its hash, including the canonical CellClass Dummy query effects.
 pub(crate) fn apply_trigger_camera(state: &mut AppState, coord: [i32; 3], velocity: Option<i32>) {
-    let (width, height) = tactical_viewport_size(state);
+    let (width, height) = tactical_centring_size(state);
     let viewport = (width as f32, height as f32);
     let current = (
         state.match_state.input.camera_x,
@@ -1666,23 +1666,68 @@ pub(crate) fn reset_view_distance(state: &mut AppState) {
     set_view_distance(state, ViewDistanceTier::Default);
 }
 
+/// VERA: a middle-button press over the battlefield puts the wheel's view
+/// distance back to the stock one. gamemd's tactical handler has no
+/// middle-button case and no world zoom, so the press does nothing unless
+/// the player turned wheel zoom on. Returns whether the press was taken.
+pub(crate) fn middle_press_resets_view_distance(state: &mut AppState) -> bool {
+    let battlefield = tactical_viewport_px(state);
+    let centring = tactical_centring_size(state);
+    middle_press_view_reset(
+        &mut state.match_state.input,
+        battlefield,
+        centring,
+        state.persistence.options_profile.mouse_wheel_zoom,
+    )
+}
+
+/// [`middle_press_resets_view_distance`] for a battlefield at `battlefield`
+/// in the frame, its centring size (`tactical_centring_size`) and the
+/// player's wheel zoom setting.
+fn middle_press_view_reset(
+    input: &mut crate::app::input::state::MatchInputState,
+    battlefield: (u32, u32, u32, u32),
+    centring: (u32, u32),
+    mouse_wheel_zoom: bool,
+) -> bool {
+    if !mouse_wheel_zoom || !viewport_contains(battlefield, (input.cursor_x, input.cursor_y)) {
+        return false;
+    }
+    set_view_distance_in(input, centring, ViewDistanceTier::Default);
+    true
+}
+
 fn set_view_distance(state: &mut AppState, tier: ViewDistanceTier) {
-    let (width, height) = tactical_viewport_size(state);
+    let viewport = tactical_centring_size(state);
+    set_view_distance_in(&mut state.match_state.input, viewport, tier);
+}
+
+/// Ease to `tier` around the centre of a tactical view whose centring size
+/// is `viewport` frame pixels (`animate_zoom` keeps the anchor in place).
+fn set_view_distance_in(
+    input: &mut crate::app::input::state::MatchInputState,
+    (width, height): (u32, u32),
+    tier: ViewDistanceTier,
+) {
     let anchor = [width as f32 / 2.0, height as f32 / 2.0];
-    let zoom = state.match_state.input.zoom_level;
-    state.match_state.input.zoom_anchor_world = [
-        anchor[0] / zoom + state.match_state.input.camera_x,
-        anchor[1] / zoom + state.match_state.input.camera_y,
+    let zoom = input.zoom_level;
+    input.zoom_anchor_world = [
+        anchor[0] / zoom + input.camera_x,
+        anchor[1] / zoom + input.camera_y,
     ];
-    state.match_state.input.zoom_anchor_screen = anchor;
-    state.match_state.input.zoom_target = tier.zoom();
+    input.zoom_anchor_screen = anchor;
+    input.zoom_target = tier.zoom();
 }
 
 /// Whether the cursor is over the battlefield rather than the sidebar column
 /// or the bottom command strip, in the frame pixels the cursor uses.
 pub(crate) fn cursor_over_battlefield(state: &AppState) -> bool {
-    let (width, height) = tactical_viewport_size(state);
-    let (x, y) = state.cursor_position();
+    viewport_contains(tactical_viewport_px(state), state.cursor_position())
+}
+
+/// Whether the frame-pixel point lies inside the battlefield's rectangle.
+fn viewport_contains((left, top, width, height): (u32, u32, u32, u32), (x, y): (f32, f32)) -> bool {
+    let (x, y) = (x - left as f32, y - top as f32);
     x >= 0.0 && y >= 0.0 && x < width as f32 && y < height as f32
 }
 
@@ -1774,8 +1819,7 @@ fn tactical_camera_center(
 /// be opaque that frame.
 ///
 pub(crate) fn tactical_viewport_px(state: &AppState) -> (u32, u32, u32, u32) {
-    let (width, height) = tactical_viewport_size(state);
-    (0, 0, width, height)
+    state.sidebar_frame().tactical_rect()
 }
 
 /// The tactical dimensions of the current match frame: Active YR's frame less
@@ -1783,6 +1827,45 @@ pub(crate) fn tactical_viewport_px(state: &AppState) -> (u32, u32, u32, u32) {
 /// (`ui::sidebar::SidebarFrame::tactical_size`).
 pub(crate) fn tactical_viewport_size(state: &AppState) -> (u32, u32) {
     state.sidebar_frame().tactical_size()
+}
+
+/// The frame area the camera centres on, in frame pixels: the battlefield and
+/// as much again as it is set in from the frame's corner on each axis, so the
+/// area starts at the corner and its middle is the battlefield's.
+///
+/// The stored camera is the world point shown at the frame's corner, which
+/// keeps `world = camera + cursor` and `screen = world - camera` true wherever
+/// a layout puts the battlefield. Every conversion between a view centre and
+/// the camera takes this size. It is the battlefield's own size when the
+/// battlefield starts at the corner, as the original's does.
+pub(crate) fn tactical_centring_size(state: &AppState) -> (u32, u32) {
+    let (x, y, width, height) = tactical_viewport_px(state);
+    (width + 2 * x, height + 2 * y)
+}
+
+/// The battlefield's top-left corner, in frame pixels.
+pub(crate) fn tactical_origin_px(state: &AppState) -> (i32, i32) {
+    let (x, y, _, _) = tactical_viewport_px(state);
+    (x as i32, y as i32)
+}
+
+/// What an overlay laid out in the battlefield's own pixels (its corner at
+/// 0, 0) adds to them for a screen-space lane: the world camera the UI shader
+/// subtracts, plus the battlefield's corner in the frame.
+pub(crate) fn battlefield_lane_camera(state: &AppState) -> [f32; 2] {
+    let (x, y) = tactical_origin_px(state);
+    [
+        state.match_state.input.camera_x + x as f32,
+        state.match_state.input.camera_y + y as f32,
+    ]
+}
+
+/// The battlefield's top-left corner in the frame, in world pixels at the
+/// view's zoom: the stored camera plus this is the world point shown there.
+pub(crate) fn tactical_origin_world(state: &AppState) -> (f32, f32) {
+    let (x, y, _, _) = tactical_viewport_px(state);
+    let zoom = state.match_state.input.zoom_level;
+    (x as f32 / zoom, y as f32 / zoom)
 }
 
 /// World-pixel position of a cell's **projected cell coordinate** — the point a
@@ -1886,7 +1969,7 @@ pub(crate) fn center_camera_on_lepton_point(
     let world = crate::util::lepton::absolute_leptons_to_screen(lepton_x, lepton_y, lepton_z);
     let sw = state.render_width() as f32;
     let sh = state.render_height() as f32;
-    let (tactical_w, tactical_h) = tactical_viewport_size(state);
+    let (tactical_w, tactical_h) = tactical_centring_size(state);
     let (cx, cy) = tactical_camera_top_left(
         world,
         tactical_w as f32,
@@ -2036,7 +2119,7 @@ pub(crate) fn center_camera_on_cell(state: &mut AppState, rx: u16, ry: u16) {
     let world = cell_centre_world_point(rx, ry, z);
     let sw = state.render_width() as f32;
     let sh = state.render_height() as f32;
-    let (tactical_w, tactical_h) = tactical_viewport_size(state);
+    let (tactical_w, tactical_h) = tactical_centring_size(state);
     let (cx, cy) = tactical_camera_top_left(
         world,
         tactical_w as f32,
@@ -2105,31 +2188,35 @@ fn clamp_camera_point_for_state(
         return point;
     }
     let (frame_w, frame_h) = (sw.max(0.0) as u32, sh.max(0.0) as u32);
-    let (viewport_w, viewport_h) = state.sidebar_frame_for(frame_w, frame_h).tactical_size();
+    let (origin_x, origin_y, viewport_w, viewport_h) =
+        state.sidebar_frame_for(frame_w, frame_h).tactical_rect();
     let viewport = (viewport_w as f32, viewport_h as f32);
+    // What has to stay inside the map is the battlefield, which a layout may
+    // start further in than the frame's corner, where the stored camera is.
+    let zoom = state.match_state.input.zoom_level;
+    let origin = (origin_x as f32 / zoom, origin_y as f32 / zoom);
+    let point = (point.0 + origin.0, point.1 + origin.1);
+    let to_camera = |corner: (f32, f32)| (corner.0 - origin.0, corner.1 - origin.1);
     if let Some(runtime) = state.match_state.sim_runtime.as_ref() {
         // The radar rectangle enumerates mode-zero cells. Tactical6D8640
         // instead reads the five final MapClass LocalSize fields directly,
         // including its northern headroom. These are distinct consumers of
         // the same map authority, not interchangeable pixel rectangles.
-        return runtime
-            .view()
-            .playfield_authority()
-            .0
-            .map_or(point, |bounds| {
-                clamp_camera_point_to_local_bounds(
-                    point,
-                    bounds,
-                    viewport,
-                    state.match_state.input.zoom_level,
-                )
-            });
+        return to_camera(
+            runtime
+                .view()
+                .playfield_authority()
+                .0
+                .map_or(point, |bounds| {
+                    clamp_camera_point_to_local_bounds(point, bounds, viewport, zoom)
+                }),
+        );
     }
     // Renderer fixtures without a simulation clamp to the whole grid.
     let Some(grid) = &state.match_state.match_presentation.terrain_grid else {
-        return point;
+        return to_camera(point);
     };
-    clamp_camera_point_to_rect(
+    to_camera(clamp_camera_point_to_rect(
         point,
         (
             grid.origin_x,
@@ -2138,8 +2225,8 @@ fn clamp_camera_point_for_state(
             grid.world_height,
         ),
         viewport,
-        state.match_state.input.zoom_level,
-    )
+        zoom,
+    ))
 }
 
 fn clamp_camera_point_to_local_bounds(
@@ -3164,4 +3251,56 @@ fn cell_centre_shifts_half_a_tile_on_both_axes_from_the_tile_corner() {
         assert_eq!(cx - nw_x, terrain::TILE_WIDTH / 2.0);
         assert_eq!(cy - nw_y, terrain::TILE_HEIGHT / 2.0);
     }
+}
+
+#[cfg(test)]
+#[test]
+fn a_middle_press_resets_the_view_distance_only_with_wheel_zoom_over_the_battlefield() {
+    use crate::app::input::state::MatchInputState;
+    let viewport = (1000, 700);
+    let huge = ViewDistanceTier::Huge.zoom();
+    let zoomed_out = |cursor: (f32, f32)| {
+        let mut input = MatchInputState::new(Default::default());
+        (input.zoom_level, input.zoom_target) = (huge, huge);
+        (input.camera_x, input.camera_y) = (300.0, 200.0);
+        (input.cursor_x, input.cursor_y) = cursor;
+        input
+    };
+
+    // Over the battlefield with the setting on: back to the stock scale,
+    // easing around the tactical view's centre.
+    let mut input = zoomed_out((999.0, 699.0));
+    let battlefield = (0, 0, viewport.0, viewport.1);
+    assert!(middle_press_view_reset(
+        &mut input,
+        battlefield,
+        viewport,
+        true
+    ));
+    assert_eq!(input.zoom_target, 1.0);
+    assert_eq!(input.zoom_level, huge, "the ease is animate_zoom's");
+    assert_eq!(input.zoom_anchor_screen, [500.0, 350.0]);
+    assert_eq!(
+        input.zoom_anchor_world,
+        [500.0 / huge + 300.0, 350.0 / huge + 200.0]
+    );
+
+    // The setting off (stock play), or the cursor on the sidebar column's
+    // first pixel: the press does nothing.
+    let mut input = zoomed_out((500.0, 350.0));
+    assert!(!middle_press_view_reset(
+        &mut input,
+        battlefield,
+        viewport,
+        false
+    ));
+    assert_eq!(input.zoom_target, huge);
+    let mut input = zoomed_out((1000.0, 350.0));
+    assert!(!middle_press_view_reset(
+        &mut input,
+        battlefield,
+        viewport,
+        true
+    ));
+    assert_eq!(input.zoom_target, huge);
 }

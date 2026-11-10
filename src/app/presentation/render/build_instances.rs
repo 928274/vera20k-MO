@@ -363,11 +363,7 @@ pub(super) fn build_world_instances(
     // admitted by the Display/body plan receive commands. Native6D913C and
     //6D9153 run in that parent's slot, before its body at6D916C.
     if let Some(palette) = bracket_palette {
-        let camera = [
-            state.match_state.input.camera_x,
-            state.match_state.input.camera_y,
-        ]
-        .map(|value| value.floor() as i32);
+        let camera = super::tactical_surface_line_viewport(state).camera;
         let mut brackets =
             crate::app::presentation::selection_brackets::build_selection_bracket_lines(
                 state,
@@ -844,14 +840,13 @@ pub(super) fn update_minimap(state: &mut AppState, local_owner: &Option<String>)
     let presentation = &mut state.match_state.match_presentation;
     if let (Some(minimap), Some(runtime)) = (
         presentation.minimap.as_mut(),
-        state.match_state.sim_runtime.as_mut(),
+        state.match_state.sim_runtime.as_ref(),
     ) {
-        let transaction = super::minimap_transaction::present_minimap_frame(runtime, |runtime| {
+        let transaction = super::minimap_transaction::present_minimap_frame(minimap, |minimap| {
             // F10 cone: render-feed reads go through SimView getters. The
             // production transaction includes composition, queue upload, and
-            // only then the simulation acknowledgement.
+            // only then the acknowledgement of the minimap's own backlog.
             let view = runtime.view();
-            let (radar_dirty_cells, radar_dirty_generation) = view.radar_terrain_dirty();
             Ok::<_, std::convert::Infallible>(
                 minimap.update_unit_dots(
                     &state.renderer.gpu.device,
@@ -875,8 +870,6 @@ pub(super) fn update_minimap(state: &mut AppState, local_owner: &Option<String>)
                     Some(&runtime.resources.overlay_registry),
                     &presentation.overlay_radar_colors,
                     view.resolved_terrain(),
-                    radar_dirty_cells,
-                    radar_dirty_generation,
                     presentation
                         .beacon_art
                         .as_ref()
@@ -920,7 +913,10 @@ pub(super) fn build_ui_instances(
         [x, y, width, height],
         state.renderer.world_zoom_pass.as_ref(),
     );
-    let camera = view.camera;
+    // The drained action stores go onto the whole logical surface, whose
+    // pixels start at the frame's corner: the view's camera less the
+    // battlefield's corner, which is the stored camera rounded as the view's.
+    let camera = [input.camera_x, input.camera_y].map(|v| v.round() as i32);
     // All path, planning and rally pixels go onto the native world surface.
     // Its camera/clip and the final WorldZoomPass own the scale. Pre-scaling
     // individual spans here would quantize them again on that smaller/larger
@@ -1022,11 +1018,18 @@ pub(crate) fn tactical_world_viewport(
     tactical: [u32; 4],
     zoom: Option<&crate::render::upscale_pass::WorldZoomPass>,
 ) -> crate::app::presentation::target_lines::TacticalViewport {
+    let clip = zoom
+        .map_or(tactical, |zoom| zoom.world_clip(tactical))
+        .map(|v| v as i32);
+    // The view is in the battlefield's own pixels: its camera is the world
+    // point at the battlefield's corner, the stored camera (the frame
+    // corner's) in by the clip's corner, and its clip starts at 0, 0.
     crate::app::presentation::target_lines::TacticalViewport {
-        camera: camera.map(|v| v.round() as i32),
-        clip: zoom
-            .map_or(tactical, |zoom| zoom.world_clip(tactical))
-            .map(|v| v as i32),
+        camera: [
+            camera[0].round() as i32 + clip[0],
+            camera[1].round() as i32 + clip[1],
+        ],
+        clip: [0, 0, clip[2], clip[3]],
         zoom: 1.,
     }
 }
@@ -1198,12 +1201,7 @@ pub(super) fn build_sidebar_instances(state: &mut AppState) -> SidebarInstances 
     });
 
     // Only show minimap when radar is online (or no radar_anim = legacy fallback).
-    let minimap_visible: bool = state
-        .match_state
-        .match_presentation
-        .radar_anim
-        .as_ref()
-        .is_none_or(|ra| ra.is_minimap_visible());
+    let minimap_visible = crate::app::presentation::sidebar_render::minimap_shown(state);
 
     let (minimap, viewport_rect, content_boundary) = if minimap_visible {
         match &mut state.match_state.match_presentation.minimap {
@@ -1256,6 +1254,16 @@ pub(super) fn build_sidebar_instances(state: &mut AppState) -> SidebarInstances 
         .as_ref()
         .map(|v| build_sidebar_chrome_instances(state, v))
         .unwrap_or_default();
+    // The pictures of the buttons the side's layout adds to the sidebar draw
+    // over its own pictures, from the same atlas.
+    chrome.extend(crate::app::presentation::layout_parts::pictures(
+        state,
+        crate::ui::added_parts::Holder::Side,
+        [
+            state.match_state.input.camera_x,
+            state.match_state.input.camera_y,
+        ],
+    ));
     // The bottom bar draws into a surface of its own.
     let mut command_bar = view
         .as_ref()
@@ -1343,12 +1351,21 @@ pub(super) fn build_sidebar_instances(state: &mut AppState) -> SidebarInstances 
     // Credits counter shares the GAME.FNT sidebar-text layer: gamemd draws it
     // with the same BitFont on the sidebar surface, in the same packed side
     // text colour as the cameo labels.
-    if let Some(v) = view.as_ref() {
+    let layout_spec = state.match_state.match_presentation.sidebar_layout_spec;
+    if let Some(v) = view
+        .as_ref()
+        .filter(|_| layout_spec.shows(crate::ui::sidebar::SidebarPart::Money))
+    {
         let theme = crate::app::presentation::sidebar_render::current_sidebar_theme(state);
         text_layers.status.extend(
             crate::app::presentation::sidebar_text::build_sidebar_credits_instances(
                 &state.renderer.bit_font,
                 v,
+                layout_spec,
+                // The plate is as wide as its picture.
+                crate::app::presentation::sidebar_render::current_sidebar_chrome(state)
+                    .and_then(|atlas| atlas.top_strip_thin)
+                    .map_or(layout_spec.sidebar_width, |plate| plate.pixel_size[0]),
                 crate::app::presentation::sidebar_text::credits_tint(theme),
                 [
                     state.match_state.input.camera_x,
@@ -1357,13 +1374,30 @@ pub(super) fn build_sidebar_instances(state: &mut AppState) -> SidebarInstances 
             ),
         );
     }
+    // The buttons and texts the side's layout adds to the sidebar. A
+    // button's box rides the white lane of the cameo's hover outline: over
+    // the chrome and the cameos, under the text.
+    let (layout_boxes, layout_texts) = crate::app::presentation::layout_parts::instances(
+        state,
+        crate::ui::added_parts::Holder::Side,
+        ready_tint,
+        [
+            state.match_state.input.camera_x,
+            state.match_state.input.camera_y,
+        ],
+    );
+    text_layers.status.extend(layout_texts);
     state.renderer.bit_font.set_raster(frame_raster);
 
     // Preserve the pixels actually drawn online for a possible pre-due loss.
     // This is display history, separate from ongoing internal minimap updates.
+    // The radar housing's corner, where `build_radar_anim_instance` draws it.
+    let spec = state.match_state.match_presentation.sidebar_layout_spec;
     let origin = [
-        state.match_state.input.camera_x + state.sidebar_frame().layout_left(),
-        state.match_state.input.camera_y + 48.0,
+        state.match_state.input.camera_x
+            + state.sidebar_frame().layout_left()
+            + spec.radar_housing_x,
+        state.match_state.input.camera_y + spec.radar_housing_y,
     ];
     let presentation = &mut state.match_state.match_presentation;
     if let (Some(radar), Some(mm)) = (
@@ -1386,7 +1420,11 @@ pub(super) fn build_sidebar_instances(state: &mut AppState) -> SidebarInstances 
         smooth_chrome,
         smooth_command_bar,
         cameo: cameo_layers.cameo,
-        cameo_hover: cameo_layers.hover,
+        cameo_hover: {
+            let mut hover = cameo_layers.hover;
+            hover.extend(layout_boxes);
+            hover
+        },
         unavailable: cameo_layers.unavailable,
         flash: cameo_layers.flash,
         gclock: cameo_layers.gclock,
@@ -1431,11 +1469,14 @@ fn build_radar_anim_instance(state: &AppState) -> Vec<SpriteInstance> {
 
     let (sw, sh) = state.sidebar_frame().layout_screen();
     let spec = state.match_state.match_presentation.sidebar_layout_spec;
+    if !spec.shows(crate::ui::sidebar::SidebarPart::Radar) {
+        return Vec::new();
+    }
     let layout = crate::ui::sidebar::compute_layout_with_spec(spec, sw, sh, 0);
 
     vec![SpriteInstance {
         position: [
-            state.match_state.input.camera_x + layout.sidebar_x,
+            state.match_state.input.camera_x + layout.radar_x,
             state.match_state.input.camera_y + layout.radar_y,
         ],
         size: [ra.width as f32, ra.height as f32],

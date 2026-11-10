@@ -53,10 +53,10 @@ pub(crate) use draw_passes::{draw_bridge_shadows, draw_pooled_cell_bodies};
 pub(crate) mod draw_plan_lowering;
 mod merge_passes;
 pub(crate) mod minimap_transaction;
-pub(crate) mod terrain_picture;
 mod object_stages;
 #[cfg(test)]
 mod object_stages_gpu_tests;
+pub(crate) mod terrain_picture;
 
 use crate::util::time::{Duration, Instant};
 use anyhow::Result;
@@ -586,8 +586,8 @@ pub(crate) fn render_game(
     // trails, even when this composite ran no Logic. Their shared process
     // Main requests happen here once; GPU uploads only read resolved colors.
     let mut main = crate::app::state::process_main_draws(
-        state.match_state.sim_runtime.as_mut(),
-        &mut state.frontend.frontend_main_rng,
+        state.match_state.sim_runtime.as_ref(),
+        &state.frontend.frontend_main_rng,
     );
     let sim = state
         .match_state
@@ -837,21 +837,47 @@ pub(crate) fn render_game(
 
 /// The tactical surface object-layer DSurface stores address: logical
 /// (unzoomed) pixels from the floored camera, clipped to the tactical rect.
+///
+/// Its camera is the world point at the battlefield's corner, as gamemd's
+/// tactical position is: the surface-line owners project to client points
+/// from it and add the clip's corner for the surface point. The stored camera
+/// is the frame corner's, so it comes in by the battlefield's corner.
+///
+/// The line and wave stores take their depth from the surface row less the
+/// clip's row, on top of this origin (`4BEF03`). A sprite's depth goes by its
+/// row in the battlefield, so the origin carries the clip's row twice and a
+/// line keeps its depth against the objects wherever a layout puts the
+/// battlefield. The original's clip starts at row 0.
 pub(crate) fn tactical_surface_line_viewport(
     state: &AppState,
 ) -> crate::render::surface_line::SurfaceLineViewport {
     let z = state.match_state.input.zoom_level;
     let (x, y, w, h) = crate::app::input::camera::tactical_viewport_px(state);
+    let clip = [x, y, w, h].map(|v| (v as f32 / z) as i32);
     crate::render::surface_line::SurfaceLineViewport {
-        camera: [
-            state.match_state.input.camera_x,
-            state.match_state.input.camera_y,
-        ]
-        .map(|v| v.floor() as i32),
-        clip: [x, y, w, h].map(|v| (v as f32 / z) as i32),
-        z_origin_y: (y as f32 / z) as i32,
+        camera: surface_line_camera(
+            [
+                state.match_state.input.camera_x,
+                state.match_state.input.camera_y,
+            ],
+            [x, y, w, h],
+            z,
+        ),
+        clip,
+        z_origin_y: 2 * clip[1],
         zoom: 1.0,
     }
+}
+
+/// The camera the surface-line owners project from: the floored world point
+/// at the battlefield's corner. `camera` is the stored one, the frame
+/// corner's; `tactical` is the battlefield in frame pixels.
+pub(crate) fn surface_line_camera(camera: [f32; 2], tactical: [u32; 4], zoom: f32) -> [i32; 2] {
+    [
+        camera[0] + tactical[0] as f32 / zoom,
+        camera[1] + tactical[1] as f32 / zoom,
+    ]
+    .map(|v| v.floor() as i32)
 }
 
 /// Upload all per-frame instance vectors to the GPU buffer pool.
@@ -891,15 +917,46 @@ fn upload_to_gpu(
 
     // TacticalClass::Draw's timer lines, which follow the PixelFX sparkles;
     // built before the pool borrow (they step the Supers' blinks).
-    let (super_timer_fill, super_timer_text) =
+    let (mut super_timer_fill, mut super_timer_text) =
         crate::app::presentation::super_timers::build_super_timer_instances(state);
+    // The buttons and texts the side's layout adds over the battlefield
+    // share the timers' lanes: white boxes, then text, inside its clip.
+    {
+        let theme = crate::app::presentation::sidebar_render::current_sidebar_theme(state);
+        let (boxes, texts) = crate::app::presentation::layout_parts::instances(
+            state,
+            crate::ui::added_parts::Holder::Field,
+            crate::render::sidebar_text::native_radar_outline_color(theme),
+            [
+                state.match_state.input.camera_x,
+                state.match_state.input.camera_y,
+            ],
+        );
+        super_timer_fill.extend(boxes);
+        super_timer_text.extend(texts);
+    }
+    // Their pictures come from the sidebar's atlas and zoom with the frame.
+    let layout_field_art = crate::app::presentation::layout_parts::pictures(
+        state,
+        crate::ui::added_parts::Holder::Field,
+        [
+            state.match_state.input.camera_x,
+            state.match_state.input.camera_y,
+        ],
+    );
 
     // GScreenClass_DrawText's Phobos build description, the tactical view's
     // top-right identity box; empty outside Phobos builds.
     let (build_text_fill, build_text_text) =
         crate::app::presentation::build_text::build_instances(state);
     state.renderer.bit_font.set_raster(frame_raster);
-    let [message_fill, tooltip_fill, tooltip_border, super_timer_fill, build_text_fill] = [
+    let [
+        message_fill,
+        tooltip_fill,
+        tooltip_border,
+        super_timer_fill,
+        build_text_fill,
+    ] = [
         message_fill,
         tooltip_fill,
         tooltip_border,
@@ -927,7 +984,7 @@ fn upload_to_gpu(
         if presentation.chrono_screen.overrides_tactical_draw() {
             Vec::new()
         } else {
-            let (width, height) = crate::app::input::camera::tactical_viewport_size(state);
+            let (left, top, width, height) = crate::app::input::camera::tactical_viewport_px(state);
             presentation.flying_credits.borrow().build_instances(
                 &state.renderer.bit_font,
                 [
@@ -935,7 +992,7 @@ fn upload_to_gpu(
                     state.match_state.input.camera_y,
                 ],
                 state.match_state.input.zoom_level,
-                [width, height],
+                [left, top, width, height],
             )
         }
     };
@@ -987,6 +1044,7 @@ fn upload_to_gpu(
 
     // Residual effects keep their existing uploads and pass ownership.
     pool.upload("cell_sparkles", &world.cell_sparkles);
+    pool.upload("layout_field_art", &layout_field_art);
     pool.upload("super_timer_fill", &super_timer_fill);
     pool.upload("super_timer_text", &super_timer_text);
     pool.upload("build_text_fill", &build_text_fill);
@@ -1010,7 +1068,11 @@ fn upload_to_gpu(
     // Sidebar + minimap
     pool.upload_following("minimap", &sidebar.minimap, ui_camera);
     pool.upload_following("viewport_rect", &sidebar.viewport_rect, ui_camera);
-    pool.upload_following("radar_content_boundary", &sidebar.content_boundary, ui_camera);
+    pool.upload_following(
+        "radar_content_boundary",
+        &sidebar.content_boundary,
+        ui_camera,
+    );
     pool.upload_following("sidebar_chrome", &sidebar.chrome, ui_camera);
     pool.upload_following("command_bar", &sidebar.command_bar, ui_camera);
     pool.upload_following("radar_anim", &sidebar.radar_anim, ui_camera);

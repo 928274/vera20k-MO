@@ -296,6 +296,11 @@ pub struct AssetManager {
     active_sidebar_archives: Vec<String>,
     /// Path to the RA2 installation directory.
     ra2_dir: PathBuf,
+    /// VERA: the mod folder in use (docs/modding.md), read as if its files
+    /// had been copied on top of the installation directory: a file here
+    /// takes the place of the installation's file of the same name. `None`
+    /// is the original game.
+    mod_dir: Option<PathBuf>,
 }
 
 /// Test fixtures open the retail install once per test process and hand each
@@ -324,6 +329,7 @@ impl Clone for AssetManager {
             #[cfg(feature = "ares")]
             active_sidebar_archives: self.active_sidebar_archives.clone(),
             ra2_dir: self.ra2_dir.clone(),
+            mod_dir: self.mod_dir.clone(),
         }
     }
 }
@@ -483,12 +489,23 @@ impl AssetManager {
     /// archives are implicitly registered; the probe may explicitly use the
     /// existing load_all_disk_mixes widening. Not a gameplay constructor.
     pub fn from_ini_probe_root(ra2_dir: &Path) -> Result<Self, AssetError> {
+        Self::from_roots(ra2_dir, None)
+    }
+
+    fn from_roots(ra2_dir: &Path, mod_dir: Option<&Path>) -> Result<Self, AssetError> {
+        let mut loose_files = Self::open_loose_root(ra2_dir)?;
+        if let Some(mod_dir) = mod_dir {
+            // Archives are found through this catalogue too
+            // (`mount_named_archive`), so a mod's `expandmd50.mix` mounts where
+            // the installation's would.
+            loose_files.extend(Self::open_loose_root(mod_dir)?);
+        }
         Ok(Self {
             archives: Vec::new(),
             archive_catalog: Vec::new(),
             lookup_index: HashMap::new(),
             mix_file_cache: Mutex::new(HashMap::new()),
-            loose_files: Self::open_loose_root(ra2_dir)?,
+            loose_files,
             audio_pairs: Vec::new(),
             ini_roots: Default::default(),
             active_theater: None,
@@ -496,6 +513,7 @@ impl AssetManager {
             #[cfg(feature = "ares")]
             active_sidebar_archives: Vec::new(),
             ra2_dir: ra2_dir.to_path_buf(),
+            mod_dir: mod_dir.map(Path::to_path_buf),
         })
     }
 
@@ -508,7 +526,23 @@ impl AssetManager {
 
     /// Load the core runtime archive stack for one native media-selection mode.
     pub fn new(ra2_dir: &Path, media_mode: MediaArchiveMode) -> Result<Self, AssetError> {
-        Self::open_startup_archives(ra2_dir, media_mode, StartupArchivePolicy::OptionalWarnings)
+        Self::with_mod(ra2_dir, None, media_mode)
+    }
+
+    /// VERA: [`AssetManager::new`] with a mod folder's files read as if they
+    /// had been copied on top of `ra2_dir`. gamemd has one folder; a mod made
+    /// to be copied into it resolves the same from its own folder.
+    pub fn with_mod(
+        ra2_dir: &Path,
+        mod_dir: Option<&Path>,
+        media_mode: MediaArchiveMode,
+    ) -> Result<Self, AssetError> {
+        Self::open_startup_archives(
+            ra2_dir,
+            mod_dir,
+            media_mode,
+            StartupArchivePolicy::OptionalWarnings,
+        )
     }
 
     /// Inspect the ordinary startup stack while retaining readable archives for
@@ -523,6 +557,7 @@ impl AssetManager {
         let mut issues = Vec::new();
         let manager = Self::open_startup_archives(
             ra2_dir,
+            None,
             media_mode,
             StartupArchivePolicy::Inspect(&mut issues),
         )?;
@@ -531,10 +566,11 @@ impl AssetManager {
 
     fn open_startup_archives(
         ra2_dir: &Path,
+        mod_dir: Option<&Path>,
         media_mode: MediaArchiveMode,
         mut policy: StartupArchivePolicy<'_>,
     ) -> Result<Self, AssetError> {
-        let mut manager = Self::from_ini_probe_root(ra2_dir)?;
+        let mut manager = Self::from_roots(ra2_dir, mod_dir)?;
 
         // WinMain registers the YR language archive before the RA2 fallback.
         manager.mount_startup_archive("langmd.mix", false, &mut policy)?;
@@ -1229,16 +1265,26 @@ impl AssetManager {
     /// to ASCII case. Read from disk at each call; not part of the startup
     /// loose catalog, which holds top-level files only.
     pub fn read_install_file(&self, relative: &str) -> Option<Vec<u8>> {
-        let mut path = self.ra2_dir.clone();
-        for component in relative.split(['\\', '/']).filter(|part| !part.is_empty()) {
-            let exact = path.join(component);
-            path = if crate::util::file_system::exists(&exact) {
-                exact
-            } else {
-                crate::util::case_insensitive_path::find(&path, component)?
-            };
-        }
-        crate::util::file_system::read(&path).ok()
+        self.install_roots().find_map(|root| {
+            let mut path = root.to_path_buf();
+            for component in relative.split(['\\', '/']).filter(|part| !part.is_empty()) {
+                let exact = path.join(component);
+                path = if crate::util::file_system::exists(&exact) {
+                    exact
+                } else {
+                    crate::util::case_insensitive_path::find(&path, component)?
+                };
+            }
+            crate::util::file_system::read(&path).ok()
+        })
+    }
+
+    /// Where a file of the installation is looked for: the mod folder first.
+    fn install_roots(&self) -> impl Iterator<Item = &Path> {
+        self.mod_dir
+            .as_deref()
+            .into_iter()
+            .chain(std::iter::once(self.ra2_dir.as_path()))
     }
 
     fn lookup_asset_entry(&self, name: &str) -> Option<(&NamedArchive, i32)> {
@@ -1377,12 +1423,19 @@ impl AssetManager {
         relative_directory: Option<&str>,
         family_prefix: &str,
     ) -> Result<WildcardMount, AssetError> {
-        let directory = relative_directory
-            .map(|relative| self.ra2_dir.join(relative))
-            .unwrap_or_else(|| self.ra2_dir.clone());
         // Init_Mix_Files' CD search (`0x0047AF70`, FindFirstFileA at
         // `0x0047AFCF`/`0x0047B08A`) registers each match as it is listed.
-        let entries = match crate::util::case_insensitive_path::native_listing(&directory) {
+        // VERA: with a mod, the listing is the one the installation's folder
+        // would give with the mod's files copied on top.
+        let directories: Vec<PathBuf> = [Some(self.ra2_dir.as_path()), self.mod_dir.as_deref()]
+            .into_iter()
+            .flatten()
+            .map(|root| {
+                relative_directory
+                    .map_or_else(|| root.to_path_buf(), |relative| root.join(relative))
+            })
+            .collect();
+        let entries = match crate::util::case_insensitive_path::native_listing_over(&directories) {
             Ok(entries) => entries,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(WildcardMount::default());
@@ -1434,7 +1487,8 @@ impl AssetManager {
     }
 
     fn raw_relative_file_available(&self, relative: &str) -> bool {
-        retail_enumerated_file(&self.ra2_dir.join(relative))
+        self.install_roots()
+            .any(|root| retail_enumerated_file(&root.join(relative)))
     }
 
     fn record_archive_issue(
@@ -1918,20 +1972,7 @@ mod tests {
     }
 
     fn empty_manager(ra2_dir: &Path) -> AssetManager {
-        AssetManager {
-            archives: Vec::new(),
-            archive_catalog: Vec::new(),
-            lookup_index: HashMap::new(),
-            mix_file_cache: Mutex::new(HashMap::new()),
-            loose_files: AssetManager::open_loose_root(ra2_dir).expect("open loose test root"),
-            audio_pairs: Vec::new(),
-            ini_roots: Default::default(),
-            active_theater: None,
-            active_theater_archives: Vec::new(),
-            #[cfg(feature = "ares")]
-            active_sidebar_archives: Vec::new(),
-            ra2_dir: ra2_dir.to_path_buf(),
-        }
+        AssetManager::from_roots(ra2_dir, None).expect("open loose test root")
     }
 
     fn make_new_format_mix(name: &str, body: &[u8]) -> MixArchive {
@@ -2293,6 +2334,63 @@ mod tests {
     }
 
     #[test]
+    fn a_mod_folder_reads_as_if_copied_on_top_of_the_installation() {
+        let install = audio_test_install("mod-under");
+        std::fs::write(install.path().join("rulesmd.ini"), b"game rules").unwrap();
+        std::fs::write(install.path().join("artmd.ini"), b"game art").unwrap();
+        install.write_mix("expandmd50.mix", "unit.shp", b"game unit");
+        let mod_dir = TestDirectory::new("mod-over");
+        std::fs::write(mod_dir.path().join("RULESMD.INI"), b"mod rules").unwrap();
+        mod_dir.write_mix("ExpandMD50.mix", "unit.shp", b"mod unit");
+        mod_dir.write_mix("expandmd60.mix", "new.vxl", b"mod model");
+        std::fs::create_dir(mod_dir.path().join("Taunts")).unwrap();
+        std::fs::write(
+            mod_dir.path().join("Taunts").join("tauam01.wav"),
+            b"mod taunt",
+        )
+        .unwrap();
+
+        let stock = MediaArchiveMode::STOCK_DIGITAL;
+        let modded = AssetManager::with_mod(install.path(), Some(mod_dir.path()), stock).unwrap();
+        assert_eq!(modded.get_ref("rulesmd.ini"), Some(&b"mod rules"[..]));
+        assert_eq!(modded.get_ref("artmd.ini"), Some(&b"game art"[..]));
+        // The mod's archive stands where the installation's of that name did.
+        assert_eq!(modded.get_ref("unit.shp"), Some(&b"mod unit"[..]));
+        assert_eq!(modded.get_ref("new.vxl"), Some(&b"mod model"[..]));
+        assert_eq!(
+            modded.read_install_file("taunts\\tauam01.wav").as_deref(),
+            Some(&b"mod taunt"[..])
+        );
+
+        let original = AssetManager::new(install.path(), stock).unwrap();
+        assert_eq!(original.get_ref("rulesmd.ini"), Some(&b"game rules"[..]));
+        assert_eq!(original.get_ref("unit.shp"), Some(&b"game unit"[..]));
+        assert_eq!(original.get_ref("new.vxl"), None);
+    }
+
+    #[test]
+    fn cd_wildcard_lists_a_mod_folder_merged_into_the_installation() {
+        let install = TestDirectory::new("cd-mod-under");
+        install.write_mix("MAPSMD01.MIX", "one.bin", b"one");
+        install.write_mix("mapsmd03.mix", "three.bin", b"three");
+        let mod_dir = TestDirectory::new("cd-mod-over");
+        mod_dir.write_mix("mapsmd02.mix", "two.bin", b"two");
+        mod_dir.write_mix("MAPSMD03.MIX", "mod-three.bin", b"mod three");
+
+        let mut manager = AssetManager::from_roots(install.path(), Some(mod_dir.path())).unwrap();
+        manager
+            .mount_native_map_media(MediaArchiveMode::CdWildcard)
+            .expect("CD wildcard map media");
+
+        assert_eq!(
+            manager.loaded_archive_names(),
+            ["MAPSMD01.MIX", "mapsmd02.mix", "MAPSMD03.MIX"]
+        );
+        assert_eq!(manager.get_ref("three.bin"), None);
+        assert_eq!(manager.get_ref("mod-three.bin"), Some(&b"mod three"[..]));
+    }
+
+    #[test]
     fn cd_movie_probe_order_selects_movmd_before_movies_family() {
         let directory = TestDirectory::new("cd-movie-media");
         directory.write_mix("MOVIES01.MIX", "base-movie.bin", b"base");
@@ -2396,6 +2494,7 @@ mod tests {
             #[cfg(feature = "ares")]
             active_sidebar_archives: Vec::new(),
             ra2_dir: PathBuf::new(),
+            mod_dir: None,
         };
         manager.rebuild_indexes();
 
@@ -2480,6 +2579,7 @@ mod tests {
             #[cfg(feature = "ares")]
             active_sidebar_archives: Vec::new(),
             ra2_dir: PathBuf::new(),
+            mod_dir: None,
         };
         manager.rebuild_indexes();
         manager
@@ -2554,6 +2654,7 @@ mod tests {
             #[cfg(feature = "ares")]
             active_sidebar_archives: Vec::new(),
             ra2_dir: PathBuf::new(),
+            mod_dir: None,
         };
         manager.rebuild_indexes();
 
@@ -2596,6 +2697,7 @@ mod tests {
             #[cfg(feature = "ares")]
             active_sidebar_archives: Vec::new(),
             ra2_dir: PathBuf::new(),
+            mod_dir: None,
         };
         manager.rebuild_indexes();
         manager.catalog_named_nested_archives();
@@ -2636,6 +2738,7 @@ mod tests {
             #[cfg(feature = "ares")]
             active_sidebar_archives: Vec::new(),
             ra2_dir: PathBuf::new(),
+            mod_dir: None,
         };
         manager.rebuild_indexes();
 
@@ -2677,6 +2780,7 @@ mod tests {
             #[cfg(feature = "ares")]
             active_sidebar_archives: Vec::new(),
             ra2_dir: PathBuf::new(),
+            mod_dir: None,
         };
         manager.rebuild_indexes();
 
@@ -2713,6 +2817,7 @@ mod tests {
             #[cfg(feature = "ares")]
             active_sidebar_archives: Vec::new(),
             ra2_dir: PathBuf::new(),
+            mod_dir: None,
         };
         manager.rebuild_indexes();
 
@@ -2770,6 +2875,7 @@ mod tests {
             #[cfg(feature = "ares")]
             active_sidebar_archives: Vec::new(),
             ra2_dir: PathBuf::new(),
+            mod_dir: None,
         };
         manager.rebuild_indexes();
 
