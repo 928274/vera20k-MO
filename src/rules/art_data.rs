@@ -2320,45 +2320,6 @@ pub fn effect_shp_candidates(
 /// the turret heading's top five bits (`facing >> 3`).
 pub const SHP_TURRET_FACING_FRAMES: u16 = 32;
 
-/// Slot 9's draw row for a *rules-owned* SHP turret.
-///
-/// `0x00446580..0x004466D5` builds this slot in Grand_Opening, not in
-/// `BuildingTypeClass::ReadINI`: the name comes from the type's own
-/// `TurretAnim=` (the art key of that name is not read for slot 9), and the
-/// anchor is `TurretAnimX`/`TurretAnimY`/`TurretAnimZAdjust` on the same
-/// section. The frame is the turret facing rather than the animation's timer,
-/// so this row exists only to give the presentation the slot, the name and the
-/// offset; [`crate::app::presentation::instances::shp`] supplies the frame.
-///
-/// `None` for a voxel turret (`TurretAnimIsVoxel=yes` — the B8/C0 model path),
-/// for a type without `Turret=`, and when the section names no `TurretAnim`.
-pub fn shp_turret_anim_config(
-    object: &crate::rules::object_type::ObjectType,
-) -> Option<BuildingAnimConfig> {
-    if !object.has_turret || object.turret_anim_is_voxel {
-        return None;
-    }
-    let name = object.turret_anim.clone()?;
-    Some(BuildingAnimConfig {
-        native_slot: 9,
-        anim_type: name,
-        damaged_variant: None,
-        garrisoned_variant: None,
-        kind: BuildingAnimKind::Special,
-        is_primary: true,
-        x: object.turret_anim_x,
-        y: object.turret_anim_y,
-        y_sort: 0,
-        z_adjust: object.turret_anim_z_adjust,
-        loop_start: 0,
-        loop_end: 0,
-        loop_count: 1,
-        rate: 0,
-        start_frame: 0,
-        ping_pong: false,
-    })
-}
-
 /// Generate VXL/HVA filenames for a voxel model.
 pub fn voxel_asset_names(image_id: &str) -> (String, String) {
     let upper: String = image_id.to_uppercase();
