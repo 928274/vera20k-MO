@@ -150,6 +150,13 @@ const ACTION_NAMES: [&str; 73] = [
     "PsychicReveal",
 ];
 
+/// Ares's `SWTypeExt` hooks `ReadAction` for the superweapon type reader: the
+/// literal `Custom` keeps Ares's own action (0x7E) instead of stock action 0
+/// (`None`). It arms the cameo's target cursor and reads the type's Ares
+/// `Cursor`/`NoCursor`. VERA names that action by this literal rather than by
+/// a retail index; it is not an entry of [`ACTION_NAMES`].
+const ARES_CUSTOM_ACTION: &str = "Custom";
+
 /// AbstractType_From_Name40DCE0's compiled table at816EE0, read from Steam
 /// gamemd. Values are explicit: Temporal precedes RadSite in
 /// the name table but their RTTI values are70 and69, respectively.
@@ -302,14 +309,33 @@ impl IniSection {
     /// This projection keeps an absent constructor value as Option::None and
     /// returns canonical names for actual reads, including action0's "None".
     pub(crate) fn read_action_name(&self, key: &str) -> Option<&'static str> {
+        self.fold_action_name(key, false)
+    }
+
+    /// The superweapon type reader's `Action=` under installed Ares: its
+    /// `ReadAction` hook keeps [`ARES_CUSTOM_ACTION`] as the extension's own
+    /// action instead of mapping that unknown retail name to action0. A stock
+    /// type with `Action=Custom` (Mental Omega's `[SpySatSpecial]`, a
+    /// `Type=PsychicReveal` satellite scan) therefore waits for a map click
+    /// and shows its Ares `Cursor`/`NoCursor`; without it the cameo fires at
+    /// (0, 0) and recharges at once. Default builds keep the stock reader.
+    pub(crate) fn read_superweapon_action_name(&self, key: &str) -> Option<&'static str> {
+        self.fold_action_name(key, cfg!(feature = "ares"))
+    }
+
+    fn fold_action_name(&self, key: &str, ares_custom: bool) -> Option<&'static str> {
         self.fold_rules_values(key, None, |_, raw| {
             let name = strtrim_ascii(truncate_native_bytes(raw, 0x1f));
             Some(
-                ACTION_NAMES
-                    .iter()
-                    .copied()
-                    .find(|candidate| candidate.eq_ignore_ascii_case(name))
-                    .unwrap_or(ACTION_NAMES[0]),
+                if ares_custom && name.eq_ignore_ascii_case(ARES_CUSTOM_ACTION) {
+                    ARES_CUSTOM_ACTION
+                } else {
+                    ACTION_NAMES
+                        .iter()
+                        .copied()
+                        .find(|candidate| candidate.eq_ignore_ascii_case(name))
+                        .unwrap_or(ACTION_NAMES[0])
+                },
             )
         })
     }

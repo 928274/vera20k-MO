@@ -193,3 +193,49 @@ fn a_launch_maps_the_native_cells_for_its_house_and_allies() {
     assert!(revealed(russians).is_empty(), "a computer ally has no map");
     assert!(revealed(yuri).is_empty());
 }
+
+/// Mental Omega's `[SpySatSpecial]` is a stock `Type=PsychicReveal` with
+/// Ares's `Action=Custom`: the cameo arms a target cursor, and a click on the
+/// shroud must still reach case 11 with that cell, not the direct-launch
+/// (0, 0) cell, and reveal around it.
+#[cfg(feature = "ares")]
+#[test]
+fn ares_custom_action_click_reveals_around_the_clicked_cell() {
+    let rules = RuleSet::from_ini(&IniFile::from_str(
+        "[General]\n[CombatDamage]\nPsychicRevealRadius=3\n\
+         [AudioVisual]\nPsychicRevealActivateSound=PsychicRevealActivate\n\
+         [InfantryTypes]\n[VehicleTypes]\n[AircraftTypes]\n[BuildingTypes]\n\
+         [SuperWeaponTypes]\n0=SpySatSpecial\n\
+         [SpySatSpecial]\nType=PsychicReveal\nAction=Custom\n",
+    ))
+    .unwrap();
+    assert_eq!(
+        rules
+            .super_weapon("SpySatSpecial")
+            .unwrap()
+            .action
+            .as_deref(),
+        Some("Custom")
+    );
+    let target = (30, 30);
+    let (rules, mut sim, owner) = world_with(rules, 64, &[]);
+    charge_super(&mut sim, owner, "SpySatSpecial");
+    OBSERVED.set(Some(Vec::new()));
+    click(&mut sim, &rules, owner, "SpySatSpecial", target);
+    let observed = OBSERVED.take().unwrap();
+    // `launch` logs its RevealArea arguments once, then calls the reveal
+    // owner twice (final 0 and final 1) with the same pair.
+    assert_eq!(observed.len(), 1, "{observed:?}");
+    let ground = crate::sim::projectile::cell_ground_coord(
+        sim.resolved_terrain.as_ref(),
+        target.0,
+        target.1,
+    );
+    assert_eq!(
+        observed[0],
+        Observed::RevealArea([ground.x, ground.y, ground.z], 3),
+        "a direct-launch cameo would reveal at (0, 0), not the clicked cell"
+    );
+    // The cells RevealArea writes are the native-oracle test above; a
+    // headless world without playfield bounds has no map diamond to write.
+}

@@ -946,7 +946,13 @@ impl SuperWeaponType {
                 // SW_LightningStorm::Initialize10072C50: SW_Cursor 0x32.
                 #[cfg(feature = "ares")]
                 SuperWeaponKind::LightningStorm => Some("LightningStorm".to_string()),
-                _ => section.read_action_name("Action").map(str::to_string),
+                // Ares's ReadAction hook keeps `Action=Custom` as its own
+                // action for the remaining stock types (PsychicReveal,
+                // AmerParaDrop, ...); stock ReadAction would map it to
+                // action0 and the cameo would fire at (0, 0) at once.
+                _ => section
+                    .read_superweapon_action_name("Action")
+                    .map(str::to_string),
             },
             // ReadString 0x100, then a 24-byte copy (`0x006CEDB1`,
             // `0x006CEDD6`) that names the cameo.

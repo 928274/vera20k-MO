@@ -365,3 +365,75 @@ fn superweapon_money_cameo_refuses_before_target_or_direct_launch_but_allows_rig
         );
     }
 }
+
+/// Mental Omega's American Satellite Scan (`[SpySatSpecial]`) is a stock
+/// `Type=PsychicReveal` with Ares's `Action=Custom`. The stock
+/// `CCINIClass::ReadAction` maps that unknown name to action 0 (`None`), so
+/// the cameo launches at (0, 0) and recharges at once instead of arming the
+/// type's `Cursor=Scout` for a click on the shroud.
+#[cfg(feature = "ares")]
+#[test]
+fn ares_custom_action_on_a_stock_reveal_arms_the_target_cursor() {
+    use crate::rules::superweapon_type::SuperWeaponKind;
+
+    let rules = RuleSet::from_ini_with_fixed_art_for_test(
+        &IniFile::from_str(
+            "[MouseCursors]\nScout=100,8,2\nNoCanDo=101,8,2\n\
+             [SuperWeaponTypes]\n0=SpySatSpecial\n\
+             [SpySatSpecial]\nType=PsychicReveal\nAction=Custom\n\
+             Cursor=Scout\nNoCursor=NoCanDo\nRechargeTime=4\n",
+        ),
+        &IniFile::empty(),
+    )
+    .unwrap();
+    let sw = rules.super_weapon("SpySatSpecial").unwrap();
+    assert_eq!(sw.kind, SuperWeaponKind::PsychicReveal);
+    assert_eq!(sw.action.as_deref(), Some("Custom"));
+    // SWTypeExt::WhatAction draws the type's own Ares cursor, not the stock
+    // PsychicReveal one; it only answers for a handled type or Action=Custom.
+    let cursors = rules
+        .ares_super_weapon_cursors("SpySatSpecial")
+        .expect("Action=Custom admits the Ares cursor pair");
+    let scout = rules.ares_mouse_cursors().find("Scout").unwrap();
+    assert_eq!(cursors.cursor, scout);
+    assert_eq!(
+        cursors.no_cursor,
+        rules.ares_mouse_cursors().find("NoCanDo").unwrap()
+    );
+
+    let mut sim = Simulation::new();
+    let owner = sim.intern("Americans");
+    sim.houses_mut_for_test()
+        .register(crate::sim::house_state::HouseState::new(
+            owner, 0, None, true, 0, 10,
+        ));
+    let id = sim.intern("SpySatSpecial");
+    let mut instance = SuperWeaponInstance::new(id, owner, 0);
+    instance.set_is_active_for_test(true);
+    instance.set_is_ready_for_test(true);
+    sim.super_weapons_mut_for_test()
+        .entry(owner)
+        .or_default()
+        .insert(id, instance);
+    let views = superweapon_views_for_owner(&sim, &rules, &owner);
+    let mut input = MatchInputState::new(Default::default());
+    let result = press(
+        &mut input,
+        &mut SidebarGadgetState::default(),
+        views.first(),
+        rules
+            .super_weapon("SpySatSpecial")
+            .unwrap()
+            .action
+            .as_deref(),
+        false,
+    );
+    assert_eq!(result, SuperWeaponClick::Target);
+    assert_eq!(
+        input
+            .targeting_mode
+            .as_ref()
+            .and_then(TargetingMode::as_super_weapon),
+        Some("SpySatSpecial")
+    );
+}
