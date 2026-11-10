@@ -9,7 +9,8 @@ use crate::sim::intern::InternedId;
 use crate::sim::world::Simulation;
 
 use super::can_build::{
-    CanBuild, FactoryRoster, can_build, check_build_limit, find_factory, find_factory_among,
+    CanBuild, FactoryRoster, can_build, check_build_limit_for_queue, find_factory,
+    find_factory_among,
 };
 use super::production_types::*;
 
@@ -138,7 +139,7 @@ fn build_option_among(
         object_category: obj.category,
         queue_category: production_category_for_object(obj),
         enabled: reason.is_none(),
-        at_build_limit: owner.is_some_and(|owner| check_build_limit(sim, rules, owner, obj)),
+        at_build_limit: owner.is_some_and(|owner| check_build_limit_for_queue(sim, rules, owner, obj)),
         reason,
     })
 }
@@ -242,7 +243,7 @@ fn sidebar_state(
 pub struct CameoDrawState {
     /// The unlinked cameo keeps its normal brightness.
     pub enabled: bool,
-    /// `check_build_limit`, the independent gate `Select6AB656` reads.
+    /// `check_build_limit_for_queue`, the independent gate `Select6AB656` reads.
     pub at_build_limit: bool,
 }
 
@@ -266,12 +267,12 @@ pub fn cameo_draw_state(
     CameoDrawState {
         enabled: find_factory(sim, rules, owner, obj, true, true, true).is_some()
             && !draw_at_build_limit(sim, rules, owner, obj),
-        at_build_limit: check_build_limit(sim, rules, owner, obj),
+        at_build_limit: check_build_limit_for_queue(sim, rules, owner, obj),
     }
 }
 
 /// Draw's at-limit arm inside `0x006A97A8..0x006A97F9`: `CanBuild(type, 0, 0)`
-/// answers -1, or [`check_build_limit`].
+/// answers -1, or [`check_build_limit_for_queue`].
 fn draw_at_build_limit(
     sim: &Simulation,
     rules: &RuleSet,
@@ -279,7 +280,7 @@ fn draw_at_build_limit(
     obj: &ObjectType,
 ) -> bool {
     can_build(sim, rules, owner, obj, false, false) == CanBuild::AtLimit
-        || check_build_limit(sim, rules, owner, obj)
+        || check_build_limit_for_queue(sim, rules, owner, obj)
 }
 
 /// Every rules type's build option for `owner`, by category, including rejected

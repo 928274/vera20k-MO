@@ -2972,6 +2972,14 @@ fn local_strip_raw_place_preserves_remote_change_and_shared_hash() {
 /// A synthetic pair of war factories: `GAWEAP` produces, `GAWEAP2` is MO's
 /// Ares `CloningFacility=yes` yard. `cloneable_override` lets one test check
 /// `Cloneable=no` without duplicating the world setup.
+///
+/// `GAWEAP2` deliberately has no `Factory=`, exactly as in rulesmo.ini. Ares'
+/// post-read validation clears `CloningFacility` on a type with `Factory=`,
+/// so giving the fixture one silently disabled the upstream
+/// `kick_out_ares_clones` path; with the real MO shape both the upstream loop
+/// and the old MO-only loop fired, producing two free copies instead of one.
+/// This fixture is therefore also the regression guard against a second
+/// cloning pass.
 #[cfg(feature = "ares")]
 fn cloning_facility_world(cloneable_override: &str) -> (Simulation, RuleSet, InternedId, u64) {
     let rules = RuleSet::from_ini(&IniFile::from_str(&format!(
@@ -2979,7 +2987,7 @@ fn cloning_facility_world(cloneable_override: &str) -> (Simulation, RuleSet, Int
          [AircraftTypes]\n[BuildingTypes]\n0=GAWEAP\n1=GAWEAP2\n\
          [MTNK]\nCost=700\nStrength=300\nSpeed=6\nTechLevel=1\nOwner=Americans\n{cloneable_override}\n\
          [GAWEAP]\nOwner=Americans\nFactory=UnitType\nWeaponsFactory=yes\n\
-         [GAWEAP2]\nOwner=Americans\nFactory=UnitType\nWeaponsFactory=yes\nCloningFacility=yes\n"
+         [GAWEAP2]\nOwner=Americans\nWeaponsFactory=yes\nCloningFacility=yes\n"
     )))
     .expect("cloning facility rules");
     let mut sim = Simulation::new();

@@ -8,7 +8,7 @@
 //! call settlement only after their successful world effects have committed.
 
 use super::CancelOutcome;
-use super::can_build::{check_build_limit, find_factory};
+use super::can_build::{check_build_limit_for_queue, find_factory};
 use super::factory::{
     AbandonedObject, EnqueueOutcome, FactoryHolder, held_time_to_build, object_time_to_build,
 };
@@ -250,7 +250,7 @@ pub(crate) fn enqueue_selected(
     }
     let enqueue_order = sim.production.next_enqueue_order();
     let cost = sim.cost_of(owner_id, obj, rules);
-    let at_build_limit = check_build_limit(sim, rules, owner_id, obj);
+    let at_build_limit = check_build_limit_for_queue(sim, rules, owner_id, obj);
     let outcome = sim.production.factories_mut().enqueue(
         owner_id,
         category,

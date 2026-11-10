@@ -677,6 +677,40 @@ pub(crate) fn check_build_limit(
     owner: InternedId,
     obj: &ObjectType,
 ) -> bool {
+    check_build_limit_inner(sim, rules, owner, obj, false)
+}
+
+/// The build-limit answer used where a queued PRODUCE is decided: the sidebar
+/// cameo and `FactoryClass::StartProduction`'s append. Native
+/// `HouseClass::CheckBuildLimit` adds the factory's held object to the House's
+/// owned count, which already includes that same limbo entity. Stock gamemd
+/// never queues buildings, so the overlap was harmless there; with Phobos
+/// `BuildingProductionQueue` it makes the front build of a `BuildLimit=2`
+/// building occupy both slots and refuse its second copy, while two merely
+/// waiting copies queue fine. Keep the native answer ([`check_build_limit`])
+/// for every oracle-controlled caller and deduct the duplicate only for this
+/// Phobos building-queue path.
+pub(crate) fn check_build_limit_for_queue(
+    sim: &Simulation,
+    rules: &RuleSet,
+    owner: InternedId,
+    obj: &ObjectType,
+) -> bool {
+    #[cfg(feature = "phobos")]
+    let deduct_held =
+        obj.category == ObjectCategory::Building && rules.general.building_production_queue;
+    #[cfg(not(feature = "phobos"))]
+    let deduct_held = false;
+    check_build_limit_inner(sim, rules, owner, obj, deduct_held)
+}
+
+fn check_build_limit_inner(
+    sim: &Simulation,
+    rules: &RuleSet,
+    owner: InternedId,
+    obj: &ObjectType,
+    deduct_held: bool,
+) -> bool {
     let strip = match obj.category {
         ObjectCategory::Building => super::ProductionCategory::Building,
         _ => super::production_tech::production_category_for_object(obj),
@@ -719,9 +753,32 @@ pub(crate) fn check_build_limit(
             });
         return produced.wrapping_add(queued) >= limit.wrapping_abs();
     }
-    let owned = type_id.zip(tracking).map_or(0, |(type_id, tracking)| {
+    let mut owned = type_id.zip(tracking).map_or(0, |(type_id, tracking)| {
         tracking.owned_count(EntityCategory::from(obj.category), type_id)
     });
+    // The factory's held object is already inside `count_total` above, but a
+    // constructed product is also registered with its House while still in
+    // limbo. Counting it in both terms made the front build of a
+    // `BuildLimit=2` type occupy two slots, so the second copy was refused
+    // while an identical pair of merely waiting copies was accepted. Ares'
+    // CanBuild handles the same overlap with its held-object exception; do it
+    // here so the sidebar and QueueProduction agree with that answer.
+    let held_in_factory = type_id.is_some_and(|type_id| {
+        sim.production
+            .factories()
+            .iter_insertion_ordered()
+            .into_iter()
+            .any(|factory| {
+                factory.owner() == owner
+                    && factory.category() == strip
+                    && factory.object().is_some_and(|object| {
+                        object.type_id == type_id && object.entity_id.is_some()
+                    })
+            })
+    });
+    if deduct_held && held_in_factory {
+        owned = owned.wrapping_sub(1);
+    }
     owned
         .wrapping_add(captured_vehicle_thief_count(sim, rules, owner, obj))
         .wrapping_add(queued)

@@ -3898,3 +3898,72 @@ fn a_yard_going_offline_refreshes_the_defense_queue_with_ares() {
     assert!(sim.go_building_offline(1, &rules, crate::sim::world::FrameEffects::default()));
     assert_eq!(suspended(&sim), cfg!(feature = "ares"));
 }
+
+/// MO's cloning war factories carry `BuildLimit=2`. With Phobos' building
+/// queue on, a second copy must be appendable while the first is the held
+/// front build; the same two copies queue fine when both are only waiting.
+#[cfg(all(feature = "ares", feature = "phobos"))]
+#[test]
+fn held_build_limit_two_building_accepts_a_second_queued_copy() {
+    let mut ini = manager_ini();
+    ini.merge(&IniFile::from_str(
+        "[General]\nBuildingProductionQueue=yes\n[GAPOWR]\nBuildLimit=2\nBuildCat=Power\n",
+    ));
+    let rules = RuleSet::from_ini(&ini).expect("build-limit-two fixture");
+    let (mut sim, rules, owner) = world_with(rules, 0xb002_0001);
+    let gapowr = rules.object("GAPOWR").unwrap();
+    assert_eq!(gapowr.build_limit, 2);
+
+    assert!(enqueue_by_type(
+        &mut sim,
+        &rules,
+        "Americans",
+        "GAPOWR",
+        crate::sim::world::FrameEffects::default(),
+        false,
+    ));
+    let type_id = sim.interner.get("GAPOWR").unwrap();
+    assert_eq!(
+        sim.houses[&owner].tracking().owned_count(
+            crate::map::entities::EntityCategory::Structure,
+            type_id
+        ),
+        1,
+        "the held limbo building is already in the house's owned count"
+    );
+    assert_eq!(
+        sim.production.factories().count_total(
+            owner,
+            crate::sim::production::ProductionCategory::Building,
+            type_id
+        ),
+        1,
+        "and the same object is the factory's count_total"
+    );
+    assert!(
+        super::can_build::check_build_limit(&sim, &rules, owner, gapowr),
+        "the native CheckBuildLimit keeps its double-counted answer"
+    );
+    assert!(
+        !super::can_build::check_build_limit_for_queue(&sim, &rules, owner, gapowr),
+        "the queue path deducts the duplicate so the second copy is allowed"
+    );
+    assert!(enqueue_by_type(
+        &mut sim,
+        &rules,
+        "Americans",
+        "GAPOWR",
+        crate::sim::world::FrameEffects::default(),
+        false,
+    ));
+    assert_eq!(
+        sim.production
+            .factories()
+            .view(owner, crate::sim::production::ProductionCategory::Building)
+            .unwrap()
+            .queue
+            .len(),
+        1,
+        "the second copy must wait behind the held build"
+    );
+}
