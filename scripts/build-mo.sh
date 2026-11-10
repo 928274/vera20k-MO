@@ -42,11 +42,17 @@ printf '[build-mo] tree=%s branch=%s head=%s\n' "$SRC" "$branch" "$(git rev-pars
 
 # --- build -------------------------------------------------------------------
 before=$(stat -c %Y target/release/vera20k.exe 2>/dev/null || echo 0)
-cargo build --release --no-default-features --features ares,phobos --bin vera20k 2>&1 | tail -40
+build_log=$(cargo build --release --no-default-features --features ares,phobos --bin vera20k 2>&1)
+printf '%s\n' "$build_log" | tail -40
 # A trailing `reg.exe` block from the sandbox surfaces as a non-zero status even
 # though cargo already finished; judge by the artifact instead of the status.
+# A stale artifact must never pass: on 2026-11-11 a failed compile (E0428) left
+# the previous exe in place, the mtime comparison accepted it, and the script
+# deployed the OLD binary as if it were the new build.
+printf '%s' "$build_log" | grep -q 'could not compile' &&
+    fail "cargo could not compile (see cargo output above)"
 after=$(stat -c %Y target/release/vera20k.exe 2>/dev/null || echo 0)
-[ "$after" -ge "$before" ] || fail "artifact not refreshed (see cargo output above)"
+[ "$after" -gt "$before" ] || fail "artifact not refreshed (see cargo output above)"
 
 exe=target/release/vera20k.exe
 [ -f "$exe" ] || fail "missing $exe"
