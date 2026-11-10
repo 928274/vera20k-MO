@@ -1663,11 +1663,15 @@ pub(crate) fn build_building_anim_instances(
             local_owner_id,
             building,
             // 0x00446580..0x004466D5: a building aims its body facing, and an
-            // SHP-turret animation's frame is that heading in 32 steps.
+            // SHP-turret animation's frame is that heading in gamemd's 32-way
+            // quantizer — the same bucket the voxel turret and the muzzle FLH
+            // use, so the drawn turret and the flash agree on a direction.
             rules
                 .object(sim.interner().resolve(building.type_ref()))
                 .and_then(crate::rules::art_data::shp_turret_anim_config)
-                .map(|_| u16::from(building.body_facing_byte(sim.session().binary_frame())) >> 3),
+                .map(|_| {
+                    shp_turret_frame(building.body_facing_current(sim.session().binary_frame()))
+                }),
             &slot_admitted,
             &|id| anim_colour_word(state, sim, cells.as_ref(), &shrouded, id),
             axis.origin_y,
@@ -1704,6 +1708,39 @@ fn building_zshape_point_move(
 /// sale removes the building, so the draw itself asks the same question.
 fn slot_anims_hidden_by_sale(building: &crate::sim::game_entity::GameEntity) -> bool {
     building.building_down() && building.in_construction_bstate()
+}
+
+/// Forty-five degrees in 32-way steps: the SHP ring's frame 0 offset.
+///
+/// RA2's 2:1 isometric projection puts world NW at screen-up. SHP art is
+/// authored in screen space, so frame 0 of a facing ring is NW, not N. The
+/// engine already carries this offset for other SHP art: `vehicle_facing_slot`
+/// documents "NW — not N — at frame 0" and adds 1 to the direction, while
+/// `INFANTRY_FACING_SLOT_TABLE` maps step 0 (north) to slot 7, not slot 0.
+const SHP_TURRET_RING_START: u16 = 4;
+
+/// The slot-9 SHP turret frame for a `+0x388` heading.
+///
+/// DrawIt quantizes the heading into gamemd's 32-way bucket
+/// (`(((f>>10)+1)>>1) & 0x1F`, shared with DRAGON frames, the FLH fire origins
+/// and the voxel rasteriser), but the authored ring differs from a DirStruct in
+/// **two** ways:
+///
+/// 1. It runs counter-clockwise. Measured frame-by-frame on Mental Omega's
+///    `GGGUNTUR.SHP`: frame 0 points screen-up, 8 screen-left, 16 screen-down
+///    (barrel hidden behind the base), 24 screen-right.
+/// 2. Frame 0 is screen-up, i.e. world **NW**, not world N — see
+///    [`SHP_TURRET_RING_START`].
+///
+/// A DirStruct runs clockwise with 0 = N, 8 = E, 16 = S, 24 = W, so the ring's
+/// frame `k` depicts world bucket `(28 - k) & 31`. Inverting that gives
+/// `frame = (28 - bucket) & 31`. Using the bucket directly mirrors the
+/// heading; mirroring without the NW offset leaves a constant 45-degree error
+/// on every heading.
+fn shp_turret_frame(facing16: u16) -> u16 {
+    let ring = crate::rules::art_data::SHP_TURRET_FACING_FRAMES;
+    let step = u16::from(crate::util::direction_tables::step32_from_facing16(facing16));
+    (ring + ring - step - SHP_TURRET_RING_START) & (ring - 1)
 }
 
 fn emit_building_anims(
@@ -2407,3 +2444,108 @@ mod infantry_air_shadow_tests;
 #[cfg(test)]
 #[path = "embedded_shadow_tests.rs"]
 mod embedded_shadow_tests;
+
+#[cfg(test)]
+mod shp_turret_frame_tests {
+    use super::{SHP_TURRET_RING_START, shp_turret_frame};
+    use crate::rules::art_data::SHP_TURRET_FACING_FRAMES as RING;
+    use crate::util::direction_tables::step32_from_facing16;
+
+    /// Frame `k` of the authored ring depicts world bucket
+    /// `(RING - START - k) & 31` (0 = N, 8 = E, 16 = S, 24 = W).
+    fn world_bucket_of_frame(frame: u16) -> u16 {
+        (RING + RING - SHP_TURRET_RING_START - frame) & (RING - 1)
+    }
+
+    fn ring_frame(bucket: u8) -> u16 {
+        (RING + RING - u16::from(bucket) - SHP_TURRET_RING_START) & (RING - 1)
+    }
+
+    #[test]
+    fn slot_9_frame_inverts_the_shared_32_way_quantizer() {
+        for facing in [
+            0x0000u16, 0x0800, 0x17ff, 0x2000, 0x4000, 0x7fff, 0x8000, 0xc000, 0xf800, 0xff00,
+            0xffff,
+        ] {
+            assert_eq!(
+                shp_turret_frame(facing),
+                ring_frame(step32_from_facing16(facing)),
+                "facing={facing:#06x}"
+            );
+        }
+    }
+
+    /// Measured on MO's `GGGUNTUR.SHP`: frame 0 is screen-up = world NW (28),
+    /// 8 = SW (20), 16 = SE (12), 24 = NE (4). A bare mirror `(32 - bucket)`
+    /// leaves a constant 45-degree error on every heading.
+    #[test]
+    fn cardinal_headings_land_on_the_nw_start_ring_frames() {
+        assert_eq!(shp_turret_frame(0x0000), 28, "north");
+        assert_eq!(shp_turret_frame(0x4000), 20, "east");
+        assert_eq!(shp_turret_frame(0x8000), 12, "south");
+        assert_eq!(shp_turret_frame(0xc000), 4, "west");
+    }
+
+    #[test]
+    fn the_ring_inverse_is_exact_on_every_heading() {
+        for bucket in 0..RING {
+            let facing = (bucket << 11) as u16;
+            assert_eq!(
+                world_bucket_of_frame(shp_turret_frame(facing)),
+                bucket,
+                "bucket={bucket}"
+            );
+        }
+    }
+
+    /// The 8-way infantry facing table is the engine's proven SHP-art
+    /// convention ("NW, not N, at frame 0"). Collapsing our 32-frame answer
+    /// into 8 blocks must agree with it at each block centre.
+    #[test]
+    fn agrees_with_the_proven_infantry_facing_table() {
+        for step in [2u16, 6, 10, 14, 18, 22, 26, 30] {
+            let facing = step * 2048;
+            let slot = crate::sim::animation::infantry_facing_slot((facing >> 8) as u8);
+            assert_eq!(
+                shp_turret_frame(facing) / 4,
+                u16::from(slot),
+                "step={step}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_last_bucket_wraps_to_the_same_frame_as_north() {
+        assert_eq!(shp_turret_frame(0xff00), shp_turret_frame(0x0000));
+        assert_eq!(shp_turret_frame(0xffff), shp_turret_frame(0x0000));
+    }
+
+    /// A voxel turret is rotated in 3D, so it consumes the clockwise bucket
+    /// directly; the SHP ring needs the same ring inverse of that bucket.
+    #[test]
+    fn shp_and_voxel_turrets_share_one_quantizer() {
+        for facing in [0x0000u16, 0x1000, 0x4000, 0x8000, 0xc000, 0xf800] {
+            let voxel_bucket = crate::render::unit_atlas::canonical_turret_facing(facing);
+            assert_eq!(
+                shp_turret_frame(facing),
+                ring_frame(voxel_bucket / 8),
+                "facing={facing:#06x}"
+            );
+        }
+    }
+
+    #[test]
+    fn mirroring_still_covers_every_frame_of_the_ring() {
+        let mut frames = Vec::new();
+        for bucket in 0..RING {
+            // Every 32-way bucket comes from some facing word.
+            let facing = (bucket << 11) as u16;
+            frames.push(shp_turret_frame(facing));
+        }
+        frames.sort_unstable();
+        frames.dedup();
+        assert_eq!(frames.len(), usize::from(RING));
+        assert_eq!(frames[0], 0);
+        assert_eq!(frames[usize::from(RING) - 1], RING - 1);
+    }
+}

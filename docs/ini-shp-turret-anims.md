@@ -15,11 +15,36 @@ TurretAnimIsVoxel=no          ; yes sends the turret down the voxel path instead
 ```
 
 The thirty-two frames are a heading ring, not a playing animation: the frame is
-the building's `+0x388` direction's top five bits (`facing >> 3`), so the turret
-follows its aim whatever the slot's own timer does. `TurretAnimX`/`Y` shift the
-turret from the building's draw origin and `TurretAnimZAdjust` is the slot's
-own depth adjust. A type that names no `TurretAnim`, or whose name is absent
-from `[Animations]`, has no turret — an ART section for the name is not a type.
+derived from the building's `+0x388` direction, so the turret follows its aim
+whatever the slot's own timer does. `TurretAnimX`/`Y` shift the turret from the
+building's draw origin and `TurretAnimZAdjust` is the slot's own depth adjust.
+A type that names no `TurretAnim`, or whose name is absent from `[Animations]`,
+has no turret — an ART section for the name is not a type.
+
+## Frame order is counter-clockwise, with an NW start
+
+The ring is **not** in DirStruct order, in two independent ways. Measured
+frame-by-frame on Mental Omega's `GGGUNTUR.SHP` (`expandmo95.mix`, 32 facing
+frames plus 32 shadow frames): frame 0 points screen-up, 8 screen-left, 16
+screen-down (barrel hidden behind the base), 24 screen-right — i.e. counter-
+clockwise in screen space. On top of that, **frame 0 is screen-up, which the
+2:1 isometric projection maps to world NW, not world N**; that is a 45-degree
+(4-frame) start offset. The engine already carries the same offset for other
+SHP art: `vehicle_facing_slot` documents "NW — not N — at frame 0" and adds 1
+to the direction, and `INFANTRY_FACING_SLOT_TABLE` maps step 0 (north) to slot
+7 rather than slot 0.
+
+A DirStruct runs clockwise (0 = N, 0x4000 = E, 0x8000 = S, 0xC000 = W), so
+frame `k` of the ring depicts world bucket `(28 - k) & 31`. VERA20K therefore
+quantizes `+0x388` with the shared 32-way bucket and inverts the ring:
+`frame = (28 - bucket) & 31`. Indexing with the bucket directly mirrors the
+heading (error grows as twice the heading, so a target due east draws a turret
+facing west). Mirroring **without** the NW offset — `(32 - bucket) & 31` —
+leaves a constant 45-degree error on every heading, which is much easier to
+mistake for "almost fixed".
+
+`TurretAnimX`/`Y`, the muzzle FLH and the fire-error facing check all use the
+clockwise DirStruct, so only the frame index needs the ring inverse.
 
 Mental Omega 3.3.6 has twenty-three such buildings: CAART, CACANN, CAEAST02,
 CAHMG, CASAM, CASSAM, CATUR, FAAVAL, FACOMP, FACOMPAI, FARAIL, FASONI, GAAAGUN,
@@ -33,8 +58,10 @@ GTGCAN, YAGGUN, FASWPR among them) and draw a voxel turret instead.
   the rules `TurretAnim` name at the rules anchor, after the ART ActiveAnims and
   before the light block. Nothing else builds it, so a repeat opening keeps
   what the first one installed.
-- `BuildingClass::DrawIt` asks the slot for `facing >> 3`; the animation's own
-  frame counter keeps running behind it.
+- `BuildingClass::DrawIt` asks the slot for `facing >> 3` — the raw DirStruct
+  bucket, which the authored SHP ring then interprets in screen space; the
+  animation's own frame counter keeps running behind it. VERA20K must apply the
+  ring inverse above because its `+0x388` is a world-space DirStruct.
 - `BuildingClass::Init` gives `+0x388` the type's `TurretRot=` rotation speed,
   and `BuildingClass::Mission_Attack` (`0x0044B16F`, `0x0044B1A8`, `0x0044B1FF`)
   sets its destination toward the target, which is what moves the drawn frame.
@@ -55,7 +82,8 @@ GTGCAN, YAGGUN, FASWPR among them) and draw a voxel turret instead.
   building's house colour whenever the type enters the atlas.
 - `app/presentation/instances/shp.rs`: `emit_building_anims` drops an ART row
   for slot 9 when the rules own one, and takes the frame from
-  `body_facing_byte >> 3`.
+  `shp_turret_frame(body_facing_current(...))` — the NW-start, counter-
+  clockwise ring inverse `(28 - bucket) & 31` described above.
 
 ## Residuals
 
