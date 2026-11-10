@@ -359,7 +359,7 @@ pub(crate) fn build_display_effect_instances(
     // Particles have independent AIR registrations, including live bodies
     // detached from a System. The store owns their lifetime; Display supplies
     // every encounter, never this frame-local lookup's iteration/hash order.
-    let particles: HashMap<_, _> = sim
+    let particles: crate::util::lookup_hash::LookupMap<_, _> = sim
         .particle_systems()
         .display_particles()
         .map(|(system, particle)| (particle.stable_id(), (system, particle)))
@@ -391,43 +391,48 @@ pub(crate) fn build_display_effect_instances(
         .collect::<Vec<_>>();
     let local_owner = input.local_owner;
     for &stable_id in sim.display_layers().ordered_ids() {
-        if let Some(light) = sim.building_spotlight(stable_id, local_owner, input.rules) {
-            super::particles::build_spotlight_instance(
-                input,
-                stable_id,
-                light,
-                &context,
-                ground_objects,
-                ground_order,
-            );
+        // One ID namespace (`Simulation::allocate_stable_id`): most members
+        // are entities, drawn already, so spare them the lookups below.
+        if sim.entities().contains(stable_id) {
             continue;
         }
-        if let Some(system) = sim.particle_systems().get(stable_id) {
-            super::particles::build_particle_system_instance(
-                input,
-                system,
-                &context,
-                ground_objects,
-                ground_order,
-            );
-            continue;
-        }
-        if let Some(&(system, particle)) = particles.get(&stable_id) {
-            super::particles::build_particle_instance(
-                input,
-                system,
-                particle,
-                &context,
-                ground_objects,
-                ground_order,
-                &mut observations,
-            );
-            continue;
-        }
-        let Some(atlas) = input.atlas else {
+        // An id names one kind of object, so the order of these tests picks
+        // no winner: Anims and Terrain objects, the many, are asked first.
+        let Some(anim) = sim.anim(stable_id) else {
+            if sim.terrain_objects().objects().contains_key(&stable_id) {
+                continue;
+            }
+            if let Some(light) = sim.building_spotlight(stable_id, local_owner, input.rules) {
+                super::particles::build_spotlight_instance(
+                    input,
+                    stable_id,
+                    light,
+                    &context,
+                    ground_objects,
+                    ground_order,
+                );
+            } else if let Some(system) = sim.particle_systems().get(stable_id) {
+                super::particles::build_particle_system_instance(
+                    input,
+                    system,
+                    &context,
+                    ground_objects,
+                    ground_order,
+                );
+            } else if let Some(&(system, particle)) = particles.get(&stable_id) {
+                super::particles::build_particle_instance(
+                    input,
+                    system,
+                    particle,
+                    &context,
+                    ground_objects,
+                    ground_order,
+                    &mut observations,
+                );
+            }
             continue;
         };
-        let Some(anim) = sim.anim(stable_id) else {
+        let Some(atlas) = input.atlas else {
             continue;
         };
         // Paradrop creates a retained Anim, whose GetCoords resolves its
@@ -537,7 +542,7 @@ pub(crate) fn build_display_effect_instances(
             } else {
                 crate::render::sprite_atlas::ShpPaletteContext::GlobalAnim
             },
-            type_id: type_name.to_string(),
+            type_id: type_name.into(),
             facing: 0,
             frame,
             house_color: remap_color.unwrap_or(HouseColorIndex(0)),

@@ -3192,7 +3192,7 @@ checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 
 [[package]]
 name = "vera20k"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3219,6 +3219,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1 0.10.6",
+ "smol_str",
  "swash",
  "sys-locale",
  "thiserror 2.0.18",
@@ -3238,7 +3239,7 @@ dependencies = [
 
 [[package]]
 name = "vera20k-android"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "android-activity",
  "anyhow",
@@ -3251,7 +3252,7 @@ dependencies = [
 
 [[package]]
 name = "vera20k-core"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "anyhow",
  "bytemuck",

@@ -6,8 +6,8 @@
 //! - Part of the app layer — may depend on everything.
 
 use super::helpers::{
-    EntityDrawBand, compute_sprite_depth, entity_draw_band, ground_sort_row, in_view,
-    projection_admitted, tactical_entity_admission,
+    EntityDrawBand, compute_sprite_depth, ground_sort_row, in_view, projection_admitted,
+    tactical_entity_admission,
 };
 use crate::app::AppState;
 use crate::app::presentation::render::draw_plan_lowering::{
@@ -265,6 +265,18 @@ fn terrain_slope_for_render(
         .unwrap_or(0)
 }
 
+/// The slope a ground Unit's shadow lies on. Base
+/// `LocomotionClass::Shadow_Matrix @ 0x0055A7D0`, where Drive's (`0x004B0410`)
+/// and Ship's (`0x0069FB20`) end, reads the cell under Location
+/// (`0x0055A801..0x0055A80C`), whatever slope its body is drawing.
+fn unit_shadow_slope(
+    cells: Option<&crate::map::resolved_terrain::NativeCellQuery<'_>>,
+    entity: &crate::sim::game_entity::GameEntity,
+) -> u8 {
+    let [x, y] = crate::sim::movement::ground_pose::position_world_xy(&entity.position);
+    clamp_slope_for_render(cells.map_or(0, |cells| cells.ground_fields(cells.lookup_world(x, y)).1))
+}
+
 /// The slope a Unit body's locomotor Draw_Matrix draws it at. `terrain`
 /// supplies the fallback's cell slope, `cells` is the draw's isolated query
 /// of the live map, and `angles` are the rocking angles the body is drawn
@@ -297,8 +309,16 @@ fn unit_render_slope_state(
     // or airborne.
     // A body that has left the floor has no cell slope to sit on, so it never
     // enters the drive-track tilt transition. Upper-layer bodies therefore
-    // keep their stable atlas shape.
-    if kind == Some(LocomotorKind::Jumpjet) || band != EntityDrawBand::Ground {
+    // keep their stable atlas shape. Teleport and Walk keep the base
+    // `LocomotionClass::Draw_Matrix @ 0x0055A730` too (vtable slots
+    // `0x007F5024`, `0x007F6A1C`), the level facing matrix on any ramp: a
+    // Chrono Miner before the Drive its next move installs, or a vehicle
+    // inside a Chronosphere warp's Teleport piggyback.
+    if matches!(
+        kind,
+        Some(LocomotorKind::Jumpjet | LocomotorKind::Teleport | LocomotorKind::Walk)
+    ) || band != EntityDrawBand::Ground
+    {
         return UnitRenderSlopeState::Stable(0);
     }
     // `HoverLocomotionClass::Draw_Matrix @ 0x00513F40`: the level facing
@@ -310,17 +330,8 @@ fn unit_render_slope_state(
             crate::sim::movement::hover::hover_draw_slope(entity, cells, angles),
         ));
     }
-    // RESIDUAL: every other locomotor that reaches here draws through the
-    // base `LocomotionClass::Draw_Matrix @ 0x0055A730`, the level facing
-    // matrix (Teleport's vtable slot `0x007F5024`, Walk's `0x007F6A1C`,
-    // Mech's `0x007EDB90`), but takes its cell's slope here. Trigger: a voxel
-    // Unit with one of them active on a sloped cell: a Chrono Miner (CMIN,
-    // Teleport primary) before the Drive its next move installs, a vehicle
-    // inside a Chronosphere warp's Teleport piggyback, and the unbuildable
-    // CMON and SMON; no retail vehicle uses Walk or Mech. Effect: the body
-    // tilts with the ground where gamemd draws it level; its shadow (base
-    // `0x0055A7D0`) lies on the slope either way. Frequency: whenever one of
-    // them stands on a ramp in that state. Risk: visual only.
+    // Only a Unit no locomotor state answers for, or with an unused
+    // locomotor (Tunnel), reaches this cell-slope fallback.
     UnitRenderSlopeState::Stable(terrain_slope_for_render(
         terrain,
         entity.position.rx(),
@@ -460,19 +471,22 @@ pub(crate) fn build_unit_instances(
     let Some(mut visit) = unit_visitor(state, display_order) else {
         return;
     };
-    for stable_id in super::helpers::tactical_entity_encounter_order(sim) {
-        visit(objects, stable_id);
+    for (entity, band) in super::helpers::drawn_display_entities(sim) {
+        visit(objects, entity, band);
     }
 }
 
-/// [`build_unit_instances`] for one Display member: the Unit or voxel
-/// object `stable_id`, if it draws. The caller visits the members in
-/// Display order, so each voxel render meets the buffers the render before
-/// it left ([`crate::render::voxel_image_cache`]).
+/// [`build_unit_instances`] for one Display member with its band: the Unit
+/// or voxel object, if it draws. The caller visits the members in Display
+/// order, so each voxel render meets the buffers the render before it left
+/// ([`crate::render::voxel_image_cache`]).
 pub(crate) fn unit_visitor<'a>(
     state: &'a AppState,
     display_order: &'a NativeDisplayOrder,
-) -> Option<impl FnMut(&mut Vec<PlannedObjectInstance>, u64) + 'a> {
+) -> Option<
+    impl FnMut(&mut Vec<PlannedObjectInstance>, &crate::sim::game_entity::GameEntity, EntityDrawBand)
+    + 'a,
+> {
     let (sim, atlas) = match (
         state
             .match_state
@@ -519,9 +533,10 @@ pub(crate) fn unit_visitor<'a>(
         .retain(|id| sim.entities().contains(id));
 
     let surface_view = crate::app::presentation::render::tactical_surface_line_viewport(state);
-    let laser_palette = std::cell::OnceCell::new();
     Some(
-        move |objects: &mut Vec<PlannedObjectInstance>, stable_id: u64| {
+        move |objects: &mut Vec<PlannedObjectInstance>,
+              entity: &crate::sim::game_entity::GameEntity,
+              member_band: EntityDrawBand| {
             // One object's pieces: the visited member, or the cargo a Carryall
             // draws inside its own Draw_It (`carried`).
             let draw = |entity: &crate::sim::game_entity::GameEntity,
@@ -531,10 +546,7 @@ pub(crate) fn unit_visitor<'a>(
                 if entity.category() != EntityCategory::Unit && !entity.is_voxel() {
                     return None;
                 }
-                let band = match carried {
-                    Some(carried) => carried.band,
-                    None => entity_draw_band(sim.display_layers(), entity.stable_id())?,
-                };
+                let band = carried.map_or(member_band, |carried| carried.band);
                 // The screen cull reads only the position, and nothing between here
                 // and the waterline capture writes, so an object off the screen
                 // skips the admission work below.
@@ -671,20 +683,9 @@ pub(crate) fn unit_visitor<'a>(
                             render_pose.angles,
                         )
                     });
-                // The flat-ground shadow lies on its body's slope. A lifted body's
-                // shadow (Jumpjet, Hover) lies on its cell's slope instead, through
+                // A lifted body's shadow (Jumpjet, Hover) goes through
                 // [`emit_lifted_unit_shadow`].
-                //
-                // RESIDUAL: Drive's and Ship's Shadow_Matrix (`0x004B0410`,
-                // `0x0069FB20`) key -1 while their slope changes or they rock, then
-                // end in the base `LocomotionClass::Shadow_Matrix @ 0x0055A7D0`, so
-                // natively their shadow lies on the slope of the cell under their
-                // Location. Trigger: a Drive or Ship body whose slope state (the
-                // transition's `to_slope` mid-transition) differs from that cell's
-                // slope. Effect: its shadow lies on the other slope. Frequency:
-                // untraced, at most the frames around a slope change. Risk: visual
-                // only.
-                let shadow_slope = stable_slope_for_key(slope_state);
+                let shadow_slope = unit_shadow_slope(cells.as_ref(), entity);
                 let interp_z = pos.z();
                 let draw_state = draw_decision.state;
                 let extra_light = state.rules().map_or(0, |rules| {
@@ -820,7 +821,7 @@ pub(crate) fn unit_visitor<'a>(
                 }
                 if let BodyDraw::Pose(tilt) = body {
                     let key = UnitSpriteKey {
-                        type_id: type_str.to_string(),
+                        type_id: type_str.into(),
                         turret_index,
                         facing: canonical_unit_facing(body_facing),
                         layer: VxlLayer::Composite,
@@ -910,7 +911,7 @@ pub(crate) fn unit_visitor<'a>(
                     // A type with indexed gun models shares its bare hull key when
                     // current=-1 suppresses the gun arm; ordinary types use Composite.
                     let key: UnitSpriteKey = UnitSpriteKey {
-                        type_id: type_str.to_string(),
+                        type_id: type_str.into(),
                         turret_index: 0,
                         facing: canonical_unit_facing(body_facing),
                         layer: if draws_turret_parts(type_str, state.rules(), 0) {
@@ -1080,9 +1081,6 @@ pub(crate) fn unit_visitor<'a>(
                     band,
                 })
             };
-            let Some(entity) = sim.entities().get(stable_id) else {
-                return;
-            };
             let mut pieces = Vec::new();
             let Some(drawn) = draw(entity, None, &mut pieces) else {
                 return;
@@ -1093,7 +1091,7 @@ pub(crate) fn unit_visitor<'a>(
             // and body (`0x0041461D..0x00414653`).
             if let Some(cargo) = state
                 .rules()
-                .and_then(|rules| sim.carryall_drawn_cargo(stable_id, rules))
+                .and_then(|rules| sim.carryall_drawn_cargo(entity.stable_id(), rules))
                 .and_then(|cargo| sim.entities().get(cargo))
             {
                 let mut cargo_pieces = Vec::new();
@@ -1129,20 +1127,10 @@ pub(crate) fn unit_visitor<'a>(
                                 sim,
                                 rules,
                                 || {
-                                    laser_palette
-                                        .get_or_init(|| {
-                                            state
-                                                .process_assets
-                                                .manager()
-                                                .and_then(|assets| assets.get_ref("palette.pal"))
-                                                .and_then(|bytes| {
-                                                    crate::assets::pal_file::Palette::from_bytes(
-                                                        bytes,
-                                                    )
-                                                    .ok()
-                                                })
-                                        })
-                                        .as_ref()
+                                    state
+                                        .match_state
+                                        .match_presentation
+                                        .surface_palette(state.process_assets.manager())
                                 },
                                 surface_view,
                             );
@@ -1202,11 +1190,12 @@ fn unit_animation_frames(
     entity: &crate::sim::game_entity::GameEntity,
     model: &str,
     turret_index: i32,
-    frame_counts: &std::collections::BTreeMap<(String, VxlLayer, i32), u32>,
+    frame_counts: &std::collections::BTreeMap<(smol_str::SmolStr, VxlLayer, i32), u32>,
 ) -> (u32, u32) {
+    let model = smol_str::SmolStr::new(model);
     let frames = frame_counts
-        .get(&(model.to_string(), VxlLayer::Body, 0))
-        .or_else(|| frame_counts.get(&(model.to_string(), VxlLayer::Composite, 0)))
+        .get(&(model.clone(), VxlLayer::Body, 0))
+        .or_else(|| frame_counts.get(&(model.clone(), VxlLayer::Composite, 0)))
         .copied()
         .unwrap_or(1)
         .max(1);
@@ -1215,7 +1204,7 @@ fn unit_animation_frames(
         body
     } else {
         frame_counts
-            .get(&(model.to_string(), VxlLayer::Turret, turret_index))
+            .get(&(model, VxlLayer::Turret, turret_index))
             .filter(|&&frames| frames > 1)
             .map_or(0, |&frames| {
                 (entity.turret_anim_frame.frame() % frames as i32) as u32
@@ -1832,7 +1821,7 @@ fn prepare_unit_shadow(
         .collect();
     let key = shadow_lookup_key(
         UnitSpriteKey {
-            type_id: type_id.to_owned(),
+            type_id: type_id.into(),
             turret_index: 0,
             facing: canonical_unit_facing(body_facing),
             layer: VxlLayer::Shadow,
@@ -1903,17 +1892,22 @@ fn unit_shadow_admitted(
 /// `(0, AdjustForZ(height))`, so a lifted body's shadow lies on the ground
 /// below it, and Hover's Shadow_Matrix (`0x005142A0`) ends in the base
 /// `0x0055A7D0`, the cell's slope and the facing, as the port draws it.
-/// Every other Unit stays on the ground (height 0, offset 0) and keeps the
-/// flat-ground path.
+/// Drive, Ship and Tunnel keep the same Shadow_Point (`+0x30` of their
+/// ILocomotion tables, Drive's at `0x007E7EAC`), so a Unit on them that is
+/// falling (ObjectClass `+0x8D`, a paradropped vehicle) draws its shadow on
+/// the ground too, and Drive's and Ship's Shadow_Matrix end in the same base
+/// once their slope is stable. Every other Unit stays on the ground (height 0,
+/// offset 0) and keeps the flat-ground path.
 fn has_lifted_unit_shadow(entity: &crate::sim::game_entity::GameEntity) -> bool {
     use crate::rules::locomotor_type::LocomotorKind;
     entity.category() == EntityCategory::Unit
-        && entity.locomotor.as_ref().is_some_and(|l| {
-            matches!(
-                l.active_kind(),
-                LocomotorKind::Jumpjet | LocomotorKind::Hover
-            )
-        })
+        && (entity.is_falling_down()
+            || entity.locomotor.as_ref().is_some_and(|l| {
+                matches!(
+                    l.active_kind(),
+                    LocomotorKind::Jumpjet | LocomotorKind::Hover
+                )
+            }))
 }
 
 fn techno_shadow_admitted(entity: &crate::sim::game_entity::GameEntity, no_shadow: bool) -> bool {
@@ -1963,7 +1957,7 @@ fn emit_unit_shadow_sprite(
         return;
     }
     let key = UnitSpriteKey {
-        type_id: type_id.to_string(),
+        type_id: type_id.into(),
         turret_index: 0,
         facing: canonical_unit_facing(body_facing),
         layer: VxlLayer::Shadow,
@@ -2301,7 +2295,7 @@ fn emit_aircraft_shadow_sprite(
     pieces: &mut Vec<ObjectPieceInstance>,
 ) {
     let key = UnitSpriteKey {
-        type_id: type_id.to_owned(),
+        type_id: type_id.into(),
         turret_index: 0,
         facing: pose.facing,
         layer: VxlLayer::Shadow,
@@ -2529,7 +2523,7 @@ fn emit_turret_unit_sprites(
     let slope_type = stable_slope_for_key(slope_state);
     let voxel_adjust = super::foot_depth::unit_z_adjust(state, entity, true, None) as f32;
     let body_key = UnitSpriteKey {
-        type_id: type_id.to_string(),
+        type_id: type_id.into(),
         turret_index: 0,
         facing: canonical_unit_facing(body_facing),
         layer: VxlLayer::Body,
@@ -2538,7 +2532,7 @@ fn emit_turret_unit_sprites(
         barrel_pitch: 0,
     };
     let turret_key = UnitSpriteKey {
-        type_id: type_id.to_string(),
+        type_id: type_id.into(),
         turret_index,
         facing: canonical_turret_facing(turret_facing),
         layer: VxlLayer::Turret,
@@ -2547,7 +2541,7 @@ fn emit_turret_unit_sprites(
         barrel_pitch: 0,
     };
     let mut barrel_key = UnitSpriteKey {
-        type_id: type_id.to_string(),
+        type_id: type_id.into(),
         turret_index,
         facing: canonical_turret_facing(turret_facing),
         layer: VxlLayer::Barrel,
@@ -2938,7 +2932,7 @@ fn emit_harvest_overlay(
     let sprite_atlas = state.match_state.match_presentation.sprite_atlas.as_ref()?;
     let key = ShpSpriteKey {
         palette_context: overlay.palette_context,
-        type_id: overlay.type_id.to_string(),
+        type_id: overlay.type_id.into(),
         facing: 0,
         frame: overlay.frame,
         house_color: HouseColorIndex::default(),

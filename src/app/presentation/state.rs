@@ -37,6 +37,8 @@ pub(crate) struct MatchPresentationState {
     pub(crate) unit_atlas: Option<UnitAtlas>,
     /// Palette + per-house RGB ramp GPU resources for the voxel sprite shader.
     pub(crate) palette_set: Option<crate::render::palette_textures::PaletteSet>,
+    /// PALETTE.PAL as `surface_palette` parsed it; a world install empties it.
+    pub(crate) surface_palette: std::cell::OnceCell<crate::assets::pal_file::Palette>,
     pub(crate) sprite_atlas: Option<SpriteAtlas>,
     /// The unit and sprite atlas growths rasterizing on workers.
     pub(crate) atlas_growth: crate::render::entity_atlas_growth::EntityAtlasGrowth,
@@ -172,6 +174,9 @@ pub(crate) struct MatchPresentationState {
     // -- Reusable per-frame scratch buffers (avoid allocation each frame) --
     /// Cell body instance scratch vec — cleared and refilled each frame.
     pub(crate) cached_cell_body_instances: Vec<crate::render::batch::SpriteInstance>,
+    /// The ground tile list of the last draw, handed back so the next draw
+    /// fills the same allocation.
+    pub(crate) cached_terrain_instances: Vec<crate::render::batch::SpriteInstance>,
     /// Animated power bar — segment-by-segment transition matching original PowerClass.
     pub(crate) power_bar_anim: crate::ui::sidebar::PowerBarAnimState,
     /// Persistent flash + mode state for in-game sidebar gadgets. Ticked from
@@ -247,4 +252,21 @@ pub(crate) struct MatchPresentationState {
     /// (the sidebar-anchored button Y is render-derived; see KD-6). None until the
     /// overlay first renders.
     pub(crate) in_game_options_anchor: Option<crate::ui::shell::layout::InGameOptionsAnchor>,
+}
+
+impl MatchPresentationState {
+    /// PALETTE.PAL in gamemd's converted form, for every per-frame reader:
+    /// action lines, lasers, bolts and the selected building's brackets. A
+    /// missing archive is not remembered, so a later draw can still find it.
+    pub(crate) fn surface_palette(
+        &self,
+        assets: Option<&crate::assets::asset_manager::AssetManager>,
+    ) -> Option<&crate::assets::pal_file::Palette> {
+        if let Some(palette) = self.surface_palette.get() {
+            return Some(palette);
+        }
+        let bytes = assets?.get_ref("palette.pal")?;
+        let palette = crate::assets::pal_file::Palette::from_bytes(bytes).ok()?;
+        Some(self.surface_palette.get_or_init(|| palette))
+    }
 }

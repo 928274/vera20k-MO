@@ -146,7 +146,7 @@ impl SoundPlaybackInputs<'_> {
         let source = crate::app::match_runtime::sound_dispatch::anim_world_sound_source(world);
         let gain = self
             .spatial_context(Some(sim), local_owner)
-            .gain_for(&sound, Some(source));
+            .gain_for(sound, Some(source));
         sfx.update_looping_sound(owner, gain, self.catalog.sounds());
     }
 
@@ -186,6 +186,7 @@ impl SoundPlaybackInputs<'_> {
             match event {
                 GameSoundEvent::UnitVoiceVisit { owner } => sfx.visit_unit_voice(*owner, registry),
                 GameSoundEvent::UnitVoiceDestroyed { owner } => sfx.destroy_unit_voice(*owner),
+                GameSoundEvent::UnitVoiceMoved { from, to } => sfx.move_unit_voice(*from, *to),
                 // Unit acknowledgement lines — always full volume (non-positional).
                 // `TechnoClass::Queue_Voice @ 0x00708D90` only latches the line on
                 // the speaking object. Only an actual reached Techno6F9EBB
@@ -319,8 +320,9 @@ impl SoundPlaybackInputs<'_> {
                     // not reach the raw audio-bag fallback.
                     if !sound_id.is_empty() && registry.get(sound_id).is_some() {
                         match source {
-                            // `VocClass::PlayAtCoord @ 0x00750E20` /
-                            // `PlayAt @ 0x007509E0` at the target coordinate.
+                            // A one-shot `VocClass::PlayAt @ 0x007509E0` at
+                            // the target coordinate. Launch's 750E20 cues
+                            // arrive as `VocAtCoord`.
                             Some(source) => {
                                 if let Some(gain) = gain_for(sound_id, Some(*source)) {
                                     let _ =
@@ -641,7 +643,7 @@ fn registry_facts_for_owner(
     owner: u64,
 ) -> Option<crate::audio::sfx::SpatialSource> {
     let key = sfx.handle_sound_id(owner)?;
-    Some(registry.get(&key).map_or_else(
+    Some(registry.get(key).map_or_else(
         || crate::audio::sfx::SpatialSource::from_registry_defaults(registry),
         crate::audio::sfx::SpatialSource::from_entry,
     ))

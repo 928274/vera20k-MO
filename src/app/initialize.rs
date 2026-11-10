@@ -477,6 +477,10 @@ impl App {
         if let Some(icon) = &window_icon {
             window_attrs = icon.apply(window_attrs);
         }
+        // Android's launcher icon is a compiled resource, so the same choice is
+        // applied through the two activity aliases instead.
+        #[cfg(target_os = "android")]
+        crate::util::app_icon::apply(options_profile.vera_icon);
         #[cfg(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"))]
         {
             use winit::platform::web::WindowAttributesExtWebSys;
@@ -1093,6 +1097,7 @@ impl App {
                     theater_ext: "tem".to_string(),
                     target_lines: startup_target_lines,
                     cached_cell_body_instances: Vec::new(),
+                    cached_terrain_instances: Vec::new(),
                     terrain_grid: None,
                     overlays: Default::default(),
                     terrain_objects: Vec::new(),
@@ -1104,6 +1109,7 @@ impl App {
                     tile_atlas: None,
                     unit_atlas: None,
                     palette_set: None,
+                    surface_palette: Default::default(),
                     sprite_atlas: None,
                     atlas_growth: Default::default(),
                     overlay_atlas: None,

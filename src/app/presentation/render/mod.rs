@@ -125,8 +125,9 @@ pub(crate) struct RenderPhases {
     /// Phase 7 — recording the frame's render passes, without the
     /// submissions made on the way (those are `handoff`).
     pub draw_calls: Duration,
-    /// Encoding the recorded passes, submitting them and presenting: the
-    /// bounded mid-frame submissions, plus the frame owner's final one.
+    /// What handing frames to the driver cost this thread: the bounded
+    /// mid-frame submissions, the send of the frame to the hand-off thread,
+    /// and any wait for the frame before it.
     pub handoff: Duration,
     /// Prep before phase 1 and between the lights and the effects (sidebar
     /// surfaces, terrain targets) — the part no named span owns.
@@ -287,14 +288,15 @@ pub(crate) fn render_game(
             .electric_bolts
             .is_empty())
     .then(|| {
-        let bytes = state
-            .process_assets
-            .manager()
-            .and_then(|assets| assets.get_ref("palette.pal"))
-            .expect("ready tactical assets include PALETTE.PAL");
-        crate::assets::pal_file::Palette::from_bytes(bytes).expect("validated retail PALETTE.PAL")
+        state
+            .match_state
+            .match_presentation
+            .surface_palette(state.process_assets.manager())
+            .expect("ready tactical assets include PALETTE.PAL")
     });
-    let bracket_palette = surface_palette.as_ref().map(|palette| {
+    let bolt_palette =
+        surface_palette.map(crate::render::electric_bolt::ElectricBoltPalette::from_palette);
+    let bracket_palette = surface_palette.map(|palette| {
         [15_u8, 12].map(|index| {
             let color = palette.color(index);
             crate::render::palette_light::PaletteLight::plain(53, 1000).rgb565(
@@ -515,9 +517,6 @@ pub(crate) fn render_game(
     // It reads committed Bullet coordinates even when no simulation tick ran.
     // The ring belongs to presentation and survives only until it fades or loads.
     let viewport = tactical_surface_line_viewport(state);
-    let palette = surface_palette
-        .as_ref()
-        .map(crate::render::electric_bolt::ElectricBoltPalette::from_palette);
     let armed_super_weapon = state.armed_super_weapon_type().map(str::to_owned);
     let armed_building = state.armed_building_type().map(str::to_owned);
     let cursor_cell = (armed_super_weapon.is_some() || armed_building.is_some()).then(|| {
@@ -624,7 +623,7 @@ pub(crate) fn render_game(
         presentation.lasers.composite(&mut main);
         presentation
             .electric_bolts
-            .composite(viewport, palette, &mut main, |birth| {
+            .composite(viewport, bolt_palette, &mut main, |birth| {
                 !effect_hidden(birth.to.x, birth.to.y)
             });
         presentation
@@ -822,6 +821,10 @@ pub(crate) fn render_game(
                 .unwrap()
                 .duration_since(after_lights.unwrap()),
     });
+    state
+        .match_state
+        .match_presentation
+        .cached_terrain_instances = std::mem::take(&mut world.terrain.normal);
     Ok(GameRenderOutput {
         instance_counts: sidebar.emitted_instance_counts(),
         sidebar_view: sidebar.view,

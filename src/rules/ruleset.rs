@@ -3520,6 +3520,12 @@ pub(crate) fn ambient_change_terms(rate: f64, step: f64) -> (bool, i32, i32) {
     )
 }
 
+/// `[General] CliffBackImpassability=` as `CellClass::RecalcAttributes`
+/// (`0x0047D2B0`) compares it: a byte, 2 unless the key is set.
+pub(crate) fn read_cliff_back_impassability(general: Option<&IniSection>) -> u8 {
+    general.map_or(2, |general| general.read_int("CliffBackImpassability", 2)) as u8
+}
+
 impl GeneralRules {
     pub fn allow_shrouded_subterannean_moves(&self) -> bool {
         self.allow_shrouded_subterannean_moves
@@ -4428,7 +4434,7 @@ impl GeneralRules {
             iq_auto_crush: iq.read_int("AutoCrush", defaults.iq_auto_crush),
             iq_sell_back: iq.read_int("SellBack", defaults.iq_sell_back),
             credit_reserve: ai.read_int("CreditReserve", defaults.credit_reserve),
-            cliff_back_impassability: general.read_int("CliffBackImpassability", 2) as u8,
+            cliff_back_impassability: read_cliff_back_impassability(Some(general)),
             lightning_storm_duration: general
                 .read_int("LightningStormDuration", defaults.lightning_storm_duration),
             lightning_damage: general.read_int("LightningDamage", defaults.lightning_damage),
@@ -10599,7 +10605,9 @@ impl RuleSet {
 
     /// Resolve a side name to its stable `[Sides]` registration index.
     pub fn side_index(&self, id: &str) -> Option<SideIdx> {
-        self.side_indices.get(&id.to_ascii_uppercase()).copied()
+        crate::util::native_string::with_ascii_uppercase(id, |key| {
+            self.side_indices.get(key).copied()
+        })
     }
 
     /// Commander personalities from `[AIPersonalities]`. Empty for retail data.
