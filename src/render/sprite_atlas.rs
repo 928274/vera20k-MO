@@ -4138,7 +4138,7 @@ mod anim_custom_palette_tests {
     fn key(context: ShpPaletteContext, type_id: &str) -> ShpSpriteKey {
         ShpSpriteKey {
             palette_context: context,
-            type_id: type_id.to_owned(),
+            type_id: type_id.into(),
             facing: 0,
             frame: 0,
             house_color: NO_REMAP,
