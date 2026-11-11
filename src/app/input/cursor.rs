@@ -164,7 +164,7 @@ pub(crate) fn current_cursor_feedback_kind(
         selected.is_empty(),
     );
     if let super::state::TacticalPointerMode::SuperWeapon(section) = pointer_mode {
-        if let Some(runtime) = state.match_state.sim_runtime.as_ref()
+        if let Some(runtime) = state.match_state.sim_runtime.runtime()
             && let Some(owner) = preferred_local_owner_name(state)
                 .and_then(|name| runtime.simulation.interner().get(&name))
             && let Some(sw_type) = runtime.simulation.interner().get(section)
@@ -220,7 +220,7 @@ pub(crate) fn current_cursor_feedback_kind(
     let sim = state
         .match_state
         .sim_runtime
-        .as_ref()
+        .runtime()
         .map(|rt| &rt.simulation)?;
     // DetermineAction's no-selection path keeps Repair/Sell only when no
     // armed Super overrides it. Use the same priority as the release owner;
@@ -264,6 +264,17 @@ pub(crate) fn current_cursor_feedback_kind(
     // under the cursor for an empty selection too — DetermineAction's
     // `0x00692673` arm answers action 7, row 17 (Select) — so the arm below
     // answers instead. See `no_selection_cursor`.
+    // VERA ferry: the armed drop click shows the unload cursor, or its
+    // refusal where the click would give no transport a route.
+    if state.match_state.input.ferry.armed() {
+        return Some(
+            if crate::app::input::ferry::armed_click_accepted(state) == Some(false) {
+                CursorFeedbackKind::NoDeploy
+            } else {
+                CursorFeedbackKind::Deploy
+            },
+        );
+    }
     // PlanMgr63AC41 selects native action0 over a planning node.
     if crate::app::input::planning_mode::node_at_cursor(state).is_some() {
         return Some(CursorFeedbackKind::Default);

@@ -33,7 +33,9 @@ here, and a mod that changes the program doesn't.
   [interface layout](interface-layout.md) put the sidebar on any edge, put the command
   bar on top or leave it out, move the sidebar's parts, leave parts out, change its
   size and its columns of build pictures, place the messages, timers, banner and
-  tooltips, and add buttons and text. You can't yet add other kinds of parts.
+  tooltips, and add buttons, text and more grids of build pictures. Players can drag
+  the parts in a match and keep their own layout. You can't yet add other kinds of
+  parts.
 - Ares and Phobos. Only some of their keys work, and only in a build you make yourself.
   See [More detail](#more-detail).
 - Big conversions such as Mental Omega. They depend on DLL features, so they don't work
@@ -91,6 +93,7 @@ game folder works the same from its own folder.
 | --- | --- |
 | A file named the same as a game file, such as `rulesmd.ini` or a `.shp` | Replaces the game's copy. It must be directly in the mod's folder, not in a subfolder. |
 | An archive named `expandmd50.mix` | Replaces the game's copies of the files inside it. The number can be 00 to 99, and higher numbers win. An archive with the same name as one in the game folder takes that archive's place, so pick a number the game doesn't use unless you mean that. |
+| An archive whose name starts with `ecache` or `elocal`, such as `ecachemd01.mix` | Adds the files inside it, as the original game does. All `ecache` archives load before all `elocal` ones, each group by name. They load after the `expandmd` archives and the game's main, cache and local archives, which keep a file name they share, and before the game's art, cameo and theater archives, whose copies they replace. |
 | Maps | Adds them to the map list while the mod is in use. |
 | `veraui.ini` | Lays out the match screen: which edge the sidebar and the command bar sit on, where the sidebar's parts sit, which it has, and how big it is. See [interface layout](interface-layout.md). |
 | `mod.ini` | Says what the mod is called. Optional. |

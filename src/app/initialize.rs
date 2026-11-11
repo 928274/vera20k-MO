@@ -1024,7 +1024,7 @@ impl App {
                 live_network: None,
                 lan_service: None,
                 startup: Default::default(),
-                sim_runtime: None,
+                sim_runtime: Default::default(),
                 input: crate::app::input::state::MatchInputState::new(hotkey_bindings),
                 match_presentation: crate::app::presentation::state::MatchPresentationState {
                     sinking_waterlines: Default::default(),
@@ -1038,6 +1038,9 @@ impl App {
                     active_sidebar_tab: SidebarTab::default_active_tab(),
                     sidebar_layout_spec,
                     match_layouts: crate::ui::match_layout::MatchLayoutFile::none(),
+                    mod_layout_ini: None,
+                    player_layout_text: Vec::new(),
+                    layout_edit: None,
                     added_parts: Default::default(),
                     added_grid_scroll: Vec::new(),
                     tooltips: startup_tooltips,

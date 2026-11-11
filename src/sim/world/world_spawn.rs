@@ -625,7 +625,6 @@ impl Simulation {
                 }
                 if matches!(outcome, RevealOutcome::Revealed { .. }) {
                     Self::initialize_cloak_after_unlimbo(&sim.interner, &sim.session, &mut sim.substrate, stable_id, rules);
-                    sim.add_unit_sensor_after_unlimbo(stable_id, rules, overlay_registry);
                     // ReadScenarioBuildings (0x0044F820) makes no sensor call:
                     // a map building stamps only if the first opening its
                     // Unlimbo already ran (0x00440D61 / 0x00440E76) passed
@@ -1166,7 +1165,6 @@ impl Simulation {
             stable_id,
             rules,
         );
-        self.add_unit_sensor_after_unlimbo(stable_id, rules, overlay_registry);
         self.substrate.ready_finished_spawn_adapter(stable_id);
         Ok(Some(stable_id))
     }
@@ -1709,7 +1707,6 @@ impl Simulation {
             stable_id,
             rules,
         );
-        self.add_unit_sensor_after_unlimbo(stable_id, rules, overlay_registry);
         Some(stable_id)
     }
 
@@ -2618,7 +2615,14 @@ impl Simulation {
                 (house.side_index(), house.difficulty(), house.tech_level());
             match country_name {
                 Some(country_name)
-                    if preflight_recalc(rules, &country_name, side_index, difficulty).is_ok() =>
+                    if preflight_recalc(
+                        rules,
+                        &country_name,
+                        side_index,
+                        difficulty,
+                        self.session.game_options().super_weapons,
+                    )
+                    .is_ok() =>
                 {
                     recalc_base_plan(
                         self.houses
@@ -2635,7 +2639,9 @@ impl Simulation {
                         &mut self.scenario_rng,
                     );
                 }
-                _ => log::warn!("AI base Recalc skipped: unusable country or difficulty tables"),
+                _ => log::warn!(
+                    "AI base Recalc skipped: unusable country, difficulty tables or BuildPower/BuildRefinery lists"
+                ),
             }
         }
         let house = self
@@ -2853,7 +2859,16 @@ impl Simulation {
                 }
                 return false;
             };
-            if preflight_recalc(rules, country_name, *side_index, *difficulty).is_err() {
+            if preflight_recalc(
+                rules,
+                country_name,
+                *side_index,
+                *difficulty,
+                self.session.game_options().super_weapons,
+            )
+            .is_err()
+            {
+                log::warn!("MCV deploy refused: no usable AI base plan for {country_name}");
                 if let Some(entity) = self.substrate.entities.get_mut(stable_id) {
                     entity.mcv_deploy_pending.clear();
                 }
@@ -3030,7 +3045,6 @@ impl Simulation {
             new_sid,
             rules,
         );
-        self.add_unit_sensor_after_unlimbo(new_sid, rules, registry);
         self.mission_spawned_entities = true;
         if recalc_context.is_some() {
             // The new Building's committed north-west anchor is the native
@@ -3287,7 +3301,6 @@ impl Simulation {
             new_sid,
             rules,
         );
-        self.add_unit_sensor_after_unlimbo(new_sid, rules, overlay_registry);
         if let Some(unit) = self.substrate.entities.get_mut(new_sid) {
             converted_health.apply(unit);
             // RESIDUAL: native Selects the new unit (vt+0x14C, `0x0044A137`)

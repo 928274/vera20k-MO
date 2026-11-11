@@ -929,6 +929,16 @@ pub struct GeneralRules {
     /// Rules+420, [JumpjetControls] CruiseHeight. Object5F4260 uses this
     /// global threshold; linked Jumpjets instead use their own +2C height.
     pub display_cruise_height: i32,
+    /// VERA: `[JumpjetControls] SmoothFacing=` (default no). When set, a
+    /// Jumpjet's body no longer snaps to its locomotor's stale heading on
+    /// take-off and turns at its ROT for an Unload
+    /// ([docs/jumpjet-smooth-facing.md]).
+    pub jumpjet_smooth_facing: bool,
+    /// VERA: `[JumpjetControls] LandNearby=` (default 0, at most 8). A
+    /// Jumpjet refused its landing cell lands on the nearest clear cell
+    /// within this many cells instead of hovering
+    /// ([docs/jumpjet-land-nearby.md]).
+    pub jumpjet_land_nearby: i32,
     /// `[General] HoverHeight=`, Rules+0x5CC: the Hover altitude controller's
     /// cruise height in leptons (0x00513D20). Constructor 120 (0x00665E2B).
     pub hover_height: i32,
@@ -2742,6 +2752,8 @@ impl Default for GeneralRules {
             flight_level: 500,
             attacking_aircraft_sight_range: 5,
             display_cruise_height: 400, // Rules constructor665C3A
+            jumpjet_smooth_facing: false,
+            jumpjet_land_nearby: 0,
             // Rules constructor 0x00665E2B..0x00665E81.
             hover_height: 120,
             hover_bob: NativeF64Bits::from_bits(0x403e_0000_0000_0000),
@@ -3714,6 +3726,15 @@ impl GeneralRules {
             .map_or(defaults.display_cruise_height, |s| {
                 s.read_int("CruiseHeight", defaults.display_cruise_height)
             });
+        // VERA key, not a gamemd one; absent means the original's snaps.
+        let jumpjet_smooth_facing = ini
+            .section("JumpjetControls")
+            .is_some_and(|s| s.read_bool("SmoothFacing", false));
+        // VERA key; 0 keeps the original's hover over a taken cell.
+        let jumpjet_land_nearby = ini
+            .section("JumpjetControls")
+            .map_or(0, |s| s.read_int("LandNearby", 0))
+            .clamp(0, 8);
         // AI IQ thresholds live in their own [IQ] read.
         let iq = ini.section_or_empty("IQ");
         // gamemd-derived: `RulesClass__ReadIQ @ 0x00674240` reads signed
@@ -3789,6 +3810,8 @@ impl GeneralRules {
                 iq_harvester,
                 iq_super_weapons,
                 display_cruise_height,
+                jumpjet_smooth_facing,
+                jumpjet_land_nearby,
                 condition_yellow: condition_yellow_native,
                 condition_red: condition_red_native,
                 path_delay,
@@ -3999,6 +4022,8 @@ impl GeneralRules {
                 defaults.attacking_aircraft_sight_range,
             ),
             display_cruise_height,
+            jumpjet_smooth_facing,
+            jumpjet_land_nearby,
             // ReadGeneral 0x0066EDC5..0x0066EE83 reads these into their
             // fields with the current value as default (%-aware ReadDouble).
             hover_height: general.read_int("HoverHeight", defaults.hover_height),

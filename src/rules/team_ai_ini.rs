@@ -237,23 +237,18 @@ impl TeamAiIniRegistry {
         // Raw source inspection and metadata keep their unchecked INI view.
         fixed.remove_digest_for_checked_load();
         let registry = Self::from_sources(&fixed, scenario, game_mode_nonzero);
-        if !registry.fixed_source_is_complete() {
-            // VERA's production gate is stricter than native: gamemd's tolerant
-            // readers skip a dangling TaskForce reference or a malformed member
-            // instead of failing the whole map. MOD roots (Mental Omega 3.3's
-            // aimo.ini) contain a handful of exactly those. Under the compiled
-            // Ares capability accept a structurally usable root and keep every
-            // diagnostic as a warning; stock builds keep the strict gate.
-            if !registry.ares_tolerant_root_is_usable() {
-                return Err(format!(
-                    "selected AI root {name} failed structural validation: fixed_counts={:?}, diagnostics={:?}",
-                    registry.fixed_counts, registry.diagnostics
-                ));
-            }
-            log::warn!(
-                "selected AI root {name} has {} structural diagnostic(s); loading the Ares-tolerant registry",
-                registry.diagnostics.len()
-            );
+        // Only a root that is not an AI INI at all is refused. A listed type
+        // with no section, or a TaskForce entry that does not scan, is a
+        // diagnostic: TeamTypeClass::LoadFromINIList (`0x006F19B0`) allocates
+        // each listed type and calls its ReadINI whatever it returns, and
+        // TaskForceClass::ReadINI (`0x006E8420`) counts only resolved members.
+        // Residual: VERA leaves such a type out where native keeps it with
+        // its constructor's values.
+        if !registry.fixed_source_has_every_registry() {
+            return Err(format!(
+                "selected AI root {name} failed structural validation: fixed_counts={:?}, diagnostics={:?}",
+                registry.fixed_counts, registry.diagnostics
+            ));
         }
         for diagnostic in &registry.diagnostics {
             log::warn!("Team AI INI diagnostic: {diagnostic:?}");
@@ -296,29 +291,24 @@ impl TeamAiIniRegistry {
         registry
     }
 
-    /// Whether the required fixed AIMD source produced all four non-empty
-    /// registries without a refused definition. Scenario diagnostics do not
-    /// invalidate the fixed source because map additions are optional overlays.
-    pub fn fixed_source_is_complete(&self) -> bool {
+    /// Whether the fixed AIMD source produced all four registries: what
+    /// [`Self::load_retail`] requires of the selected root.
+    pub fn fixed_source_has_every_registry(&self) -> bool {
         self.fixed_counts.team_types > 0
             && self.fixed_counts.scripts > 0
             && self.fixed_counts.task_forces > 0
             && self.fixed_counts.ai_triggers > 0
+    }
+
+    /// Whether the required fixed AIMD source produced all four non-empty
+    /// registries without a refused definition. Scenario diagnostics do not
+    /// invalidate the fixed source because map additions are optional overlays.
+    pub fn fixed_source_is_complete(&self) -> bool {
+        self.fixed_source_has_every_registry()
             && !self
                 .diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.source() == TeamAiDefinitionSource::FixedAimd)
-    }
-
-    /// MOD AI roots carry a few definitions native readers skip rather than
-    /// reject. A root with all four registries populated is still usable for
-    /// the scenario pass; only the compiled Ares capability opts into it.
-    fn ares_tolerant_root_is_usable(&self) -> bool {
-        crate::rules::ARES_ENABLED
-            && self.fixed_counts.team_types > 0
-            && self.fixed_counts.scripts > 0
-            && self.fixed_counts.task_forces > 0
-            && self.fixed_counts.ai_triggers > 0
     }
 
     /// Script action 51 (`0x006EF610`) constructs the AnimType its argument's
@@ -877,31 +867,6 @@ mod tests {
     }
 
     #[test]
-    fn ares_tolerant_root_accepts_nonempty_registries_with_data_diagnostics() {
-        let mut loaded =
-            TeamAiIniRegistry::from_sources(&complete_fixed_aimd(), &IniFile::from_str(""), false);
-        loaded
-            .diagnostics
-            .push(TeamAiIniDiagnostic::MissingDefinitionSection {
-                registry: "TaskForces",
-                id: "SOVTA132-G".to_string(),
-                source: TeamAiDefinitionSource::FixedAimd,
-            });
-        assert!(!loaded.fixed_source_is_complete());
-        assert_eq!(
-            loaded.ares_tolerant_root_is_usable(),
-            crate::rules::ARES_ENABLED
-        );
-    }
-
-    #[test]
-    fn ares_tolerant_root_still_refuses_an_empty_registry() {
-        let loaded = TeamAiIniRegistry::default();
-        assert!(!loaded.fixed_source_is_complete());
-        assert!(!loaded.ares_tolerant_root_is_usable());
-    }
-
-    #[test]
     fn scenario_cannot_repair_refused_fixed_definitions() {
         let fixed = IniFile::from_str(&format!(
             "[TeamTypes]\n0=GOOD_TEAM\n1=MISSING_TEAM\n\
@@ -929,6 +894,10 @@ mod tests {
         assert_eq!(loaded.task_forces.len(), 2);
         assert_eq!(loaded.ai_triggers.len(), 2);
         assert!(!loaded.fixed_source_is_complete());
+        assert!(
+            loaded.fixed_source_has_every_registry(),
+            "a diagnosed fixed definition does not refuse the AI root"
+        );
         assert_eq!(
             loaded
                 .diagnostics

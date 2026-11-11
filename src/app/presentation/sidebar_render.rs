@@ -59,7 +59,7 @@ pub(crate) fn advance_sidebar_credits_after_frame(
     let Some(sim) = state
         .match_state
         .sim_runtime
-        .as_ref()
+        .presentation()
         .map(|rt| &rt.simulation)
     else {
         return;
@@ -160,18 +160,21 @@ pub(crate) fn sidebar_layout_spec(state: &AppState) -> crate::ui::sidebar::Sideb
     spec
 }
 
+/// The local player's side by its `[Sides]` name, as `[Layouts]` names it.
+pub(crate) fn local_side_name(state: &AppState) -> Option<&str> {
+    let rules = state.rules()?;
+    let side = u8::try_from(current_sidebar_side(state)).ok()?;
+    rules.side_name(crate::rules::ruleset::SideIdx(side))
+}
+
 /// The `veraui.ini` layout of the local player's side, if the file gives it
 /// one.
 fn side_layout(state: &AppState) -> Option<&crate::ui::match_layout::MatchLayout> {
-    let side_name = state.rules().and_then(|rules| {
-        let side = u8::try_from(current_sidebar_side(state)).ok()?;
-        rules.side_name(crate::rules::ruleset::SideIdx(side))
-    });
     state
         .match_state
         .match_presentation
         .match_layouts
-        .for_side(side_name)
+        .for_side(local_side_name(state))
 }
 
 /// The grids of build pictures the local side's layout adds to the sidebar,
@@ -257,7 +260,7 @@ fn refresh_projection(state: &mut AppState, reuse_sim_inputs: bool) {
     };
     let inputs = {
         let match_state = &mut state.match_state;
-        let Some(runtime) = match_state.sim_runtime.as_ref() else {
+        let Some(runtime) = match_state.sim_runtime.presentation() else {
             match_state
                 .match_presentation
                 .sidebar_projection
@@ -278,7 +281,7 @@ fn refresh_projection(state: &mut AppState, reuse_sim_inputs: bool) {
     let runtime = state
         .match_state
         .sim_runtime
-        .as_ref()
+        .presentation()
         .expect("sidebar runtime");
     let (sim, rules) = (&runtime.simulation, &runtime.resources.rules);
     let owner = sim.interner().get(&owner_name).unwrap_or_default();
@@ -486,7 +489,7 @@ fn build_view(
         state
             .match_state
             .sim_runtime
-            .as_ref()
+            .presentation()
             .map(|rt| &rt.simulation)
             .map(|sim| sim.interner()),
         &inputs.supers,
@@ -515,7 +518,7 @@ fn build_view(
         state
             .match_state
             .sim_runtime
-            .as_ref()
+            .presentation()
             .map(|rt| &rt.simulation)
             .map(|sim| sim.interner()),
         &inputs.supers,
@@ -551,7 +554,7 @@ fn build_view(
         let simulation = state
             .match_state
             .sim_runtime
-            .as_ref()
+            .presentation()
             .map(|rt| &rt.simulation);
         let house = simulation.and_then(|sim| sim.houses().get(&owner));
         let rules = state.rules();
@@ -582,7 +585,7 @@ fn build_view(
     }
     // The rebuilt view takes its drawn cameo state from the same projection
     // write as every later frame, so it is never built from other rules.
-    if let Some(runtime) = state.match_state.sim_runtime.as_ref() {
+    if let Some(runtime) = state.match_state.sim_runtime.presentation() {
         let sim = &runtime.simulation;
         let armed_building = inputs
             .armed
@@ -619,7 +622,7 @@ pub(crate) fn refresh_sidebar_cameo_draw_state(state: &mut AppState) {
         return;
     };
     let AppState { match_state, .. } = state;
-    let Some(runtime) = match_state.sim_runtime.as_ref() else {
+    let Some(runtime) = match_state.sim_runtime.presentation() else {
         return;
     };
     let sim = &runtime.simulation;
@@ -738,7 +741,7 @@ pub(crate) fn minimap_camera_target(
     let rect = active_minimap_screen_rect(state);
     let (cursor_x, cursor_y) = sidebar_cursor(state);
     let minimap = state.match_state.match_presentation.minimap.as_ref()?;
-    let runtime = state.match_state.sim_runtime.as_ref();
+    let runtime = state.match_state.sim_runtime.presentation();
     let native_facts = runtime.and_then(|runtime| {
         let view = runtime.view();
         Some((
@@ -773,7 +776,7 @@ pub(crate) fn minimap_input_target(
     state: &AppState,
 ) -> Option<crate::render::radar::NativeRadarInputTarget> {
     let rect = active_minimap_screen_rect(state);
-    let runtime = state.match_state.sim_runtime.as_ref()?;
+    let runtime = state.match_state.sim_runtime.presentation()?;
     state
         .match_state
         .match_presentation
@@ -941,7 +944,7 @@ pub(crate) fn current_sidebar_side(state: &AppState) -> i32 {
     let sim = state
         .match_state
         .sim_runtime
-        .as_ref()
+        .presentation()
         .map(|rt| &rt.simulation);
     #[cfg(feature = "ares")]
     let owner = None::<String>;
