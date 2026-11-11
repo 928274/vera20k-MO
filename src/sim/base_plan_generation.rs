@@ -349,7 +349,23 @@ fn recalc_candidate_allowed(
 ) -> bool {
     candidate_allowed(candidate, country, side_index, super_weapons, rules)
         && candidate.ai_build_this
+        && !candidate_waits_for_an_upgrade_site(candidate)
         && type_tech_levels.get(candidate) <= tech_level
+}
+
+/// A `PowersUpBuilding=` type is an upgrade: it may only stand on its host
+/// (`sim::ai_base_building::flush_for_placement`'s dormant arm), never on a
+/// base-perimeter site, so an AI plan that holds one can never place it.
+/// Measured on `(8) Perseverance`: a computer house kept completing its first
+/// upgrade type and failing the exit, cycle after cycle, while 50 other plan
+/// nodes stayed open and its wallet held 500k — the base froze at 25
+/// buildings for the rest of the match. Mods that mark upgrades
+/// `AIBuildThis=yes` (Mental Omega does, for every `PowersUpBuilding=` type)
+/// hit this on their first upgrade. Rejecting them from the plan restores the
+/// native "keep growing" behaviour; VERA still gives the player no way to
+/// place an upgrade, so nothing reachable is lost.
+fn candidate_waits_for_an_upgrade_site(candidate: &ObjectType) -> bool {
+    candidate.building_upgrade().host().is_some()
 }
 
 fn move_eligible_seed<'a>(
@@ -795,6 +811,38 @@ mod tests {
         );
         let (plan, _) = generated_values(&rules, "Americans", 0, HouseDifficulty::Hard, 11);
         assert_eq!(&values(&plan)[6..], [8, 7]);
+    }
+
+    #[test]
+    fn recalc_never_plans_a_powers_up_building_for_the_computer() {
+        // A `PowersUpBuilding=` type may only stand on its host, and the AI's
+        // exit searches base-perimeter sites, so a planned node for one can
+        // never be placed: the house completes it, fails the exit and retries
+        // the same node forever. Mental Omega marks every upgrade
+        // `AIBuildThis=yes`, which stopped whole bases mid-match.
+        let rules = basic_rules(
+            "7=HOST\n8=PLUG",
+            "[HOST]\nOwner=Americans\nAIBuildThis=yes\nTechLevel=1\nFoundation=1x1\n\
+             [PLUG]\nOwner=Americans\nAIBuildThis=yes\nTechLevel=1\nFoundation=1x1\n\
+             PowersUpBuilding=HOST\n",
+        );
+        assert_eq!(
+            rules
+                .object("PLUG")
+                .and_then(|ty| ty.building_upgrade().host()),
+            Some("HOST"),
+            "the fixture parses PowersUpBuilding"
+        );
+        let (plan, _) = generated_values(&rules, "Americans", 0, HouseDifficulty::Hard, 11);
+        let planned = values(&plan);
+        assert!(
+            !planned.contains(&rules.building_type_index("PLUG").unwrap()),
+            "the upgrade type stays out of the plan"
+        );
+        assert!(
+            planned.contains(&rules.building_type_index("HOST").unwrap()),
+            "its plain host still competes for a slot"
+        );
     }
 
     #[test]

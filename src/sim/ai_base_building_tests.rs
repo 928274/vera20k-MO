@@ -846,3 +846,299 @@ fn ares_retail_soviet_computer_draws_between_both_nod_plants() {
         "one Randomizer(0, 1)"
     );
 }
+
+// --- `[AI]` base-size tail (ReadAI672AE0) ---------------------------------
+
+fn ai_tail_rules(tail: &str) -> RuleSet {
+    let text = format!(
+        "[General]\n[AI]\nBuildPower=POWER\nBuildRefinery=REF\nBuildBarracks=BARR\n\
+         BuildWeapons=WEAP\nBuildDefense=DEF\nBuildAA=AA\nBuildPDefense=TESLA\n\
+         BuildHelipad=HELI\n{tail}\
+         [BuildingTypes]\n0=POWER\n1=REF\n2=BARR\n3=WEAP\n4=DEF\n5=AA\n\
+         6=TESLA\n7=HELI\n\
+         [POWER]\nPower=100\n[REF]\n[BARR]\n[WEAP]\n[DEF]\n[AA]\n[TESLA]\n[HELI]\n"
+    );
+    RuleSet::from_ini_with_fixed_art_for_test(
+        &crate::sim::arena_fixture::clear_ground_ini(&text),
+        &IniFile::from_str("[POWER]\nFoundation=2x2\n"),
+    )
+    .unwrap()
+}
+
+fn with_rival(mut sim: Simulation, human_buildings: i32) -> Simulation {
+    let human = sim.interner.intern("HumanHouse");
+    let mut house = HouseState::new(human, 1, None, true, 10_000, 10);
+    house.tracking_mut().set_buildings_for_test(human_buildings);
+    sim.houses.register(house);
+    sim
+}
+
+#[test]
+fn an_ini_without_the_ai_tail_never_expands_the_plan() {
+    let rules = ai_tail_rules("");
+    let (mut sim, owner) = computer_house(true);
+    sim = with_rival(sim, 10);
+    assert!(!rules.general.ai_base_size.enabled);
+    assert!(!expand_base_plan_if_needed(&mut sim, &rules, owner));
+    assert_eq!(sim.houses.get(&owner).unwrap().base_plan().nodes().len(), 0);
+}
+
+/// A plan Recalc already produced and the house has finished building:
+/// every node filled, so the plan holds no work of its own.
+fn built_out_plan(sim: &mut Simulation, owner: InternedId, rules: &RuleSet, nodes: usize) {
+    let power = rules.building_type_index("POWER").unwrap();
+    sim.houses
+        .get_mut(&owner)
+        .unwrap()
+        .base_plan_mut()
+        .set_nodes_for_test(vec![
+            BasePlanNode {
+                type_or_control: power,
+                packed_cell: 0,
+                filled: true,
+                retry_count: 0,
+            };
+            nodes
+        ]);
+}
+
+/// Stand in for the house finishing every node: the next append waits for the
+/// node it just added to be built, exactly like a real base grows.
+fn complete_all_nodes(sim: &mut Simulation, owner: InternedId) {
+    let nodes = sim
+        .houses
+        .get_mut(&owner)
+        .unwrap()
+        .base_plan_mut()
+        .nodes_mut_for_test();
+    for node in nodes.iter_mut() {
+        node.filled = true;
+    }
+}
+
+#[test]
+fn an_empty_plan_belongs_to_recalc() {
+    // `house_base` only regenerates a plan while it is empty, so filling one
+    // here first would deny the house its `AIBuildCounts` plan for the whole
+    // match. Measured on `(8) Perseverance`: three of five computer houses
+    // ended up with 24 `GAPOWR` nodes this way.
+    let rules = ai_tail_rules(
+        "BaseSizeAdd=5
+RefineryRatio=.5
+RefineryLimit=10
+",
+    );
+    let (mut sim, owner) = computer_house(true);
+    sim = with_rival(sim, 10);
+    for _ in 0..10 {
+        expand_base_plan_if_needed(&mut sim, &rules, owner);
+    }
+    assert_eq!(
+        sim.houses.get(&owner).unwrap().base_plan().nodes().len(),
+        0,
+        "Recalc, not this path, fills a fresh plan"
+    );
+}
+
+#[test]
+fn an_unfinished_plan_is_left_to_its_own_nodes() {
+    let rules = ai_tail_rules(
+        "BaseSizeAdd=5
+RefineryRatio=.5
+RefineryLimit=10
+",
+    );
+    let (mut sim, owner) = computer_house(true);
+    sim = with_rival(sim, 10);
+    let power = rules.building_type_index("POWER").unwrap();
+    sim.houses
+        .get_mut(&owner)
+        .unwrap()
+        .base_plan_mut()
+        .set_nodes_for_test(vec![
+            BasePlanNode {
+                type_or_control: power,
+                packed_cell: 0,
+                filled: true,
+                retry_count: 0,
+            },
+            BasePlanNode {
+                type_or_control: power,
+                packed_cell: 0,
+                filled: false,
+                retry_count: 0,
+            },
+        ]);
+    for _ in 0..10 {
+        expand_base_plan_if_needed(&mut sim, &rules, owner);
+    }
+    assert_eq!(
+        sim.houses.get(&owner).unwrap().base_plan().nodes().len(),
+        2,
+        "the unfinished node still has its own work"
+    );
+}
+
+#[test]
+fn base_size_add_sets_the_ai_target_against_the_largest_human_base() {
+    let rules = ai_tail_rules(
+        "BaseSizeAdd=2\nPowerSurplus=0\nPowerEmergency=0%\nRefineryRatio=.5\nRefineryLimit=10\n",
+    );
+    let (mut sim, owner) = computer_house(true);
+    sim = with_rival(sim, 3);
+    built_out_plan(&mut sim, owner, &rules, 2);
+    let rng_before = sim.scenario_rng.logical_state();
+    for _ in 0..10 {
+        expand_base_plan_if_needed(&mut sim, &rules, owner);
+        complete_all_nodes(&mut sim, owner);
+    }
+    assert_eq!(
+        sim.houses.get(&owner).unwrap().base_plan().nodes().len(),
+        5,
+        "3 human buildings + BaseSizeAdd=2, one node per exhausted-plan call"
+    );
+    assert_eq!(
+        sim.scenario_rng.logical_state(),
+        rng_before,
+        "expansion draws no RNG"
+    );
+}
+
+#[test]
+fn ratio_limits_cap_the_expansion_even_with_a_huge_base_size_add() {
+    let rules = ai_tail_rules(
+        "BaseSizeAdd=50\nPowerSurplus=0\nPowerEmergency=0%\n\
+         RefineryRatio=1.0\nRefineryLimit=2\nBarracksLimit=0\nWarLimit=0\n\
+         DefenseLimit=0\nAALimit=0\nTeslaLimit=0\nHelipadLimit=0\nAirstripLimit=0\n",
+    );
+    let (mut sim, owner) = computer_house(true);
+    sim = with_rival(sim, 0);
+    built_out_plan(&mut sim, owner, &rules, 1);
+    for _ in 0..20 {
+        expand_base_plan_if_needed(&mut sim, &rules, owner);
+        complete_all_nodes(&mut sim, owner);
+    }
+    assert_eq!(
+        sim.houses.get(&owner).unwrap().base_plan().nodes().len(),
+        3,
+        "the built node plus RefineryLimit=2; every other limit is 0"
+    );
+}
+
+#[test]
+fn a_house_without_an_assessed_power_state_gets_no_power_plant_bias() {
+    // The old `map_or((0, 0))` read a missing state as an empty grid, so the
+    // surplus was always below `PowerSurplus` and every appended node became a
+    // power plant. An absent state must mean "no opinion", not "blackout".
+    let rules = ai_tail_rules("BaseSizeAdd=5\nPowerSurplus=150\nRefineryRatio=1.0\n");
+    let (mut sim, owner) = computer_house(true);
+    sim = with_rival(sim, 0);
+    built_out_plan(&mut sim, owner, &rules, 1);
+    assert!(expand_base_plan_if_needed(&mut sim, &rules, owner));
+    let node = sim.houses.get(&owner).unwrap().base_plan().nodes()[1];
+    assert_eq!(
+        Some(node.type_or_control),
+        rules.building_type_index("REF"),
+        "the ratio group fills the node, not the power list"
+    );
+}
+
+#[test]
+fn power_surplus_biases_the_next_node_to_a_power_plant() {
+    let rules = ai_tail_rules(
+        "BaseSizeAdd=5\nPowerSurplus=150\nPowerEmergency=75%\nRefineryRatio=.5\nRefineryLimit=10\n",
+    );
+    let (mut sim, owner) = computer_house(true);
+    sim = with_rival(sim, 0);
+    built_out_plan(&mut sim, owner, &rules, 1);
+    let mut power = PowerState::default();
+    power.set_total_output_for_test(10);
+    power.set_total_drain_for_test(5);
+    sim.power_states.map_mut_for_test().insert(owner, power);
+    assert!(expand_base_plan_if_needed(&mut sim, &rules, owner));
+    let node = sim.houses.get(&owner).unwrap().base_plan().nodes()[1];
+    assert_eq!(
+        Some(node.type_or_control),
+        rules.building_type_index("POWER"),
+        "5 surplus is below PowerSurplus=150"
+    );
+}
+
+#[test]
+fn power_emergency_biases_the_next_node_even_when_the_surplus_target_is_met() {
+    let rules = ai_tail_rules(
+        "BaseSizeAdd=5\nPowerSurplus=0\nPowerEmergency=75%\nRefineryRatio=.5\nRefineryLimit=10\n",
+    );
+    let (mut sim, owner) = computer_house(true);
+    sim = with_rival(sim, 0);
+    built_out_plan(&mut sim, owner, &rules, 1);
+    let mut power = PowerState::default();
+    power.set_total_output_for_test(10);
+    power.set_total_drain_for_test(100);
+    sim.power_states.map_mut_for_test().insert(owner, power);
+    assert!(expand_base_plan_if_needed(&mut sim, &rules, owner));
+    let node = sim.houses.get(&owner).unwrap().base_plan().nodes()[1];
+    assert_eq!(
+        Some(node.type_or_control),
+        rules.building_type_index("POWER"),
+        "10/100 output is below PowerEmergency=75%"
+    );
+}
+
+#[test]
+fn infantry_reserve_and_base_mult_gate_the_infantry_pressure() {
+    use crate::rules::ruleset::AiBaseSizeRules;
+
+    let mut cfg = AiBaseSizeRules::default();
+    assert!(
+        !infantry_pressure(&cfg, 100_000, 100, 0),
+        "an INI without the tail keeps the old chooser"
+    );
+    cfg.enabled = true;
+    cfg.infantry_reserve = 50_000;
+    cfg.infantry_base_mult = 5;
+    assert!(infantry_pressure(&cfg, 50_001, 0, 0), "cash above reserve");
+    assert!(
+        infantry_pressure(&cfg, 100, 10, 1),
+        "buildings * mult above the infantry count"
+    );
+    assert!(!infantry_pressure(&cfg, 100, 1, 100), "neither threshold");
+}
+
+#[test]
+fn the_choice_cadence_grows_a_built_out_plan_towards_the_base_size_target() {
+    // Regression: `expand_base_plan_if_needed` was only ever reached from its
+    // own tests, so `[AI] BaseSizeAdd` had no runtime effect at all and every
+    // computer base froze once its one-shot plan was built out.
+    let rules = ai_tail_rules(
+        "BaseSizeAdd=2\nPowerSurplus=0\nPowerEmergency=0%\nRefineryRatio=.5\nRefineryLimit=10\n",
+    );
+    let (mut sim, owner) = computer_house(true);
+    sim = with_rival(sim, 3);
+    // A fresh session has an empty plan: Recalc owns it, the cadence adds
+    // nothing.
+    super::update_production_choices(&mut sim, &rules, owner, None);
+    assert_eq!(
+        sim.houses.get(&owner).unwrap().base_plan().nodes().len(),
+        0,
+        "an empty plan is Recalc's"
+    );
+    built_out_plan(&mut sim, owner, &rules, 2);
+    for _ in 0..5 {
+        super::update_production_choices(&mut sim, &rules, owner, None);
+        complete_all_nodes(&mut sim, owner);
+    }
+    assert_eq!(
+        sim.houses.get(&owner).unwrap().base_plan().nodes().len(),
+        5,
+        "3 human buildings + BaseSizeAdd=2 caps the plan"
+    );
+    for _ in 0..5 {
+        super::update_production_choices(&mut sim, &rules, owner, None);
+    }
+    assert_eq!(
+        sim.houses.get(&owner).unwrap().base_plan().nodes().len(),
+        5,
+        "the target bounds the plan, so the cadence stops appending"
+    );
+}

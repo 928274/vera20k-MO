@@ -66,7 +66,7 @@ use std::hash::{Hash, Hasher};
 
 use crate::rules::object_type::{FactoryType, ObjectCategory, ObjectType};
 use crate::rules::overlay_types::OverlayTypeRegistry;
-use crate::rules::ruleset::RuleSet;
+use crate::rules::ruleset::{AI_BUILD_CATEGORIES, AI_BUILD_CATEGORY_COUNT, RuleSet};
 use crate::sim::ai_base_site::{SiteKey, find_base_building_site, reserved_near};
 use crate::sim::ai_unit_choice::{self, UnitChoiceKind};
 use crate::sim::base_plan::{BasePlanNode, pack_base_plan_cell, unpack_base_plan_cell};
@@ -419,6 +419,14 @@ pub(crate) fn update_production_choices(
     } else {
         0
     };
+    // `[AI] BaseSizeAdd` / Ratio / Limit: retail's plan keeps growing while the
+    // computer base is smaller than the largest human opponent's plus
+    // `BaseSizeAdd` (`AI_RecalcBuildOptions` runs again on every strategy
+    // tick). VERA builds the plan once, so the missing node is appended here
+    // on this same choice cadence, before the choice below reads the plan.
+    // One node per call: a house far below its target fills in within a few
+    // seconds, and the target itself is what bounds the plan.
+    expand_base_plan_if_needed(sim, rules, owner);
     match mode {
         0 => {
             choose_building(sim, rules, owner, registry);
@@ -461,6 +469,7 @@ pub(crate) fn update_production_choices(
         }
         _ => {}
     }
+    encourage_infantry_if_needed(sim, rules, owner);
 }
 
 /// Whether the house's Unit choice is its first owner-compatible `[General]
@@ -474,6 +483,292 @@ fn unit_choice_is_harvester(sim: &Simulation, rules: &RuleSet, owner: InternedId
     crate::sim::ai_buildable::first_owner_compatible_harvester(rules, country_bit)
         .and_then(|harvester| rules.type_array_index(ObjectCategory::Vehicle, &harvester.id))
         .is_some_and(|index| index == house.ai_unit_choices().get(UnitChoiceKind::Unit))
+}
+
+/// The first resolvable BuildingType of an `[AI]` list, in source order.
+/// A `PowersUpBuilding=` upgrade is skipped: it may only stand on its host,
+/// never on a base-perimeter site, so a node for it can never be placed and
+/// would stall the whole base (see
+/// [`crate::sim::base_plan_generation`]'s candidate filter).
+fn ai_list_building_index(rules: &RuleSet, ids: &[String]) -> Option<i32> {
+    ids.iter().find_map(|id| {
+        let index = rules.building_type_index(id)?;
+        rules
+            .building_type_at(index)
+            .filter(|ty| ty.building_upgrade().host().is_none())
+            .map(|_| index)
+    })
+}
+
+/// Pick the `[AI]` ratio/limit group whose share of the computer base is still
+/// short. Retail `rules.ini` documents why the plan keeps growing: "The ratio
+/// total should exceed 100% so that the base will always try to grow as it
+/// vainly attempts to achieve the specified percentage composition." VERA's
+/// one-shot BasePlan has no such loop, so this is its expansion step.
+///
+/// A group is eligible while its count is below its `Limit` and the group's
+/// `[AI]` list names a resolvable BuildingType. The first group below its
+/// ratio wins; when every group has reached its ratio (the native "vain"
+/// state) the first eligible group still grows the base. Both passes use the
+/// fixed `[AI]` category order, no map iteration and no RNG, so the RNG
+/// stream and the world hash stay unchanged.
+fn choose_ai_ratio_group(sim: &Simulation, rules: &RuleSet, owner: InternedId) -> Option<i32> {
+    let cfg = &rules.general.ai_base_size;
+    let house = sim.houses.get(&owner)?;
+    let mut counts = [0_i32; AI_BUILD_CATEGORY_COUNT];
+    let mut total = 0_i32;
+    for node in house.base_plan().nodes() {
+        if node.type_or_control < 0 {
+            continue;
+        }
+        let Some(ty) = rules.building_type_at(node.type_or_control) else {
+            continue;
+        };
+        total = total.wrapping_add(1);
+        for category in AI_BUILD_CATEGORIES {
+            if cfg
+                .types(category)
+                .iter()
+                .any(|id| id.eq_ignore_ascii_case(&ty.id))
+            {
+                counts[category.index()] = counts[category.index()].wrapping_add(1);
+                break;
+            }
+        }
+    }
+    let denominator = total.max(1) as f64;
+    let mut fallback = None;
+    for category in AI_BUILD_CATEGORIES {
+        let limit = cfg.limit(category);
+        if limit <= 0 || counts[category.index()] >= limit {
+            continue;
+        }
+        let ids = cfg.types(category);
+        if ids.is_empty() {
+            continue;
+        }
+        let desired = (denominator * cfg.ratio(category)).floor() as i32;
+        if counts[category.index()] < desired
+            && let Some(index) = ai_list_building_index(rules, ids)
+        {
+            return Some(index);
+        }
+        if fallback.is_none() {
+            fallback = ai_list_building_index(rules, ids);
+        }
+    }
+    fallback
+}
+
+/// `[AI] BaseSizeAdd` / Ratio / Limit, applied to a BasePlan Recalc built.
+///
+/// Retail's `BaseSizeAdd` is a ceiling, not a target: "computer base size can
+/// be no larger than the largest human opponent, plus this quantity". The
+/// nodes themselves come from `AI_RecalcBuildOptions`, which VERA runs once
+/// when the Construction Yard is deployed. Two rules therefore gate this
+/// path, and both were measured the hard way on `(8) Perseverance`:
+///
+/// * A plan that is still empty belongs to Recalc: appending here would fill
+///   it first, and `house_base` only recalcs an empty plan, so the house would
+///   never receive its table-derived plan at all. Three of five computer
+///   houses ended up with 24 `GAPOWR` nodes that way.
+/// * Append only once every Recalc node is filled. Before that the plan still
+///   has work of its own; `AI_Manage_Build_Queue` is what extends a finished
+///   base, and the `[AI]` ratios it reads ("the ratio total should exceed 100%
+///   so that the base will always try to grow", retail `rules.ini`) describe
+///   that later phase.
+///
+/// Absent `[AI]` keys leave `enabled` false, so this whole path is skipped and
+/// the RNG stream and world hash stay unchanged.
+pub(crate) fn expand_base_plan_if_needed(
+    sim: &mut Simulation,
+    rules: &RuleSet,
+    owner: InternedId,
+) -> bool {
+    let cfg = &rules.general.ai_base_size;
+    if !cfg.enabled || cfg.base_size_add <= 0 {
+        return false;
+    }
+    let game_mode_nonzero = sim.session.game_mode_nonzero();
+    let Some(house) = sim.houses.get(&owner) else {
+        return false;
+    };
+    if house.is_controlled_by_human(game_mode_nonzero) || house.multiplay_passive() {
+        return false;
+    }
+    // Recalc owns a fresh plan; never pre-empt it (`house_base` only recalcs
+    // an empty one).
+    if house.base_plan().nodes().is_empty() {
+        return false;
+    }
+    // BTreeMap house order: deterministic, unlike a HashMap max-by.
+    let largest_human_base = sim
+        .houses
+        .iter()
+        .filter(|(_, other)| other.is_human())
+        .map(|(_, other)| other.tracking().buildings())
+        .max()
+        .unwrap_or(0);
+    let target = largest_human_base.saturating_add(cfg.base_size_add);
+    if house.base_plan().nodes().len() as i32 >= target {
+        return false;
+    }
+    if house.base_plan().nodes().iter().any(|node| !node.filled) {
+        return false;
+    }
+
+    // PowerSurplus (build plants until the surplus reaches the value) and
+    // PowerEmergency (supply/output ratio below the percent) both bias the
+    // next node to a power plant. A house with no assessed power state reads
+    // as (0, 0) surplus, so an ordinary `map_or((0, 0), ..)` would look like a
+    // permanent blackout and turn the whole plan into power plants — use the
+    // shortage only when the state actually exists.
+    let plant = sim
+        .power_states
+        .get(&owner)
+        .filter(|power| {
+            let (output, drain) = (power.total_output(), power.total_drain());
+            output.wrapping_sub(drain) < cfg.power_surplus
+                || (drain > 0 && (output as f64 / drain as f64) < cfg.power_emergency)
+        })
+        .and_then(|_| ai_list_building_index(rules, &rules.build_power_types));
+    let Some(type_index) = plant.or_else(|| choose_ai_ratio_group(sim, rules, owner)) else {
+        return false;
+    };
+    let Some(house) = sim.houses.get_mut(&owner) else {
+        return false;
+    };
+    let index = house.base_plan().nodes().len();
+    house.base_plan_mut().insert(
+        index,
+        BasePlanNode {
+            type_or_control: type_index,
+            packed_cell: 0,
+            filled: false,
+            retry_count: 0,
+        },
+    );
+    true
+}
+
+/// `[AI] InfantryReserve` / `InfantryBaseMult` as a pure predicate, so the
+/// two thresholds can be checked without a full unit chooser fixture.
+fn infantry_pressure(
+    cfg: &crate::rules::ruleset::AiBaseSizeRules,
+    money: i32,
+    buildings: i32,
+    infantry: i32,
+) -> bool {
+    cfg.enabled
+        && (money > cfg.infantry_reserve
+            || buildings.saturating_mul(cfg.infantry_base_mult) > infantry)
+}
+
+/// `[AI] InfantryReserve` / `InfantryBaseMult`: keep the infantry chooser
+/// fed while cash is above the reserve, or the base has more buildings than
+/// the current infantry count times the multiplier. Only active with the
+/// `[AI]` tail; the chooser itself still owns its RNG draws.
+pub(crate) fn encourage_infantry_if_needed(
+    sim: &mut Simulation,
+    rules: &RuleSet,
+    owner: InternedId,
+) {
+    let cfg = &rules.general.ai_base_size;
+    if !cfg.enabled {
+        return;
+    }
+    let Some(house) = sim.houses.get(&owner) else {
+        return;
+    };
+    let money = crate::sim::credit_income::available_money(&sim.houses, owner);
+    let buildings = house.tracking().buildings();
+    let infantry = house.tracking().infantry();
+    if !infantry_pressure(cfg, money, buildings, infantry) {
+        return;
+    }
+    if house
+        .ai_unit_choices()
+        .get(crate::sim::ai_unit_choice::UnitChoiceKind::Infantry)
+        != -1
+    {
+        return;
+    }
+    crate::sim::ai_unit_choice::choose(
+        sim,
+        rules,
+        owner,
+        crate::sim::ai_unit_choice::UnitChoiceKind::Infantry,
+    );
+}
+
+/// One computer house's AI production state for offline diagnostics
+/// (`sim-bench`): `(mode, building_choice, naval_allowed, choice_id)`. Read-
+/// only; the native fields are module-private, so headless drivers have no
+/// other way to see why a base stopped building. `choice_id` is `"?"` when the
+/// stored index names no BuildingType, which leaves `Suggest_New_Object` null
+/// and the choice stuck.
+pub fn ai_production_debug(
+    sim: &crate::sim::world::Simulation,
+    rules: &RuleSet,
+    house: &crate::sim::house_state::HouseState,
+) -> (
+    u32,
+    i32,
+    i32,
+    bool,
+    String,
+    u16,
+    u16,
+    bool,
+    bool,
+    usize,
+    usize,
+) {
+    let ai = house.ai_production();
+    let id = rules
+        .building_type_at(ai.building_choice)
+        .map_or_else(|| "?".to_string(), |ty| ty.id.clone());
+    // `255` progress means no building factory exists for the first
+    // Construction Yard. `rate` is the frames between production steps; a huge
+    // rate looks like a frozen base while the factory is technically running.
+    let frame = sim.session.binary_frame();
+    let filled = house
+        .base_plan()
+        .nodes()
+        .iter()
+        .filter(|node| node.filled)
+        .count();
+    let with_cell = house
+        .base_plan()
+        .nodes()
+        .iter()
+        .filter(|node| node.packed_cell != 0)
+        .count();
+    let (progress, rate, suspended, has_object) = house
+        .build_const_order()
+        .first()
+        .and_then(|&yard| sim.production.factories().building_factory(yard))
+        .map_or((255, 0, false, false), |factory| {
+            (
+                factory.progress(),
+                factory.step_rate_frames(),
+                factory.suspended(),
+                factory.object().is_some(),
+            )
+        });
+    (
+        frame,
+        ai.mode,
+        ai.building_choice,
+        ai.naval_allowed,
+        id,
+        progress,
+        rate,
+        suspended,
+        has_object,
+        filled,
+        with_cell,
+    )
 }
 
 /// `HouseClass::AI_Choose_Building @ 0x004FE3E0`.
@@ -492,8 +787,21 @@ pub(crate) fn choose_building(
         return;
     }
     let naval_allowed = house.ai_production().naval_allowed;
-    let Some(mut index) = find_node(sim, rules, owner, -1, registry) else {
-        return;
+    // A built-out plan has no open node. Retail ReadAI's BaseSizeAdd /
+    // Ratio / Limit tail would have kept appending nodes as the largest
+    // human base grew; do that now and look again. Disabled for INIs that
+    // carry none of those keys.
+    let mut index = match find_node(sim, rules, owner, -1, registry) {
+        Some(index) => index,
+        None => {
+            if !expand_base_plan_if_needed(sim, rules, owner) {
+                return;
+            }
+            let Some(next) = find_node(sim, rules, owner, -1, registry) else {
+                return;
+            };
+            next
+        }
     };
     // `0x004FE41C..0x004FE4A4`: a naval node while naval building is off is
     // removed, and the lookup runs once more.

@@ -607,9 +607,200 @@ impl Default for CountryDifficultyBiases {
     }
 }
 
+/// Number of `[AI]` ratio/limit pairs the retail `[AI]` section defines.
+pub const AI_BUILD_CATEGORY_COUNT: usize = 8;
+
+/// One of the eight `[AI]` ratio/limit building groups (`ReadAI672AE0`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AiBuildCategory {
+    Refinery,
+    Barracks,
+    War,
+    Defense,
+    Aa,
+    Tesla,
+    Helipad,
+    Airstrip,
+}
+
+pub const AI_BUILD_CATEGORIES: [AiBuildCategory; AI_BUILD_CATEGORY_COUNT] = [
+    AiBuildCategory::Refinery,
+    AiBuildCategory::Barracks,
+    AiBuildCategory::War,
+    AiBuildCategory::Defense,
+    AiBuildCategory::Aa,
+    AiBuildCategory::Tesla,
+    AiBuildCategory::Helipad,
+    AiBuildCategory::Airstrip,
+];
+
+impl AiBuildCategory {
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+
+    pub const fn ratio_key(self) -> &'static str {
+        match self {
+            Self::Refinery => "RefineryRatio",
+            Self::Barracks => "BarracksRatio",
+            Self::War => "WarRatio",
+            Self::Defense => "DefenseRatio",
+            Self::Aa => "AARatio",
+            Self::Tesla => "TeslaRatio",
+            Self::Helipad => "HelipadRatio",
+            Self::Airstrip => "AirstripRatio",
+        }
+    }
+
+    pub const fn limit_key(self) -> &'static str {
+        match self {
+            Self::Refinery => "RefineryLimit",
+            Self::Barracks => "BarracksLimit",
+            Self::War => "WarLimit",
+            Self::Defense => "DefenseLimit",
+            Self::Aa => "AALimit",
+            Self::Tesla => "TeslaLimit",
+            Self::Helipad => "HelipadLimit",
+            Self::Airstrip => "AirstripLimit",
+        }
+    }
+
+    /// The `[AI]` list whose BuildingTypes belong to this group. Retail
+    /// `rules.ini` defines `BuildDefense=TESLA,ATESLA` (the Tesla group's
+    /// candidates), `BuildPDefense=` for the powered variant, `BuildAA=` and
+    /// `BuildHelipad=`. `BuildAirstrip=` is a MO/Ares-era optional list; an
+    /// absent list leaves the group with no candidates (MO sets its limit 0).
+    pub const fn list_key(self) -> &'static str {
+        match self {
+            Self::Refinery => "BuildRefinery",
+            Self::Barracks => "BuildBarracks",
+            Self::War => "BuildWeapons",
+            Self::Defense => "BuildDefense",
+            Self::Aa => "BuildAA",
+            Self::Tesla => "BuildPDefense",
+            Self::Helipad => "BuildHelipad",
+            Self::Airstrip => "BuildAirstrip",
+        }
+    }
+}
+
+/// `[AI]`'s base-size / ratio / limit tail (`ReadAI672AE0 @ 0x00672AE0`),
+/// plus the infantry and power globals read in the same pass.
+///
+/// VERA generates a computer BasePlan once
+/// ([`crate::sim::base_plan_generation::recalc_base_plan`]); the retail engine
+/// keeps growing a base while its largest human opponent grows, because
+/// "The ratio total should exceed 100% so that the base will always try to
+/// grow as it vainly attempts to achieve the specified percentage
+/// composition" (retail `rules.ini`, `[AI]` header). These keys are the inputs
+/// of that missing expansion. `enabled` stays false when none of the keys is
+/// present, so an INI without the tail keeps the pre-existing behaviour and
+/// its deterministic replay/RNG stream.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AiBaseSizeRules {
+    pub enabled: bool,
+    pub base_size_add: i32,
+    pub infantry_reserve: i32,
+    pub infantry_base_mult: i32,
+    pub power_surplus: i32,
+    /// `PowerEmergency=75%` through `ReadDouble`'s percent scale (0.75).
+    pub power_emergency: f64,
+    ratios: [f64; AI_BUILD_CATEGORY_COUNT],
+    limits: [i32; AI_BUILD_CATEGORY_COUNT],
+    category_types: [Vec<String>; AI_BUILD_CATEGORY_COUNT],
+}
+
+/// Retail `rules.ini` constructor/read defaults (RA2 base INI). YR's
+/// `rulesmd.ini` overrides several of them; MO's `ai.ini` override is what
+/// the MO client actually sees, through the `[#include] +=ai.ini` layer.
+const AI_DEFAULT_RATIOS: [f64; AI_BUILD_CATEGORY_COUNT] =
+    [0.16, 0.16, 0.1, 0.4, 0.14, 0.16, 0.1, 0.12];
+const AI_DEFAULT_LIMITS: [i32; AI_BUILD_CATEGORY_COUNT] = [4, 2, 2, 40, 10, 10, 2, 0];
+const AI_DEFAULT_BASE_SIZE_ADD: i32 = 3;
+const AI_DEFAULT_INFANTRY_RESERVE: i32 = 50_000;
+const AI_DEFAULT_INFANTRY_BASE_MULT: i32 = 1;
+const AI_DEFAULT_POWER_SURPLUS: i32 = 50;
+const AI_DEFAULT_POWER_EMERGENCY: f64 = 0.75;
+
+impl Default for AiBaseSizeRules {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            base_size_add: AI_DEFAULT_BASE_SIZE_ADD,
+            infantry_reserve: AI_DEFAULT_INFANTRY_RESERVE,
+            infantry_base_mult: AI_DEFAULT_INFANTRY_BASE_MULT,
+            power_surplus: AI_DEFAULT_POWER_SURPLUS,
+            power_emergency: AI_DEFAULT_POWER_EMERGENCY,
+            ratios: AI_DEFAULT_RATIOS,
+            limits: AI_DEFAULT_LIMITS,
+            category_types: std::array::from_fn(|_| Vec::new()),
+        }
+    }
+}
+
+impl AiBaseSizeRules {
+    /// Read the tail from the merged `[AI]` section (post-`[#include]`, so
+    /// MO's `ai.ini` overrides are already in place).
+    pub fn from_ini_section(ai: &crate::rules::ini_parser::IniSection) -> Self {
+        let mut rules = Self::default();
+        let scalar_keys = [
+            "BaseSizeAdd",
+            "InfantryReserve",
+            "InfantryBaseMult",
+            "PowerSurplus",
+            "PowerEmergency",
+        ];
+        for category in AI_BUILD_CATEGORIES {
+            if ai.is_present(category.ratio_key()) || ai.is_present(category.limit_key()) {
+                rules.enabled = true;
+            }
+            let index = category.index();
+            rules.ratios[index] = ai.read_double(category.ratio_key(), rules.ratios[index]);
+            rules.limits[index] = ai.read_int(category.limit_key(), rules.limits[index]);
+            rules.category_types[index] = ai
+                .read_list(category.list_key(), 0x80)
+                .map(|tokens| {
+                    tokens
+                        .into_iter()
+                        .map(str::trim)
+                        .filter(|token| !token.is_empty())
+                        .map(|token| token.to_owned())
+                        .collect()
+                })
+                .unwrap_or_default();
+        }
+        if scalar_keys.iter().any(|key| ai.is_present(key)) {
+            rules.enabled = true;
+        }
+        rules.base_size_add = ai.read_int("BaseSizeAdd", rules.base_size_add);
+        rules.infantry_reserve = ai.read_int("InfantryReserve", rules.infantry_reserve);
+        rules.infantry_base_mult = ai.read_int("InfantryBaseMult", rules.infantry_base_mult);
+        rules.power_surplus = ai.read_int("PowerSurplus", rules.power_surplus);
+        rules.power_emergency = ai.read_double("PowerEmergency", rules.power_emergency);
+        rules
+    }
+
+    pub fn ratio(&self, category: AiBuildCategory) -> f64 {
+        self.ratios[category.index()]
+    }
+
+    pub fn limit(&self, category: AiBuildCategory) -> i32 {
+        self.limits[category.index()]
+    }
+
+    /// The `[AI]` list's BuildingType IDs, in source order.
+    pub fn types(&self, category: AiBuildCategory) -> &[String] {
+        &self.category_types[category.index()]
+    }
+}
+
 /// Global gameplay constants from `[General]` that affect vision, gap generators, etc.
 #[derive(Debug, Clone)]
 pub struct GeneralRules {
+    /// `[AI]`'s base-size / ratio / limit tail (`ReadAI672AE0`). When none of
+    /// those keys is present `enabled` is false and the simulation keeps its
+    /// original one-shot BasePlan behaviour.
+    pub ai_base_size: AiBaseSizeRules,
     /// `[General] MaxWaypointPathLength`, Rules+90. Constructor665725
     /// writes15; ReadGeneral671DB2..671DCC passes the prior signed value to
     /// ReadInteger5276D0 and stores it unchanged, without a clamp.
@@ -2677,6 +2868,7 @@ impl Default for GeneralRules {
                 f64::from_bits(DEFAULT_AMBIENT_CHANGE_STEP.bits()),
             );
         Self {
+            ai_base_size: AiBaseSizeRules::default(),
             max_waypoint_path_length: 15,
             talk_bubble_time: 300,
             flash_frame_time: 7,
@@ -3775,6 +3967,9 @@ impl GeneralRules {
         // Rules ReadAI6739E5..673A31 is independent of ReadGeneral.
         // Constructor66760E..66761E supplies PathDelay0.016 and blockage60.
         let ai = ini.section_or_empty("AI");
+        // ReadAI672AE0's base-size tail. Read from the merged section so the
+        // MO `[#include] +=ai.ini` overrides (BaseSizeAdd=24, ...) win.
+        let ai_base_size = AiBaseSizeRules::from_ini_section(ai);
         let paranoid = ai.read_bool("Paranoid", defaults.paranoid);
         // RulesProcess668EC0 reaches 671EA0 independently of ReadGeneral too.
         let allies_allowed = ini
@@ -3802,6 +3997,7 @@ impl GeneralRules {
             audio_visual.read_ares_int("AirstrikeLineZAdjust", defaults.airstrike_line_z_adjust);
         let Some(general) = ini.section("General") else {
             return Self {
+                ai_base_size,
                 message_delay_minutes,
                 savour_delay_minutes,
                 pose_dir,
@@ -3856,6 +4052,7 @@ impl GeneralRules {
         let condition_yellow_spark_prob: f64 =
             general.read_double("ConditionYellowSparkingProbability", 0.01);
         Self {
+            ai_base_size,
             pose_dir,
             deploy_dir,
             max_waypoint_path_length: general
@@ -12207,6 +12404,104 @@ fn parse_particle_system_types(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ai_base_size_rules_read_the_merged_mo_ai_tail() {
+        use super::{AiBaseSizeRules, AiBuildCategory};
+        use crate::rules::ini_parser::IniFile;
+
+        let ini = IniFile::from_str(
+            "[AI]\nBaseSizeAdd=24\nRefineryRatio=.08\nRefineryLimit=10\n\
+             BarracksRatio=.08\nBarracksLimit=10\nWarRatio=.08\nWarLimit=10\n\
+             DefenseRatio=.04\nDefenseLimit=80\nAARatio=.04\nAALimit=50\n\
+             TeslaRatio=.04\nTeslaLimit=50\nHelipadRatio=.08\nHelipadLimit=5\n\
+             AirstripRatio=.12\nAirstripLimit=0\nInfantryReserve=50000\n\
+             InfantryBaseMult=5\nPowerSurplus=150\nPowerEmergency=75%\n\
+             BuildRefinery=NAREFN,GAREFN\nBuildAA=NASAM,NAFLAK\n",
+        );
+        let ai = AiBaseSizeRules::from_ini_section(ini.section_or_empty("AI"));
+        assert!(ai.enabled, "the MO [AI] tail enables the expansion rules");
+        assert_eq!(ai.base_size_add, 24);
+        assert_eq!(ai.infantry_reserve, 50_000);
+        assert_eq!(ai.infantry_base_mult, 5);
+        assert_eq!(ai.power_surplus, 150);
+        assert!((ai.power_emergency - 0.75).abs() < 1e-6);
+        assert!((ai.ratio(AiBuildCategory::Refinery) - 0.08).abs() < 1e-6);
+        assert!((ai.ratio(AiBuildCategory::Defense) - 0.04).abs() < 1e-6);
+        assert_eq!(ai.limit(AiBuildCategory::Refinery), 10);
+        assert_eq!(ai.limit(AiBuildCategory::Defense), 80);
+        assert_eq!(ai.limit(AiBuildCategory::Airstrip), 0);
+        assert_eq!(
+            ai.types(AiBuildCategory::Refinery)
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["NAREFN", "GAREFN"]
+        );
+        assert_eq!(
+            ai.types(AiBuildCategory::Aa)
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["NASAM", "NAFLAK"]
+        );
+    }
+
+    #[test]
+    fn ai_base_size_rules_stay_disabled_without_the_tail() {
+        use super::AiBaseSizeRules;
+        use crate::rules::ini_parser::IniFile;
+
+        let ini = IniFile::from_str("[AI]\nParanoid=yes\nCreditReserve=100\n");
+        let ai = AiBaseSizeRules::from_ini_section(ini.section_or_empty("AI"));
+        assert!(
+            !ai.enabled,
+            "an INI without the tail keeps the old behaviour"
+        );
+        assert_eq!(ai.base_size_add, 3);
+        assert_eq!(ai.infantry_base_mult, 1);
+        assert_eq!(ai.power_surplus, 50);
+        assert!((ai.power_emergency - 0.75).abs() < 1e-6);
+    }
+
+    #[test]
+    fn ai_base_size_rules_survive_the_no_general_early_return() {
+        use super::GeneralRules;
+        use crate::rules::ini_parser::IniFile;
+
+        let general = GeneralRules::from_ini(&IniFile::from_str(
+            "[AI]\nBaseSizeAdd=24\nRefineryLimit=10\nPowerSurplus=150\n",
+        ));
+        assert!(general.ai_base_size.enabled);
+        assert_eq!(general.ai_base_size.base_size_add, 24);
+        assert_eq!(
+            general.ai_base_size.limit(super::AiBuildCategory::Refinery),
+            10
+        );
+        assert_eq!(general.ai_base_size.power_surplus, 150);
+    }
+
+    #[test]
+    fn ai_base_size_rules_read_the_last_include_layer() {
+        use crate::rules::ini_parser::IniFile;
+        use crate::rules::native_processing::{RulesLayerKind, RulesLayerStack};
+
+        // MO: rulesmo.ini gives 6/50/1, then `[#include] +=ai.ini` gives
+        // 24/150/5. The merged section is what the simulation must see.
+        let mut layers = RulesLayerStack::new(IniFile::from_str(
+            "[General]\n[AI]\nBaseSizeAdd=6\nRefineryLimit=10\nPowerSurplus=50\nInfantryBaseMult=1\n",
+        ));
+        layers.push(
+            RulesLayerKind::Scenario,
+            IniFile::from_str("[AI]\nBaseSizeAdd=24\nPowerSurplus=150\nInfantryBaseMult=5\n"),
+        );
+        let rules = RuleSet::from_rules_layers(&layers).unwrap();
+        let ai = &rules.general.ai_base_size;
+        assert!(ai.enabled);
+        assert_eq!(ai.base_size_add, 24, "the later include wins over 6");
+        assert_eq!(ai.power_surplus, 150);
+        assert_eq!(ai.infantry_base_mult, 5);
+    }
+
     #[test]
     fn ares_emp_ai_global_mission_uses_production_layers_and_config_hash() {
         use crate::rules::{
