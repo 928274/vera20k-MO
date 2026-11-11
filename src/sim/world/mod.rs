@@ -5125,6 +5125,12 @@ impl Simulation {
         self.session.outcome_request().is_some()
     }
 
+    /// Offline drivers (`sim-bench`) keep a decided match running so long-
+    /// horizon AI behaviour stays observable; the client never calls this.
+    pub fn clear_outcome_request_for_bench(&mut self) {
+        self.session.clear_outcome_request_for_bench();
+    }
+
     fn termination_frame_requested(&self) -> bool {
         self.quit_requested || self.connection_lost || self.natural_outcome_exit_ready()
     }

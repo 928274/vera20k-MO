@@ -145,6 +145,14 @@ struct Args {
     lan: bool,
     frame_hashes: Option<PathBuf>,
     client_timing: bool,
+    /// INI root profile for the match/skirmish scenarios. `yr` is the retail
+    /// default; `mo` reads `rulesmo.ini`/`artmo.ini`/`aimo.ini`, which MO maps
+    /// need for their custom overlays and AI parameters.
+    ini_profile: String,
+    /// Keep a decided match running (offline diagnostics): a terminal outcome
+    /// stops the native frame commit, which freezes every timer-driven
+    /// subsystem and hides long-horizon AI behaviour.
+    keep_playing: bool,
 }
 
 impl Args {
@@ -185,6 +193,8 @@ fn parse_args_from(mut argv: impl Iterator<Item = String>) -> Result<Args, Strin
         lan: false,
         frame_hashes: None,
         client_timing: false,
+        ini_profile: "yr".to_string(),
+        keep_playing: false,
     };
     let mut march_flag = None;
     while let Some(flag) = argv.next() {
@@ -239,6 +249,8 @@ fn parse_args_from(mut argv: impl Iterator<Item = String>) -> Result<Args, Strin
             "--frame-hashes" => args.frame_hashes = Some(PathBuf::from(value()?)),
             "--client-timing" => args.client_timing = true,
             "--serial-scans" => args.serial_scans = true,
+            "--ini-profile" => args.ini_profile = value()?,
+            "--keep-playing" => args.keep_playing = true,
             other => return Err(format!("unrecognised argument {other}")),
         }
     }
@@ -251,6 +263,9 @@ fn parse_args_from(mut argv: impl Iterator<Item = String>) -> Result<Args, Strin
     if args.houses.is_some_and(|houses| houses < 2) || args.types.is_empty() {
         return Err("need at least two houses and one unit type".to_string());
     }
+    args.ini_profile
+        .parse::<vera20k_core::util::ini_roots::IniProfile>()
+        .map_err(|error| format!("--ini-profile: {error}"))?;
     let marched = args.scenario == ScenarioKind::March;
     if marched && args.computers.is_some() {
         return Err("--computers is a match and skirmish option".to_string());
@@ -487,6 +502,7 @@ struct Bench<'a> {
     runtime: &'a mut SimRuntime,
     plan: &'a mut Plan,
     tick_ms: u32,
+    keep_playing: bool,
 }
 
 impl Frames for Bench<'_> {
@@ -499,6 +515,9 @@ impl Frames for Bench<'_> {
     }
 
     fn advance(&mut self, commands: &[CommandEnvelope]) -> Result<Option<u32>, String> {
+        if self.keep_playing {
+            self.runtime.simulation.clear_outcome_request_for_bench();
+        }
         self.runtime
             .advance_frame_for_tooling(commands, self.tick_ms)
             .map_err(|error| error.to_string())
@@ -509,13 +528,65 @@ impl Frames for Bench<'_> {
     }
 
     fn completed(&mut self, tick: u64, times: &[Duration]) {
-        if matches!(self.plan, Plan::March(_)) || (tick + 1) % PROGRESS_EVERY != 0 {
+        if matches!(self.plan, Plan::March(_)) || !(tick + 1).is_multiple_of(PROGRESS_EVERY) {
             return;
         }
         let recent = &times[times.len().saturating_sub(PROGRESS_EVERY as usize)..];
         let mean: Duration = recent.iter().sum::<Duration>() / recent.len() as u32;
         let progress = match &*self.plan {
             Plan::Match(script) => script.progress(self.runtime),
+            Plan::Skirmish if (tick + 1).is_multiple_of(PROGRESS_EVERY * 20) => {
+                // AI bases stall when a choice waits for money: print each
+                // computer house's cash and built/planned counts every 2000th
+                // tick so a stopped base is visible in the progress line.
+                let simulation = &self.runtime.simulation;
+                let mut houses = String::new();
+                for (id, house) in simulation.houses().iter() {
+                    if house.is_human() {
+                        continue;
+                    }
+                    let (
+                        frame,
+                        mode,
+                        choice,
+                        naval,
+                        choice_id,
+                        progress,
+                        rate,
+                        suspended,
+                        has_object,
+                        filled,
+                        with_cell,
+                    ) = vera20k_core::sim::ai_base_building::ai_production_debug(
+                        simulation,
+                        &self.runtime.resources.rules,
+                        house,
+                    );
+                    houses.push_str(&format!(
+                        " {:?}:f{}/b{}/p{}(fl{}/cl{})/cr{}/m{}/ch{}({})/cy{}/nv{}/pg{}/rt{}/su{}/ob{}",
+                        id,
+                        frame,
+                        house.tracking().buildings(),
+                        house.base_plan().nodes().len(),
+                        filled,
+                        with_cell,
+                        vera20k_core::sim::credit_income::available_money(
+                            simulation.houses(),
+                            *id
+                        ),
+                        mode,
+                        choice,
+                        choice_id,
+                        house.build_const_order().len(),
+                        naval as u8,
+                        progress,
+                        rate,
+                        suspended as u8,
+                        has_object as u8,
+                    ));
+                }
+                format!("live_objects={}{}", simulation.entities().len(), houses)
+            }
             _ => format!("live_objects={}", self.runtime.simulation.entities().len()),
         };
         println!(
@@ -666,7 +737,8 @@ fn main() -> Result<(), String> {
                  [--ticks 300 (match: 1800, skirmish: 9000)] \
                  [--types E1,E2,MTNK,HTNK] [--order-spread 30] [--return-at T] (march) \
                  [--hash-every N] [--frame-hash-every 15] [--csv <path>] [--serial-paths] [--serial-scans] \
-                 [--frame-profile] [--lan] [--frame-hashes <path>] [--client-timing]"
+                 [--frame-profile] [--lan] [--frame-hashes <path>] [--client-timing] \
+                 [--ini-profile yr|mo|auto] [--keep-playing]"
             );
             std::process::exit(2);
         }
@@ -675,23 +747,32 @@ fn main() -> Result<(), String> {
         ScenarioKind::March => 0,
         ScenarioKind::Match | ScenarioKind::Skirmish => seated_computers(&args)?,
     };
+    let ini = vera20k_core::util::ini_roots::IniRootConfig {
+        profile: args
+            .ini_profile
+            .parse()
+            .map_err(|error| format!("--ini-profile: {error}"))?,
+        ..Default::default()
+    };
     let load_started = Instant::now();
     let mut scenario = match args.scenario {
         ScenarioKind::March => headless_scenario::load(&args.ra2_dir, &args.map, args.seed)?,
         ScenarioKind::Match => {
             let computers = computers.min(args.houses.unwrap_or(usize::MAX));
-            headless_scenario::load_session(
+            headless_scenario::load_session_with_ini(
                 &args.ra2_dir,
                 &args.map,
                 args.seed,
                 sim_bench_match::session(&args.map, computers),
+                &ini,
             )?
         }
-        ScenarioKind::Skirmish => headless_scenario::load_session(
+        ScenarioKind::Skirmish => headless_scenario::load_session_with_ini(
             &args.ra2_dir,
             &args.map,
             args.seed,
             battle_session(&args.map, &sim_bench_match::COMPUTER_ROSTER[..computers]),
+            &ini,
         )?,
     };
     if !args.serial_paths {
@@ -771,6 +852,7 @@ fn main() -> Result<(), String> {
             runtime: &mut *runtime,
             plan: &mut plan,
             tick_ms,
+            keep_playing: args.keep_playing,
         },
         ticks,
         args.hash_every,
@@ -790,6 +872,19 @@ fn main() -> Result<(), String> {
         print_frame_profile(runtime);
     }
     println!("live_objects start={live_at_start} end={live_at_end}");
+    if matches!(plan, Plan::Skirmish) {
+        // Skirmish has no per-house progress line; print what each AI ended
+        // with so a base-size change can be read off a headless run.
+        let simulation = &runtime.simulation;
+        for (id, house) in simulation.houses().iter() {
+            println!(
+                "house_ai id={id:?} human={} buildings={} plan_nodes={}",
+                house.is_human(),
+                house.tracking().buildings(),
+                house.base_plan().nodes().len()
+            );
+        }
+    }
     frames?;
     csv_written?;
     frame_hashes_written?;

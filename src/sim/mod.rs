@@ -23,7 +23,7 @@
 // --- Core types: entity storage, components, commands, RNG, interning ---
 #[cfg(feature = "ares")]
 pub(crate) mod abduction; // Ares Abductor= weapons (conductAbduction 10054A80)
-pub(crate) mod ai_base_building;
+pub mod ai_base_building;
 pub(crate) mod ai_base_defense;
 pub(crate) mod ai_base_site;
 pub mod ammo;

@@ -1788,6 +1788,15 @@ impl ScenarioSession {
         }
     }
 
+    /// Offline drivers (`sim-bench`) keep a match running after an outcome was
+    /// admitted, so long-horizon behaviour (base growth, production cadence)
+    /// stays observable. The client never calls this: a decided outcome is
+    /// terminal there, and the frame tail stops committing.
+    pub fn clear_outcome_request_for_bench(&mut self) {
+        self.victory_requested = false;
+        self.defeat_requested = false;
+    }
+
     pub const fn scenario_side(&self) -> i32 {
         self.scenario_side
     }

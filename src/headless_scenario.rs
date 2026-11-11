@@ -172,6 +172,31 @@ pub fn load_session(
     load_with_launch(retail_dir, map_file_name, seed, launch)
 }
 
+/// [`load_session`] with an explicit INI root profile, for headless tools that
+/// must read a mod's rules (`IniProfile::Mo`) instead of the retail defaults.
+/// The client resolves the same profile from `config.toml`; this only exposes
+/// the choice to `sim-bench` and other offline drivers.
+pub fn load_session_with_ini(
+    retail_dir: &Path,
+    map_file_name: &str,
+    seed: u32,
+    session: SkirmishLaunchSession,
+    ini: &crate::util::ini_roots::IniRootConfig,
+) -> Result<HeadlessScenario, String> {
+    let launch = crate::sim::scenario_bootstrap::MatchLaunchDescriptor::from_resolved(session)
+        .map_err(|error| format!("resolve Battle launch: {error}"))?;
+    load_with_launch_and_ini(
+        retail_dir,
+        map_file_name,
+        seed,
+        launch,
+        ini,
+        crate::sim::scenario_session::ScenarioGameMode::Skirmish,
+        None,
+        None,
+    )
+}
+
 /// Run the same construction and bound-resource handoff with an explicit
 /// resolved launch. The quickplay regression uses its real app descriptor here
 /// so house creation and starting forces cannot drift from the tested session.

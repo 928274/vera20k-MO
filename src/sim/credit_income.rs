@@ -182,7 +182,7 @@ pub(crate) fn spend_money(houses: &mut Houses, owner: InternedId, amount: i32) {
 /// [`Economy::available_money`](crate::sim::economy::Economy::available_money)
 /// of `owner`'s wallet (the money interface's slot `+0x18`,
 /// `Available_Money @ 0x004F6990`); 0 for a house that does not exist.
-pub(crate) fn available_money(houses: &Houses, owner: InternedId) -> i32 {
+pub fn available_money(houses: &Houses, owner: InternedId) -> i32 {
     houses
         .get(&owner)
         .map_or(0, |house| house.economy().available_money())
