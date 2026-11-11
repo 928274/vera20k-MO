@@ -1251,11 +1251,16 @@ impl Simulation {
                     return Ok(None);
                 }
                 //0x4D3DD8..0x4D3E03: the FNPC result is set and searched without
-                //an invalid-cell test; only an FNPC failure over the whole map
-                //radius would search cell (0,0), which no test fixture produces.
-                let near = self.find_path_nearby_cell(id, target, rules)?.ok_or(
-                    "Find_Path code-7 redirect found no passable cell near the Building target",
-                )?;
+                //an invalid-cell test; an FNPC failure over the whole map radius
+                //searches cell (0,0). VERA's FNPC reports that null result as no
+                //cell: keep the original destination and let the ordinary failed
+                //search path run, exactly as code 6 does at 0x4D3BC2. A dense base
+                //can leave no passable cell in the mover's zone, so this is a failed
+                //route, not a frame-stopping receiver error. Escalating it to Err
+                //aborted whole skirmishes at the first such blocked Building.
+                let Some(near) = self.find_path_nearby_cell(id, target, rules)? else {
+                    return Ok(None);
+                };
                 Ok(Some(near))
             }
             _ => Ok(None),

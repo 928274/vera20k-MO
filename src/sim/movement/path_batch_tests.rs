@@ -478,6 +478,33 @@ fn a_redirected_request_is_left_to_find_path() {
     assert_eq!(sim.path_batch.as_ref().unwrap().used, [0, 0]);
 }
 
+/// A code-7 redirect (a Building occupies the destination) whose
+/// Find_Nearby_Passable_Cell finds no passable cell anywhere in the map
+/// radius is a failed search, not a broken frame. Native 0x4D3DD8..0x4D3E03
+/// sets and searches the FNPC result without an invalid-cell test, so the
+/// original destination has to survive; code 6 already does exactly that.
+/// Regression: a skirmish aborted at frame 17271 with "Find_Path code-7
+/// redirect found no passable cell near the Building target".
+#[test]
+fn a_code7_redirect_without_a_nearby_cell_keeps_the_destination() {
+    let rules = rules();
+    let (mut sim, [tank, _]) = jam(&rules);
+    spawn(&mut sim, &rules, "HUT", (20, 10));
+    let destination = DriveCoord::cell(20, 10, 0);
+
+    // The FNPC search finds no passable cell in the map radius.
+    crate::sim::movement::fresh_oracle_seam::install_nearby_only(vec![None]);
+    let redirected = sim.find_path_redirect(tank, destination, 7, &rules);
+    let (_, unused) = crate::sim::movement::fresh_oracle_seam::finish();
+
+    assert_eq!(unused, 0, "the code-7 arm consumed the FNPC answer");
+    assert_eq!(
+        redirected,
+        Ok(None),
+        "a failed FNPC keeps the original destination instead of stopping the frame"
+    );
+}
+
 /// Each answer is its search's own, whatever thread ran it: the same
 /// searches one at a time on this thread, reading every entry fact from the
 /// world, agree, for no-queue requests and code-2 ladders, the urgency-2
