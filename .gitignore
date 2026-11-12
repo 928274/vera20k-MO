@@ -176,6 +176,9 @@ tools/vendor-eval/
 # throwaway verification build dir (parallel-session exe lock workaround)
 /target-verify/
 
+# Build of the untouched upstream tree, kept for the merge failure-list diff.
+/target-upstream-check/
+
 # Scratch area for deletes and one-off scripts; never a deliverable.
 /_trash/
 
