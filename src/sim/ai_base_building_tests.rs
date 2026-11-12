@@ -848,18 +848,19 @@ fn ares_retail_soviet_computer_draws_between_both_nod_plants() {
 }
 
 /// Mental Omega lists the `GAPOWRUP` upgrade in three countries'
-/// `AI.PowerPlants=` next to its host `GAPOWR`. Ares's hook may draw it, but
-/// a `PowersUpBuilding=` type can only stand on its host while the computer's
-/// site search offers perimeter cells only: the spliced node is then built
-/// forever and never placed. The drawn pick must skip such a candidate.
+/// `AI.PowerPlants=` next to its host `GAPOWR`, and the original computer
+/// does build power turbines: the exit installs the product onto a host with
+/// a free slot. With such a host the Ares draw may pick the upgrade.
 #[cfg(feature = "ares")]
 #[test]
-fn ares_power_plants_never_draw_a_powers_up_building() {
+fn ares_power_plants_draw_an_upgrade_when_a_host_has_a_free_slot() {
     let rules = RuleSet::from_ini(&crate::sim::arena_fixture::clear_ground_ini(
         "[Countries]\n0=Greece\n[Greece]\nAI.PowerPlants=PLANT,UPGRADE\n\
          [BuildingTypes]\n0=PLANT\n1=UPGRADE\n2=RADAR\n3=YARD\n\
-         [PLANT]\nPower=100\n[UPGRADE]\nPowersUpBuilding=PLANT\nAIBuildThis=yes\n\
-         [RADAR]\nPower=-50\n[YARD]\nFactory=BuildingType\nConstructionYard=yes\n\
+         [PLANT]\nPower=100\nUpgrades=1\nOwner=Greece\n\
+         [UPGRADE]\nPowersUpBuilding=PLANT\nAIBuildThis=yes\nTechLevel=7\nOwner=Greece\n\
+         [RADAR]\nPower=-50\nOwner=Greece\n\
+         [YARD]\nFactory=BuildingType\nConstructionYard=yes\nOwner=Greece\n\
          [General]\nGDIPowerPlant=PLANT\nBuildConst=YARD\n",
     ))
     .expect("country power plant rules");
@@ -872,25 +873,28 @@ fn ares_power_plants_never_draw_a_powers_up_building() {
         .set_country_for_test(Some(country));
     sim.spawn_object_at_height("YARD", "Russians", 4, 4, 0, 0, &rules)
         .expect("construction yard spawns");
+    let host = sim
+        .spawn_object_at_height("PLANT", "Russians", 10, 4, 0, 0, &rules)
+        .expect("host plant spawns");
+    sim.append_house_base_building_for_test(host);
     sim.power_states
         .map_mut_for_test()
         .insert(owner, PowerState::default());
     // Both candidates pass CanBuild: the draw takes index 1, the upgrade.
-    // After the fix only PLANT remains, so no draw happens at all.
     sim.scenario_rng = SimRng::answering(0, 1, 1);
     let radar = rules.object("RADAR").expect("consumer type");
     assert_eq!(
         super::power_plant_to_splice(&mut sim, &rules, owner, radar),
-        rules.building_type_index("PLANT"),
+        rules.building_type_index("UPGRADE"),
     );
 }
 
 /// The no-candidate fallback (`0x1001DEA2..0x1001DEC6`) must skip an upgrade
-/// too, or a country whose first listed plant is an upgrade would splice the
-/// same unplaceable node without ever drawing.
+/// when the house owns no host: splicing it would again produce a node that
+/// can never be placed.
 #[cfg(feature = "ares")]
 #[test]
-fn ares_power_plant_fallback_skips_a_powers_up_building() {
+fn ares_power_plant_fallback_skips_an_upgrade_without_a_host() {
     let rules = RuleSet::from_ini(&IniFile::from_str(
         "[Countries]\n0=Greece\n[Greece]\nAI.PowerPlants=UPGRADE,PLANT\n\
          [BuildingTypes]\n0=UPGRADE\n1=PLANT\n2=RADAR\n\
@@ -916,6 +920,136 @@ fn ares_power_plant_fallback_skips_a_powers_up_building() {
     assert_eq!(
         super::power_plant_to_splice(&mut sim, &rules, owner, radar),
         rules.building_type_index("PLANT"),
+    );
+}
+
+fn upgrade_path_rules() -> RuleSet {
+    RuleSet::from_ini(&crate::sim::arena_fixture::clear_ground_ini(
+        "[BuildingTypes]\n0=PLANT\n1=UPGRADE\n\
+         [PLANT]\nPower=100\nUpgrades=1\n\
+         [UPGRADE]\nPowersUpBuilding=PLANT\nPowersUpToLevel=-1\nAIBuildThis=yes\n",
+    ))
+    .expect("upgrade rules")
+}
+
+fn upgrade_path_scene(rules: &RuleSet) -> (Simulation, InternedId, u64) {
+    let mut sim = crate::sim::arena_fixture::rival_arena(rules, 7);
+    let owner = sim.interner.intern("Russians");
+    let host = sim
+        .spawn_object_at_height("PLANT", "Russians", 10, 4, 0, 0, rules)
+        .expect("host plant spawns");
+    sim.append_house_base_building_for_test(host);
+    (sim, owner, host)
+}
+
+/// `0x00444F65..0x004451AA`: the computer's upgrade takes its host's cell,
+/// not a base-perimeter site that has no host to install onto.
+#[test]
+fn an_upgrade_takes_its_host_cell_instead_of_a_perimeter_site() {
+    let rules = upgrade_path_rules();
+    let (mut sim, owner, host) = upgrade_path_scene(&rules);
+    let upgrade = rules.object("UPGRADE").expect("upgrade type");
+    let (host_id, host_cell) =
+        super::upgrade_host_site(&sim, &rules, owner, upgrade).expect("a free host slot");
+    assert_eq!(host_id, host);
+    assert_eq!(
+        super::building_site(&mut sim, &rules, owner, upgrade, None, None),
+        host_cell,
+    );
+}
+
+/// `0x0042E820`'s `PowersUpBuilding=` arm: an installed upgrade satisfies
+/// its node. Without it `find_node` would splice the same node forever,
+/// since the product is consumed and leaves no building object.
+#[test]
+fn an_installed_upgrade_satisfies_its_base_plan_node() {
+    let rules = upgrade_path_rules();
+    let (mut sim, owner, host) = upgrade_path_scene(&rules);
+    let index = rules
+        .building_type_index("UPGRADE")
+        .expect("upgrade index");
+    let node = BasePlanNode {
+        type_or_control: index,
+        packed_cell: pack_base_plan_cell(10, 4),
+        filled: false,
+        retry_count: 0,
+    };
+    assert!(
+        !super::node_satisfied(&sim, &rules, owner, &node, None),
+        "no upgrade is installed yet"
+    );
+    let product = sim
+        .construct_object_limbo_at_height(
+            "UPGRADE",
+            "Russians",
+            10,
+            4,
+            0,
+            0,
+            &rules,
+            FrameEffects::default(),
+        )
+        .expect("upgrade product");
+    assert!(
+        sim.try_install_building_upgrade(
+            product,
+            host,
+            &rules,
+            crate::sim::world::UninitContext::with_rules(&rules),
+        ),
+        "the upgrade installs on its host"
+    );
+    assert!(
+        super::node_satisfied(&sim, &rules, owner, &node, None),
+        "the installed upgrade satisfies its node"
+    );
+}
+
+/// `0x00445614`: the exit's Unlimbo consumes the upgrade onto its host,
+/// bypassing the ordinary clear-to-build test (the host's cell is occupied).
+#[test]
+fn the_computer_exit_installs_an_upgrade_onto_its_host() {
+    let rules = upgrade_path_rules();
+    let (mut sim, owner, host) = upgrade_path_scene(&rules);
+    let upgrade = rules.object("UPGRADE").expect("upgrade type");
+    let (_, site) =
+        super::upgrade_host_site(&sim, &rules, owner, upgrade).expect("a free host slot");
+    let product = sim
+        .construct_object_limbo_at_height(
+            "UPGRADE",
+            "Russians",
+            u16::try_from(site.0).unwrap(),
+            u16::try_from(site.1).unwrap(),
+            0,
+            0,
+            &rules,
+            FrameEffects::default(),
+        )
+        .expect("upgrade product");
+    assert!(
+        super::place_building(
+            &mut sim,
+            &rules,
+            owner,
+            upgrade,
+            product,
+            site,
+            None,
+            FrameEffects::default(),
+        ),
+        "the exit installs the upgrade"
+    );
+    let installed = sim.interner.get("UPGRADE").expect("upgrade id");
+    assert!(
+        sim.substrate
+            .entities
+            .get(host)
+            .expect("host still stands")
+            .building_upgrades()
+            .types()
+            .iter()
+            .any(|entry| *entry == Some(installed)),
+        "the host carries the installed upgrade"
     );
 }
 

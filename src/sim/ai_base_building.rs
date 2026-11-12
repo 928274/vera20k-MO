@@ -39,12 +39,15 @@
 //!   appending or committing bounds. Stock GADUMY gates admit Allied owners;
 //!   a Soviet/Yuri authored -3 can reach this invalid native dereference.
 //!   All fourteen stock campaign plans were read without a -3 node.
-//! - Dormant in retail data: the `PowersUpBuilding=` arms of `0x0042E820` and
-//!   `AI_Choose_Building` (`0x004FE953..0x004FEA3A`); no retail type sets the
-//!   key and VERA reads no upgrade (as `production_sell` and
-//!   `building_missions` record). The exit's `FirestormWall=` placement
-//!   after Unlimbo (`0x00445355..0x004453AE`, `0x00588570`); retail
-//!   `rulesmd.ini` sets the key on no type.
+//! - Dormant in retail data: no retail type sets `PowersUpBuilding=`. Mental
+//!   Omega does, so VERA now runs two of the arms the key implies: the exit's
+//!   upgrade installation (`0x00445614`, through `upgrade_host_site` and the
+//!   Unlimbo upgrade arm) and `0x0042E820`'s installed-upgrade node lookup
+//!   (`node_upgrade_installed`). `AI_Choose_Building`'s arm
+//!   (`0x004FE953..0x004FEA3A`) stays dormant: the `[AI]` list and Recalc
+//!   candidate paths still omit upgrade types. The exit's `FirestormWall=`
+//!   placement after Unlimbo (`0x00445355..0x004453AE`, `0x00588570`);
+//!   retail `rulesmd.ini` sets the key on no type.
 //! - `Record_Last_Built` and Building discovery retain class-local type indices
 //!   through HouseState for built-type triggers19..22. The remaining `+0x246`
 //!   notification restarts a90-frame House timer (`0x004F8DF6..0x004F8E21`);
@@ -1175,18 +1178,53 @@ fn power_plant_to_splice(
 /// to the first one").
 ///
 /// [`owns_prerequisites`]: crate::sim::production::owns_prerequisites
-/// A `PowersUpBuilding=` type is an upgrade: it may only stand on its host
-/// building, while `FindBaseBuildingSite` offers the computer only perimeter
-/// cells. Splicing one as a power plant leaves a node that can never be
-/// placed, and the house rebuilds it forever. Mental Omega lists `GAPOWRUP`
-/// in three countries' `AI.PowerPlants=` next to its host `GAPOWR`, so the
-/// candidate list has to drop such types (as `recalc_candidate_allowed` and
-/// `ai_list_building_index` already do for their own plan paths).
+/// The computer's `PowersUpBuilding=` product stands on an existing host, not
+/// on a perimeter cell: `FindBaseBuildingSite`'s ordinary answer supplies no
+/// host, and the native upgrade arm (`0x00445614`) only runs for the null
+/// coordinate. Return an eligible host of `owner` with a free slot and its
+/// top-left cell, so the exit can install the upgrade there
+/// (`0x004408DF..0x00440A26`). Mental Omega lists `GAPOWRUP` in three
+/// countries' `AI.PowerPlants=` next to its host `GAPOWR`; dropping the
+/// candidate instead would stop the computer from ever building power
+/// turbines, unlike the original game.
+fn upgrade_host_site(
+    sim: &Simulation,
+    rules: &RuleSet,
+    owner: InternedId,
+    ty: &ObjectType,
+) -> Option<(u64, (i16, i16))> {
+    if ty.building_upgrade().host().is_none() {
+        return None;
+    }
+    let id = sim
+        .houses
+        .get(&owner)?
+        .base_projection()
+        .buildings()
+        .iter()
+        .copied()
+        .find(|&id| sim.can_install_building_upgrade(id, ty, owner, rules))?;
+    let host = sim.substrate.entities.get(id)?;
+    let rx = i16::try_from(host.position.rx()).ok()?;
+    let ry = i16::try_from(host.position.ry()).ok()?;
+    Some((id, (rx, ry)))
+}
+
+/// A `PowersUpBuilding=` type is a legal Ares plant only while a host with a
+/// free slot exists. Without one the spliced node could never be placed and
+/// the house would rebuild it forever.
 #[cfg(feature = "ares")]
-fn ares_power_plant_is_placeable(rules: &RuleSet, index: i32) -> bool {
-    rules
-        .building_type_at(index)
-        .is_some_and(|plant| plant.building_upgrade().host().is_none())
+fn ares_power_plant_is_placeable(
+    sim: &Simulation,
+    rules: &RuleSet,
+    owner: InternedId,
+    index: i32,
+) -> bool {
+    let Some(plant) = rules.building_type_at(index) else {
+        return false;
+    };
+    plant.building_upgrade().host().is_none()
+        || upgrade_host_site(sim, rules, owner, plant).is_some()
 }
 
 #[cfg(feature = "ares")]
@@ -1203,7 +1241,7 @@ fn ares_power_plant(
         .iter()
         .copied()
         .filter(|&index| {
-            ares_power_plant_is_placeable(rules, index)
+            ares_power_plant_is_placeable(sim, rules, owner, index)
                 && rules.building_type_at(index).is_some_and(|plant| {
                     can_build(sim, rules, owner, plant, false, true) == CanBuild::Yes
                         && owns_prerequisites(sim, rules, house, plant)
@@ -1212,12 +1250,12 @@ fn ares_power_plant(
         .collect();
     if buildable.is_empty() {
         // No candidate at all is fatal natively (`0x1001DEF6`, a module
-        // residual); VERA splices nothing. The fallback must skip upgrades
-        // too, or it would splice the very node that cannot be placed.
+        // residual); VERA splices nothing. The fallback applies the same
+        // host test, so it never splices an upgrade with nowhere to stand.
         return candidates
             .iter()
             .copied()
-            .find(|&index| ares_power_plant_is_placeable(rules, index));
+            .find(|&index| ares_power_plant_is_placeable(sim, rules, owner, index));
     }
     let last = buildable.len() as i32 - 1;
     let picked = sim.scenario_rng.next_range_i32_inclusive(0, last);
@@ -1295,7 +1333,16 @@ pub(crate) fn exit_building(
         .building_type_index(&ty.id)
         .and_then(|index| find_node(sim, rules, owner, index, registry));
     let site = building_site(sim, rules, owner, ty, node, registry);
-    match flush_for_placement(sim, rules, registry, ty, site, owner, effects) {
+    // `0x00445614`: the upgrade arm returns before Techno/Object Unlimbo.
+    // Neither the ordinary clear-to-build test nor the placement Mark runs
+    // for an admitted upgrade, so there is no site to flush: the host already
+    // stands on the cell.
+    let flush = if ty.building_upgrade().host().is_some() {
+        Flush::Clear
+    } else {
+        flush_for_placement(sim, rules, registry, ty, site, owner, effects)
+    };
+    match flush {
         Flush::Scattered => {
             // `0x00445237..0x004452C3`.
             if let Some(index) = node
@@ -1332,12 +1379,13 @@ pub(crate) fn exit_building(
 }
 
 /// `0x00444F65..0x004451AA`: the node's cell when it has one and
-/// [`reserved_near`] admits it (`0x00444F9B`; the `PowersUpBuilding=` arm is
-/// dormant), else a new site (`0x00444FE1`, `0x004450BD`) that the node, if
-/// any, keeps (`0x00445055`, `0x0044519F`). The site's coordinate is its
-/// centre at height 0; no ordinary site answers the null coordinate that
-/// would take the upgrade arm at `0x00445614`, so a site of (0, 0) goes on to
-/// be refused.
+/// [`reserved_near`] admits it (`0x00444F9B`), else a new site
+/// (`0x00444FE1`, `0x004450BD`) that the node, if any, keeps
+/// (`0x00445055`, `0x0044519F`). The site's coordinate is its centre at
+/// height 0. A `PowersUpBuilding=` product instead takes the cell of a host
+/// with a free slot, which is what the native upgrade arm at `0x00445614`
+/// installs onto; the ordinary perimeter search answers no such cell, so
+/// VERA resolves the host explicitly rather than through a null coordinate.
 fn building_site(
     sim: &mut Simulation,
     rules: &RuleSet,
@@ -1346,6 +1394,19 @@ fn building_site(
     node: Option<usize>,
     registry: Option<&OverlayTypeRegistry>,
 ) -> (i16, i16) {
+    // The node keeps the host cell so a later `find_node` can recognise the
+    // installed upgrade instead of splicing the same node forever.
+    if let Some((_, host_cell)) = upgrade_host_site(sim, rules, owner, ty) {
+        if let Some(index) = node
+            && let Some(house) = sim.houses.get_mut(&owner)
+        {
+            house.base_plan_mut().assign_site(
+                index,
+                pack_base_plan_cell(i32::from(host_cell.0), i32::from(host_cell.1)),
+            );
+        }
+        return host_cell;
+    }
     let node_cell = node
         .map(|index| plan_node(&sim.houses, owner, index).packed_cell)
         .filter(|&packed| packed != 0);
@@ -1389,7 +1450,14 @@ fn place_building(
     registry: Option<&OverlayTypeRegistry>,
     effects: FrameEffects<'_>,
 ) -> bool {
-    if !can_place_building_at(sim, rules, registry, ty, site, Some(owner), None, None) {
+    // `0x00445614`: an upgrade consumes itself onto its host before
+    // Techno/Object Unlimbo, so the ordinary clear-to-build test (which
+    // refuses the host's occupied cell) must not run. The reveal's upgrade
+    // arm does its own `can_install_building_upgrade` admission.
+    let upgrade = ty.building_upgrade().host().is_some();
+    if !upgrade
+        && !can_place_building_at(sim, rules, registry, ty, site, Some(owner), None, None)
+    {
         return false;
     }
     let (Ok(rx), Ok(ry)) = (u16::try_from(site.0), u16::try_from(site.1)) else {
@@ -1443,6 +1511,11 @@ fn place_building(
         .is_none()
     {
         return false;
+    }
+    if upgrade {
+        // The product was consumed by the upgrade arm onto its host; none of
+        // the ordinary post-Unlimbo hand-off, mission or wall fill follows.
+        return true;
     }
     // NPSE 2.0 building Exit_Object C2F1A3 precedes slave handoff and
     // mission callbacks after successful Unlimbo; failed placement retains it.
@@ -1614,7 +1687,48 @@ pub(crate) fn find_node(
     None
 }
 
+/// `0x0042E820`'s `PowersUpBuilding=` arm: a node for an upgrade is
+/// satisfied while one of the house's hosts carries that installed type.
+/// Retail data never sets the key, so the arm is dormant there; Mental Omega
+/// does. The upgrade is consumed at Unlimbo and leaves no building object,
+/// so `node_building` cannot find it.
+fn node_upgrade_installed(
+    sim: &Simulation,
+    rules: &RuleSet,
+    owner: InternedId,
+    ty: &ObjectType,
+) -> bool {
+    let Some(host_name) = ty.building_upgrade().host() else {
+        return false;
+    };
+    let Some(upgrade_id) = sim.interner.get(&ty.id) else {
+        return false;
+    };
+    let Some(host_id) = rules
+        .object_in_category(ObjectCategory::Building, host_name)
+        .and_then(|host| sim.interner.get(&host.id))
+    else {
+        return false;
+    };
+    sim.houses.get(&owner).is_some_and(|house| {
+        house
+            .base_projection()
+            .buildings()
+            .iter()
+            .filter_map(|&id| sim.substrate.entities.get(id))
+            .filter(|building| building.type_ref() == host_id)
+            .any(|building| {
+                building
+                    .building_upgrades()
+                    .types()
+                    .iter()
+                    .any(|entry| *entry == Some(upgrade_id))
+            })
+    })
+}
+
 /// `BaseClass @ 0x0042E780`: the node's building stands ([`node_building`]),
+/// an upgrade node's installed type is on a host ([`node_upgrade_installed`]),
 /// or a wall node's cell holds its wall overlay or any building.
 pub(crate) fn node_satisfied(
     sim: &Simulation,
@@ -1629,6 +1743,9 @@ pub(crate) fn node_satisfied(
     let Some(ty) = rules.building_type_at(node.type_or_control) else {
         return false;
     };
+    if ty.building_upgrade().host().is_some() {
+        return node_upgrade_installed(sim, rules, owner, ty);
+    }
     if !ty.wall {
         return false;
     }
@@ -1653,8 +1770,9 @@ pub(crate) fn node_satisfied(
 }
 
 /// `BaseClass @ 0x0042E820`: the house's building of the node's type whose
-/// top-left cell is the node's cell. The `PowersUpBuilding=` arm is dormant
-/// (module residual).
+/// top-left cell is the node's cell. Its `PowersUpBuilding=` arm is answered
+/// separately by `node_upgrade_installed`: an installed upgrade is consumed
+/// at Unlimbo and leaves no building object.
 pub(crate) fn node_building(
     substrate: &ObjectSubstrate,
     owner: InternedId,

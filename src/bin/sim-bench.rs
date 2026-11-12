@@ -877,8 +877,16 @@ fn main() -> Result<(), String> {
         // with so a base-size change can be read off a headless run.
         let simulation = &runtime.simulation;
         for (id, house) in simulation.houses().iter() {
+            // Installed `PowersUpBuilding=` upgrades leave no building object,
+            // so the building count alone cannot show a power turbine.
+            let upgrades: usize = simulation
+                .entities()
+                .values()
+                .filter(|entity| entity.owner() == *id)
+                .map(|entity| usize::try_from(entity.building_upgrades().count()).unwrap_or(0))
+                .sum();
             println!(
-                "house_ai id={id:?} human={} buildings={} plan_nodes={}",
+                "house_ai id={id:?} human={} buildings={} plan_nodes={} upgrades={upgrades}",
                 house.is_human(),
                 house.tracking().buildings(),
                 house.base_plan().nodes().len()
