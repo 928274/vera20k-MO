@@ -40,18 +40,26 @@
 //!   a Soviet/Yuri authored -3 can reach this invalid native dereference.
 //!   All fourteen stock campaign plans were read without a -3 node.
 //! - Dormant in retail data: no retail type sets `PowersUpBuilding=`. Mental
-//!   Omega does, so VERA now runs the arms the key implies: the exit's
-//!   upgrade installation (`0x00445614`, through `upgrade_host_site` and the
-//!   Unlimbo upgrade arm), `0x0042E820`'s installed-upgrade node lookup
-//!   (`node_upgrade_installed`, keyed to the node's own host cell), and an
-//!   MO-only acceleration: the Ares plant draw prefers an installable
-//!   upgrade and a node for its host splices one ahead of the plant
-//!   (`upgrade_to_splice`). That is deliberately more eager than the retail
-//!   `AI_Choose_Building` arm (`0x004FE953..0x004FEA3A`): the `[AI]` list
-//!   and Recalc candidate paths still omit upgrade types, so a plan can
-//!   never hold more upgrade nodes than the house has host slots. The exit's
-//!   `FirestormWall=` placement after Unlimbo (`0x00445355..0x004453AE`,
-//!   `0x00588570`);
+//!   Omega does, so VERA runs the arms the key implies, at the original
+//!   game's eagerness: the exit's upgrade installation (`0x00445614`,
+//!   through `upgrade_host_site` and the Unlimbo upgrade arm), `0x0042E820`'s
+//!   installed-upgrade node lookup (`node_upgrade_installed`, keyed to the
+//!   node's own host cell), one `AIBuildThis=yes` Recalc node per upgrade
+//!   type, and Ares' `AI.PowerPlants=` splice (`0x004FE953..0x004FEA3A`,
+//!   uniform draw, only while the next building would black out the house).
+//!   `[AI] VERA20K.AggressivePowerUpgrades=yes` opts back into the two
+//!   MO-only accelerations (an upgrade-preferring draw and a splice ahead of
+//!   a host node). `[AI] VERA20K.FixPowerUpgrades=yes` opts into repairing
+//!   the original game's negative-power-host upgrade defect. Both default
+//!   off, i.e. the original MO behaviour.
+//!   VERA's Recalc runs once where the native game recalculates every
+//!   strategy tick, so an upgrade node takes the building choice only while
+//!   a host slot and its prerequisites are ready (`upgrade_node_ready`), and
+//!   the exit latches the node filled after installing (no Unlimbo runs for
+//!   a consumed upgrade). Without those two guards the one-shot plan stalls
+//!   on a node it cannot place (measured at 25 buildings on Perseverance).
+//!   The exit's `FirestormWall=` placement after Unlimbo
+//!   (`0x00445355..0x004453AE`, `0x00588570`);
 //!   retail `rulesmd.ini` sets the key on no type.
 //! - `Record_Last_Built` and Building discovery retain class-local type indices
 //!   through HouseState for built-type triggers19..22. The remaining `+0x246`
@@ -493,19 +501,14 @@ fn unit_choice_is_harvester(sim: &Simulation, rules: &RuleSet, owner: InternedId
         .is_some_and(|index| index == house.ai_unit_choices().get(UnitChoiceKind::Unit))
 }
 
-/// The first resolvable BuildingType of an `[AI]` list, in source order.
-/// A `PowersUpBuilding=` upgrade is skipped: it may only stand on its host,
-/// never on a base-perimeter site, so a node for it can never be placed and
-/// would stall the whole base (see
-/// [`crate::sim::base_plan_generation`]'s candidate filter).
+/// The first resolvable BuildingType of an `[AI]` list, in source order
+/// (`HouseClass::FirstBuildableFromArray`). The original applies no
+/// `PowersUpBuilding=` exception here; Mental Omega's `Build*` lists happen
+/// to name no upgrade type, so the plan's upgrade nodes come from Recalc and
+/// Ares' `AI.PowerPlants=` splice instead.
 fn ai_list_building_index(rules: &RuleSet, ids: &[String]) -> Option<i32> {
-    ids.iter().find_map(|id| {
-        let index = rules.building_type_index(id)?;
-        rules
-            .building_type_at(index)
-            .filter(|ty| ty.building_upgrade().host().is_none())
-            .map(|_| index)
-    })
+    ids.iter()
+        .find_map(|id| rules.building_type_index(id))
 }
 
 /// Pick the `[AI]` ratio/limit group whose share of the computer base is still
@@ -621,7 +624,22 @@ pub(crate) fn expand_base_plan_if_needed(
     if house.base_plan().nodes().len() as i32 >= target {
         return false;
     }
-    if house.base_plan().nodes().iter().any(|node| !node.filled) {
+    // A deferred `AIBuildThis=yes` upgrade node (no free host slot or
+    // unmet prerequisites) is not unfinished work: the original game's
+    // per-tick Recalc would pass over it too. `find_node` already skips it,
+    // so it must not hold the whole plan back from growing.
+    let deferred_upgrade = |node: &BasePlanNode| {
+        rules
+            .building_type_at(node.type_or_control)
+            .is_some_and(|ty| ty.building_upgrade().host().is_some())
+            && !upgrade_node_ready(sim, rules, owner, node)
+    };
+    if house
+        .base_plan()
+        .nodes()
+        .iter()
+        .any(|node| !node.filled && !deferred_upgrade(node))
+    {
         return false;
     }
 
@@ -1222,6 +1240,58 @@ fn upgrade_host_site(
     Some((id, (rx, ry)))
 }
 
+/// Whether a Recalc node for an `AIBuildThis=yes` upgrade may take the
+/// building choice right now. The original game answers this by recalculating
+/// its plan every strategy tick: a node whose host has not been built yet is
+/// simply re-derived later. VERA's one-shot Recalc would otherwise hand that
+/// node to the Construction Yard, whose upgrade product has no host to be
+/// consumed by, and the house would rebuild the same node forever (measured
+/// at 25 buildings on `(8) Perseverance`). Defer the node at selection time
+/// instead of dropping it from Recalc, so the plan still holds one node per
+/// upgrade type as the original does.
+fn upgrade_node_ready(
+    sim: &Simulation,
+    rules: &RuleSet,
+    owner: InternedId,
+    node: &BasePlanNode,
+) -> bool {
+    let Some(ty) = rules.building_type_at(node.type_or_control) else {
+        return true;
+    };
+    if ty.building_upgrade().host().is_none() {
+        return true;
+    }
+    // The original game's documented `AIBuildThis=yes` defect: with a host
+    // that has no positive `Power=`, the computer does not build or rebuild
+    // the upgrade (ModEnc's upgrades page; PPM's "AI won't rebuild the
+    // upgrade", where setting the host's Power=1 restores it). MO's only
+    // positive-power hosts are GAPOWR and NANRCT, so the other eight
+    // upgrade types stay unbuilt unless the opt-in fix is enabled. Ares'
+    // `AI.PowerPlants=` splice is a separate channel, and MO lists only
+    // GAPOWRUP there, whose host is positive anyway.
+    if !rules.general.ai_fix_power_upgrades {
+        let host_positive = ty
+            .building_upgrade()
+            .host()
+            .and_then(|name| rules.object_in_category(ObjectCategory::Building, name))
+            .is_some_and(|host| host.power > 0);
+        if !host_positive {
+            return false;
+        }
+    }
+    use crate::sim::production::{CanBuild, can_build};
+    let ready = upgrade_host_site(sim, rules, owner, ty).is_some()
+        && can_build(sim, rules, owner, ty, false, true) == CanBuild::Yes;
+    // `owns_prerequisites` is the Ares hook's `0x10021CA0` answer; the
+    // stock game has no such re-export, and a MO game always runs with Ares.
+    #[cfg(feature = "ares")]
+    let ready = ready
+        && sim.houses.get(&owner).is_some_and(|house| {
+            crate::sim::production::owns_prerequisites(sim, rules, house, ty)
+        });
+    ready
+}
+
 /// A `PowersUpBuilding=` type is a legal Ares plant only while a host with a
 /// free slot exists. Without one the spliced node could never be placed and
 /// the house would rebuild it forever.
@@ -1270,38 +1340,36 @@ fn ares_power_plant(
             .find(|&index| ares_power_plant_is_placeable(sim, rules, owner, index));
     }
     let last = buildable.len() as i32 - 1;
-    // Keep the native draw so the Scenario RNG stream (and everything that
-    // reads it afterwards) is unchanged by this preference.
+    // `0x1000AC70 -> 0x0065C7E0`: one uniform draw over the passing
+    // candidates. An upgrade is not privileged here; Mental Omega's
+    // `GAPOWRUP` only wins its share of the draw, as in the original game.
+    // Keep the draw even when the opt-in boost overrides its answer, so the
+    // Scenario RNG stream keeps its native cadence either way.
     let drawn = sim.scenario_rng.next_range_i32_inclusive(0, last);
-    // MO deliberately runs ahead of the stock game here: a turbine is legal
-    // only while some plant still has a free slot, so a uniform draw spends
-    // half of the scarce power splices on a plain plant. Install the upgrade
-    // first; once every host is full it drops out of `buildable` and the
-    // ordinary draw resumes.
-    if let Some(&upgrade) = buildable.iter().find(|&&index| {
-        rules
-            .building_type_at(index)
-            .is_some_and(|plant| plant.building_upgrade().host().is_some())
-    }) {
+    if rules.general.ai_aggressive_power_upgrades
+        && let Some(&upgrade) = buildable.iter().find(|&&index| {
+            rules
+                .building_type_at(index)
+                .is_some_and(|plant| plant.building_upgrade().host().is_some())
+        })
+    {
         return Some(upgrade);
     }
     buildable.get(drawn as usize).copied()
 }
 
-/// The computer's Ares plant list also names MO's power turbine. Splicing it
-/// only when the next building would black out the house
-/// ([`power_plant_to_splice`]) leaves most plants bare: the first turbine
+/// Opt-in companion to the boosted Ares draw: take an `AI_Choose_Building`
+/// node for the turbine's host as the moment to install one, and splice the
+/// upgrade ahead of that plant without waiting for a power shortage. Splicing
+/// only on a shortage leaves most plants bare, because the first turbine
 /// supplies 150 power and removes the very shortage that would have asked
-/// for the next one. Take an `AI_Choose_Building` node for the turbine's host
-/// as the moment to install one, and splice the upgrade ahead of that plant.
-/// It is self-limiting: once every host slot is filled
+/// for the next one. It is self-limiting: once every host slot is filled
 /// [`ares_power_plant_is_placeable`] rejects the candidate and the plant node
 /// builds normally.
 ///
-/// This is an intentional MO-only acceleration, not the retail
-/// `AI_Choose_Building` arm (`0x004FE953..0x004FEA3A`); the `[AI]` lists and
-/// Recalc candidates still omit upgrades, so a plan can never hold more
-/// upgrade nodes than the house has host slots.
+/// Off unless `[AI] VERA20K.AggressivePowerUpgrades=yes` is set. This is a
+/// MO-only acceleration, not the retail `AI_Choose_Building` arm
+/// (`0x004FE953..0x004FEA3A`).
 #[cfg(feature = "ares")]
 fn upgrade_to_splice(
     sim: &Simulation,
@@ -1309,6 +1377,9 @@ fn upgrade_to_splice(
     owner: InternedId,
     ty: &ObjectType,
 ) -> Option<i32> {
+    if !rules.general.ai_aggressive_power_upgrades {
+        return None;
+    }
     use crate::sim::production::{CanBuild, can_build, owns_prerequisites};
     let house = sim.houses.get(&owner)?;
     let side = house.side_index();
@@ -1442,6 +1513,14 @@ pub(crate) fn exit_building(
             if !place_building(sim, rules, owner, ty, product, site, registry, effects) {
                 forget_failed_site(&mut sim.houses, rules, owner, node, site);
                 return BuildingExit::Failed;
+            }
+            // The upgrade arm consumes the product before Unlimbo, so no
+            // building ever latches this node filled. Do it from the exit.
+            if ty.building_upgrade().host().is_some()
+                && let Some(index) = node
+                && let Some(house) = sim.houses.get_mut(&owner)
+            {
+                house.base_plan_mut().mark_filled(index);
             }
             carry_wall_tower_site(&mut sim.houses, rules, owner, ty, node, site);
             log::info!(
@@ -1744,11 +1823,27 @@ pub(crate) fn find_node(
     while index < sim.houses.get(&owner)?.base_plan().nodes().len() {
         let node = plan_node(&sim.houses, owner, index);
         if wanted == -1 {
-            if !node_satisfied(sim, rules, owner, &node, registry) {
+            // The one-shot Recalc may hold an `AIBuildThis=yes` upgrade node
+            // whose host is not standing yet (or whose prerequisites are
+            // unmet). Skip it for now; a later choice revisits it. The exact
+            // lookup used by the yard's exit is left alone: the product has
+            // already been made there.
+            if !node_satisfied(sim, rules, owner, &node, registry)
+                && upgrade_node_ready(sim, rules, owner, &node)
+            {
                 if !game_mode_nonzero || !node.filled {
                     return Some(index);
                 }
-                if node_may_replan(sim, rules, owner, &node) {
+                // With the opt-in fix, a filled upgrade node whose installed
+                // type vanished with its host may be planned again as soon as
+                // a host with a free slot exists. Without it the stock
+                // `AIRestrictReplaceTime` / positive-power gate stands, which
+                // is the "AI won't rebuild the upgrade" defect.
+                let fix_rebuild = rules.general.ai_fix_power_upgrades
+                    && rules
+                        .building_type_at(node.type_or_control)
+                        .is_some_and(|ty| ty.building_upgrade().host().is_some());
+                if fix_rebuild || node_may_replan(sim, rules, owner, &node) {
                     if let Some(house) = sim.houses.get_mut(&owner) {
                         house.base_plan_mut().assign_site(index, 0);
                     }

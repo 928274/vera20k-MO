@@ -209,6 +209,18 @@ impl BasePlanState {
         selected
     }
 
+    /// A `PowersUpBuilding=` product is consumed onto its host before
+    /// `BuildingClass::Unlimbo`, so `fill_successful_building` has no caller
+    /// for its node. Latch it here: the original game's per-tick Recalc
+    /// derives the installed state again, while VERA's one-shot plan needs
+    /// the filled latch to keep expanding.
+    pub(crate) fn mark_filled(&mut self, index: usize) {
+        if let Some(node) = self.nodes.get_mut(index) {
+            node.filled = true;
+            node.retry_count = 0;
+        }
+    }
+
     /// Apply the BuildingClass Limbo BasePlan invalidation pass.
     ///
     /// Native authority is `FUN_0050A490 @ 0x0050A490`, called by
@@ -309,6 +321,19 @@ mod tests {
             filled,
             retry_count,
         }
+    }
+
+    /// A `PowersUpBuilding=` product is consumed before Unlimbo, so the
+    /// ordinary filled latch never runs for its node.
+    #[test]
+    fn mark_filled_latches_a_consumed_upgrade_node() {
+        let mut plan = BasePlanState::default();
+        plan.set_nodes_for_test(vec![node(7, 10, 4, false, 3)]);
+        plan.mark_filled(0);
+        assert!(plan.nodes()[0].filled);
+        assert_eq!(plan.nodes()[0].retry_count, 0);
+        plan.mark_filled(9);
+        assert_eq!(plan.nodes().len(), 1, "an out-of-range index does nothing");
     }
 
     fn native_checksum(plan: &BasePlanState) -> u64 {

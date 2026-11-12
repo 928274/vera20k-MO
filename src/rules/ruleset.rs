@@ -801,6 +801,20 @@ pub struct GeneralRules {
     /// those keys is present `enabled` is false and the simulation keeps its
     /// original one-shot BasePlan behaviour.
     pub ai_base_size: AiBaseSizeRules,
+    /// VERA20K extension key `[AI] VERA20K.AggressivePowerUpgrades=`. Off by
+    /// default, which keeps the computer's `PowersUpBuilding=` upgrades at
+    /// the original game's eagerness. On, it re-enables the two MO-only
+    /// turbine accelerations in `sim::ai_base_building`: the Ares power-plant
+    /// draw prefers an installable upgrade, and a node for its host splices
+    /// one ahead without waiting for a power shortage.
+    pub ai_aggressive_power_upgrades: bool,
+    /// VERA20K extension key `[AI] VERA20K.FixPowerUpgrades=`. Off by
+    /// default, reproducing the original game's documented `AIBuildThis`
+    /// upgrade defect: with a host that has no positive `Power=`, the
+    /// computer neither builds nor rebuilds the upgrade (ModEnc's upgrades
+    /// page; PPM's "AI won't rebuild the upgrade"). On, VERA admits those
+    /// Recalc nodes and lets a rebuilt host's node be planned again.
+    pub ai_fix_power_upgrades: bool,
     /// `[General] MaxWaypointPathLength`, Rules+90. Constructor665725
     /// writes15; ReadGeneral671DB2..671DCC passes the prior signed value to
     /// ReadInteger5276D0 and stores it unchanged, without a clamp.
@@ -2869,6 +2883,8 @@ impl Default for GeneralRules {
             );
         Self {
             ai_base_size: AiBaseSizeRules::default(),
+            ai_aggressive_power_upgrades: false,
+            ai_fix_power_upgrades: false,
             max_waypoint_path_length: 15,
             talk_bubble_time: 300,
             flash_frame_time: 7,
@@ -3967,6 +3983,12 @@ impl GeneralRules {
         // Rules ReadAI6739E5..673A31 is independent of ReadGeneral.
         // Constructor66760E..66761E supplies PathDelay0.016 and blockage60.
         let ai = ini.section_or_empty("AI");
+        // VERA20K-only opt-in; a VERA-prefixed key cannot collide with a
+        // stock/Ares/MO key. Read from the merged section so MO's
+        // `[#include] +=ai.ini` layer can turn it on.
+        let ai_aggressive_power_upgrades =
+            ai.read_bool("VERA20K.AggressivePowerUpgrades", false);
+        let ai_fix_power_upgrades = ai.read_bool("VERA20K.FixPowerUpgrades", false);
         // ReadAI672AE0's base-size tail. Read from the merged section so the
         // MO `[#include] +=ai.ini` overrides (BaseSizeAdd=24, ...) win.
         let ai_base_size = AiBaseSizeRules::from_ini_section(ai);
@@ -3998,6 +4020,8 @@ impl GeneralRules {
         let Some(general) = ini.section("General") else {
             return Self {
                 ai_base_size,
+                ai_aggressive_power_upgrades,
+                ai_fix_power_upgrades,
                 message_delay_minutes,
                 savour_delay_minutes,
                 pose_dir,
@@ -4053,6 +4077,8 @@ impl GeneralRules {
             general.read_double("ConditionYellowSparkingProbability", 0.01);
         Self {
             ai_base_size,
+            ai_aggressive_power_upgrades,
+            ai_fix_power_upgrades,
             pose_dir,
             deploy_dir,
             max_waypoint_path_length: general
@@ -12404,6 +12430,31 @@ fn parse_particle_system_types(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn vera20k_ai_upgrade_keys_default_off_and_read_the_merged_ai_section() {
+        use crate::rules::ini_parser::IniFile;
+
+        let off = super::RuleSet::from_ini(&IniFile::from_str("[General]\n[AI]\n")).unwrap();
+        assert!(!off.general.ai_aggressive_power_upgrades);
+        assert!(!off.general.ai_fix_power_upgrades);
+
+        let on = super::RuleSet::from_ini(&IniFile::from_str(
+            "[General]\n[AI]\nVERA20K.AggressivePowerUpgrades=yes\n\
+             VERA20K.FixPowerUpgrades=yes\n",
+        ))
+        .unwrap();
+        assert!(on.general.ai_aggressive_power_upgrades);
+        assert!(on.general.ai_fix_power_upgrades);
+
+        let no = super::RuleSet::from_ini(&IniFile::from_str(
+            "[General]\n[AI]\nVERA20K.AggressivePowerUpgrades=no\n\
+             VERA20K.FixPowerUpgrades=no\n",
+        ))
+        .unwrap();
+        assert!(!no.general.ai_aggressive_power_upgrades);
+        assert!(!no.general.ai_fix_power_upgrades);
+    }
+
     #[test]
     fn ai_base_size_rules_read_the_merged_mo_ai_tail() {
         use super::{AiBaseSizeRules, AiBuildCategory};

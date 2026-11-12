@@ -349,24 +349,16 @@ fn recalc_candidate_allowed(
 ) -> bool {
     candidate_allowed(candidate, country, side_index, super_weapons, rules)
         && candidate.ai_build_this
-        && !candidate_waits_for_an_upgrade_site(candidate)
         && type_tech_levels.get(candidate) <= tech_level
 }
 
-/// A `PowersUpBuilding=` type is an upgrade: it may only stand on its host
-/// (`sim::ai_base_building::flush_for_placement`'s dormant arm), never on a
-/// base-perimeter site, so an AI plan that holds one can never place it.
-/// Measured on `(8) Perseverance`: a computer house kept completing its first
-/// upgrade type and failing the exit, cycle after cycle, while 50 other plan
-/// nodes stayed open and its wallet held 500k — the base froze at 25
-/// buildings for the rest of the match. Mods that mark upgrades
-/// `AIBuildThis=yes` (Mental Omega does, for every `PowersUpBuilding=` type)
-/// hit this on their first upgrade. Rejecting them from the plan restores the
-/// native "keep growing" behaviour; VERA still gives the player no way to
-/// place an upgrade, so nothing reachable is lost.
-fn candidate_waits_for_an_upgrade_site(candidate: &ObjectType) -> bool {
-    candidate.building_upgrade().host().is_some()
-}
+// A `PowersUpBuilding=` type marked `AIBuildThis=yes` takes exactly one
+// Recalc node, as it does in the original game. Mental Omega marks ten of
+// its eleven upgrades that way. The native game recalculates the plan every
+// strategy tick, so a node whose host is not up yet is harmless there;
+// VERA's Recalc runs once, hence `sim::ai_base_building::upgrade_node_ready`
+// defers such a node at selection time instead of dropping it here. Filtering
+// it out of Recalc would be a deviation from the original's plan contents.
 
 fn move_eligible_seed<'a>(
     eligible: &mut Vec<&'a ObjectType>,
@@ -814,12 +806,11 @@ mod tests {
     }
 
     #[test]
-    fn recalc_never_plans_a_powers_up_building_for_the_computer() {
-        // A `PowersUpBuilding=` type may only stand on its host, and the AI's
-        // exit searches base-perimeter sites, so a planned node for one can
-        // never be placed: the house completes it, fails the exit and retries
-        // the same node forever. Mental Omega marks every upgrade
-        // `AIBuildThis=yes`, which stopped whole bases mid-match.
+    fn recalc_plans_an_aibuildthis_powers_up_building_once() {
+        // `AIBuildThis=yes` puts one node per upgrade type in the original
+        // game's plan. VERA's one-shot Recalc defers such a node at selection
+        // time (`sim::ai_base_building::upgrade_node_ready`) instead of
+        // dropping it here, so filtering it out of Recalc would deviate.
         let rules = basic_rules(
             "7=HOST\n8=PLUG",
             "[HOST]\nOwner=Americans\nAIBuildThis=yes\nTechLevel=1\nFoundation=1x1\n\
@@ -835,9 +826,11 @@ mod tests {
         );
         let (plan, _) = generated_values(&rules, "Americans", 0, HouseDifficulty::Hard, 11);
         let planned = values(&plan);
-        assert!(
-            !planned.contains(&rules.building_type_index("PLUG").unwrap()),
-            "the upgrade type stays out of the plan"
+        let plug = rules.building_type_index("PLUG").unwrap();
+        assert_eq!(
+            planned.iter().filter(|&&value| value == plug).count(),
+            1,
+            "one collection node per upgrade type"
         );
         assert!(
             planned.contains(&rules.building_type_index("HOST").unwrap()),

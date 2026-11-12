@@ -847,15 +847,12 @@ fn ares_retail_soviet_computer_draws_between_both_nod_plants() {
     );
 }
 
-/// Mental Omega lists the `GAPOWRUP` upgrade in three countries'
-/// `AI.PowerPlants=` next to its host `GAPOWR`, and the original computer
-/// does build power turbines: the exit installs the product onto a host with
-/// a free slot. MO now prefers the upgrade over the plain plant even when
-/// the native draw would have picked the plant.
+/// One Allied-style country with `AI.PowerPlants=PLANT,UPGRADE`, a built
+/// Construction Yard and one bare host plant. The two VERA20K opt-in flags
+/// are set directly here; their INI parsing has its own test in `ruleset.rs`.
 #[cfg(feature = "ares")]
-#[test]
-fn ares_power_plants_prefer_an_upgrade_when_a_host_has_a_free_slot() {
-    let rules = RuleSet::from_ini(&crate::sim::arena_fixture::clear_ground_ini(
+fn ares_power_plant_scene(aggressive: bool, fix: bool) -> (RuleSet, Simulation, InternedId) {
+    let mut rules = RuleSet::from_ini(&crate::sim::arena_fixture::clear_ground_ini(
         "[Countries]\n0=Greece\n[Greece]\nAI.PowerPlants=PLANT,UPGRADE\n\
          [BuildingTypes]\n0=PLANT\n1=UPGRADE\n2=RADAR\n3=YARD\n\
          [PLANT]\nPower=100\nUpgrades=1\nTechLevel=1\nOwner=Greece\n\
@@ -865,6 +862,8 @@ fn ares_power_plants_prefer_an_upgrade_when_a_host_has_a_free_slot() {
          [General]\nGDIPowerPlant=PLANT\nBuildConst=YARD\n",
     ))
     .expect("country power plant rules");
+    rules.general.ai_aggressive_power_upgrades = aggressive;
+    rules.general.ai_fix_power_upgrades = fix;
     let mut sim = crate::sim::arena_fixture::rival_arena(&rules, 7);
     let owner = sim.interner.intern("Russians");
     let country = sim.interner.intern("Greece");
@@ -872,21 +871,58 @@ fn ares_power_plants_prefer_an_upgrade_when_a_host_has_a_free_slot() {
         .get_mut(&owner)
         .unwrap()
         .set_country_for_test(Some(country));
-    sim.spawn_object_at_height("YARD", "Russians", 4, 4, 0, 0, &rules)
+    let yard = sim
+        .spawn_object_at_height("YARD", "Russians", 4, 4, 0, 0, &rules)
         .expect("construction yard spawns");
     let host = sim
         .spawn_object_at_height("PLANT", "Russians", 10, 4, 0, 0, &rules)
         .expect("host plant spawns");
     sim.append_house_base_building_for_test(host);
+    sim.houses
+        .get_mut(&owner)
+        .unwrap()
+        .set_build_const_order_for_test(vec![yard]);
     sim.power_states
         .map_mut_for_test()
         .insert(owner, PowerState::default());
-    // Both candidates pass CanBuild. The draw answers 0 (the plain plant),
-    // but an installable upgrade wins; the draw still runs so the RNG stream
-    // keeps its native cadence.
+    (rules, sim, owner)
+}
+
+/// `0x1001DDC0`: both candidates pass, so the native uniform draw decides.
+/// Without the opt-in boost an upgrade gets exactly its share of the splices,
+/// as in the original game.
+#[cfg(feature = "ares")]
+#[test]
+fn ares_power_plants_draw_uniformly_by_default() {
+    let (rules, mut sim, owner) = ares_power_plant_scene(false, false);
+    let radar = rules.object("RADAR").expect("consumer type");
+    for (answer, expected) in [(0, "PLANT"), (1, "UPGRADE")] {
+        sim.scenario_rng = SimRng::answering(0, 1, answer);
+        let mut expected_rng = sim.scenario_rng.clone();
+        expected_rng.next_range_i32_inclusive(0, 1);
+        assert_eq!(
+            super::power_plant_to_splice(&mut sim, &rules, owner, radar),
+            rules.building_type_index(expected),
+            "the draw answers {answer}"
+        );
+        assert_eq!(
+            sim.scenario_rng.logical_state(),
+            expected_rng.logical_state(),
+            "one Randomizer(0, 1)"
+        );
+    }
+}
+
+/// `[AI] VERA20K.AggressivePowerUpgrades=yes`: the installable upgrade wins
+/// even when the native draw would have picked the plain plant. The draw
+/// still runs, so the Scenario RNG cadence is unchanged.
+#[cfg(feature = "ares")]
+#[test]
+fn the_aggressive_power_upgrades_key_prefers_an_upgrade() {
+    let (rules, mut sim, owner) = ares_power_plant_scene(true, false);
     sim.scenario_rng = SimRng::answering(0, 1, 0);
-    let mut expected = sim.scenario_rng.clone();
-    expected.next_range_i32_inclusive(0, 1);
+    let mut expected_rng = sim.scenario_rng.clone();
+    expected_rng.next_range_i32_inclusive(0, 1);
     let radar = rules.object("RADAR").expect("consumer type");
     assert_eq!(
         super::power_plant_to_splice(&mut sim, &rules, owner, radar),
@@ -894,7 +930,7 @@ fn ares_power_plants_prefer_an_upgrade_when_a_host_has_a_free_slot() {
     );
     assert_eq!(
         sim.scenario_rng.logical_state(),
-        expected.logical_state(),
+        expected_rng.logical_state(),
         "one Randomizer(0, 1)"
     );
 }
@@ -933,52 +969,33 @@ fn ares_power_plant_fallback_skips_an_upgrade_without_a_host() {
     );
 }
 
-/// MO's Allied country list with a turbine and one built, bare host plant.
-/// The house has power to spare, so the stock power splice has nothing to
-/// say; only the MO upgrade splice can act here.
+/// With both keys off, a bare host with power to spare gets no upgrade: the
+/// original game's splice waits for a shortage, and the MO-only accelerated
+/// splice is disabled.
 #[cfg(feature = "ares")]
-fn upgrade_splice_scene() -> (RuleSet, Simulation, InternedId) {
-    let rules = RuleSet::from_ini(&crate::sim::arena_fixture::clear_ground_ini(
-        "[Countries]\n0=Greece\n[Greece]\nAI.PowerPlants=PLANT,UPGRADE\n\
-         [BuildingTypes]\n0=PLANT\n1=UPGRADE\n2=RADAR\n3=YARD\n\
-         [PLANT]\nPower=100\nUpgrades=1\nTechLevel=1\nOwner=Greece\n\
-         [UPGRADE]\nPowersUpBuilding=PLANT\nAIBuildThis=yes\nTechLevel=7\nOwner=Greece\n\
-         [RADAR]\nPower=-50\nOwner=Greece\n\
-         [YARD]\nFactory=BuildingType\nConstructionYard=yes\nOwner=Greece\n\
-         [General]\nGDIPowerPlant=PLANT\nBuildConst=YARD\n",
-    ))
-    .expect("country power plant rules");
-    let mut sim = crate::sim::arena_fixture::rival_arena(&rules, 7);
-    let owner = sim.interner.intern("Russians");
-    let country = sim.interner.intern("Greece");
-    sim.houses
-        .get_mut(&owner)
-        .unwrap()
-        .set_country_for_test(Some(country));
-    let yard = sim
-        .spawn_object_at_height("YARD", "Russians", 4, 4, 0, 0, &rules)
-        .expect("construction yard spawns");
-    let host = sim
-        .spawn_object_at_height("PLANT", "Russians", 10, 4, 0, 0, &rules)
-        .expect("host plant spawns");
-    sim.append_house_base_building_for_test(host);
-    sim.houses
-        .get_mut(&owner)
-        .unwrap()
-        .set_build_const_order_for_test(vec![yard]);
-    sim.power_states
-        .map_mut_for_test()
-        .insert(owner, PowerState::default());
-    (rules, sim, owner)
+#[test]
+fn no_upgrade_is_spliced_without_a_shortage_by_default() {
+    let (rules, mut sim, owner) = ares_power_plant_scene(false, false);
+    let plant = rules.object("PLANT").expect("host plant type");
+    assert_eq!(
+        super::power_plant_to_splice(&mut sim, &rules, owner, plant),
+        None,
+        "the stock splice needs a shortage"
+    );
+    assert_eq!(
+        super::upgrade_to_splice(&sim, &rules, owner, plant),
+        None,
+        "the accelerated splice is opt-in"
+    );
 }
 
-/// The turbine's own host node is the moment to install it. A bare host with
-/// power to spare would otherwise never see a turbine: the first turbine
-/// removes the shortage that the stock splice waits for.
+/// With the boost on, the turbine's own host node is the moment to install
+/// it. A bare host with power to spare would otherwise never see a turbine:
+/// the first turbine removes the shortage that the stock splice waits for.
 #[cfg(feature = "ares")]
 #[test]
 fn a_host_power_plant_node_splices_an_upgrade_without_a_power_shortage() {
-    let (rules, mut sim, owner) = upgrade_splice_scene();
+    let (rules, mut sim, owner) = ares_power_plant_scene(true, false);
     let plant = rules.object("PLANT").expect("host plant type");
     let upgrade = rules.building_type_index("UPGRADE").expect("upgrade index");
     assert_eq!(
@@ -1003,7 +1020,7 @@ fn a_host_power_plant_node_splices_an_upgrade_without_a_power_shortage() {
 #[cfg(feature = "ares")]
 #[test]
 fn an_open_upgrade_node_blocks_a_second_splice() {
-    let (rules, mut sim, owner) = upgrade_splice_scene();
+    let (rules, mut sim, owner) = ares_power_plant_scene(true, false);
     let upgrade = rules.building_type_index("UPGRADE").expect("upgrade index");
     sim.houses
         .get_mut(&owner)
@@ -1024,7 +1041,7 @@ fn an_open_upgrade_node_blocks_a_second_splice() {
 #[cfg(feature = "ares")]
 #[test]
 fn choose_building_splices_an_upgrade_ahead_of_the_host_plant() {
-    let (rules, mut sim, owner) = upgrade_splice_scene();
+    let (rules, mut sim, owner) = ares_power_plant_scene(true, false);
     let plant = rules.building_type_index("PLANT").expect("plant index");
     let upgrade = rules.building_type_index("UPGRADE").expect("upgrade index");
     sim.houses
@@ -1047,6 +1064,169 @@ fn choose_building_splices_an_upgrade_ahead_of_the_host_plant() {
         house.ai_production().building_choice(),
         -1,
         "the splice does not consume the choice"
+    );
+}
+
+// --- `AIBuildThis=yes` upgrade nodes in the one-shot Recalc ----------------
+
+/// A full `[AI]` tail plus a host, its upgrade and a Construction Yard. The
+/// host's `Power=` is the switch for the original game's upgrade defect.
+fn upgrade_plan_rules(host_power: i32, upgrade_power: i32) -> RuleSet {
+    let text = format!(
+        "[Countries]\n0=Greece\n[General]\n\
+         [AI]\nBaseSizeAdd=5\nRefineryRatio=.5\nRefineryLimit=10\n\
+         BuildPower=POWER\nBuildRefinery=REF\nBuildBarracks=BARR\nBuildWeapons=WEAP\n\
+         BuildDefense=DEF\nBuildAA=AA\nBuildPDefense=TESLA\nBuildHelipad=HELI\n\
+         [BuildingTypes]\n0=POWER\n1=REF\n2=BARR\n3=WEAP\n4=DEF\n5=AA\n\
+         6=TESLA\n7=HELI\n8=HOST\n9=UPGRADE\n10=YARD\n\
+         [POWER]\nPower=100\n[REF]\n[BARR]\n[WEAP]\n[DEF]\n[AA]\n[TESLA]\n[HELI]\n\
+         [HOST]\nPower={host_power}\nUpgrades=1\nTechLevel=1\nOwner=Greece\nAIBuildThis=yes\n\
+         [UPGRADE]\nPowersUpBuilding=HOST\nPower={upgrade_power}\nAIBuildThis=yes\n\
+         TechLevel=7\nOwner=Greece\n\
+         [YARD]\nFactory=BuildingType\nConstructionYard=yes\nOwner=Greece\n"
+    );
+    RuleSet::from_ini(&crate::sim::arena_fixture::clear_ground_ini(&text))
+        .expect("upgrade plan rules")
+}
+
+fn upgrade_plan_scene(
+    host_power: i32,
+    upgrade_power: i32,
+    fix: bool,
+    with_host: bool,
+) -> (RuleSet, Simulation, InternedId) {
+    let mut rules = upgrade_plan_rules(host_power, upgrade_power);
+    rules.general.ai_fix_power_upgrades = fix;
+    let mut sim = crate::sim::arena_fixture::rival_arena(&rules, 7);
+    let owner = sim.interner.intern("Russians");
+    let country = sim.interner.intern("Greece");
+    sim.houses
+        .get_mut(&owner)
+        .unwrap()
+        .set_country_for_test(Some(country));
+    let yard = sim
+        .spawn_object_at_height("YARD", "Russians", 4, 4, 0, 0, &rules)
+        .expect("construction yard spawns");
+    sim.houses
+        .get_mut(&owner)
+        .unwrap()
+        .set_build_const_order_for_test(vec![yard]);
+    if with_host {
+        let host = sim
+            .spawn_object_at_height("HOST", "Russians", 10, 4, 0, 0, &rules)
+            .expect("host spawns");
+        sim.append_house_base_building_for_test(host);
+    }
+    (rules, sim, owner)
+}
+
+fn upgrade_node(index: i32, filled: bool, packed_cell: u32) -> BasePlanNode {
+    BasePlanNode {
+        type_or_control: index,
+        packed_cell,
+        filled,
+        retry_count: 0,
+    }
+}
+
+/// The one-shot Recalc keeps the upgrade node in the plan but defers it while
+/// no host exists; the original's per-tick recalc would re-derive it later.
+#[test]
+fn an_upgrade_node_waits_for_an_installable_host() {
+    let (rules, mut sim, owner) = upgrade_plan_scene(100, -50, false, false);
+    let upgrade = rules.building_type_index("UPGRADE").unwrap();
+    sim.houses
+        .get_mut(&owner)
+        .unwrap()
+        .base_plan_mut()
+        .set_nodes_for_test(vec![upgrade_node(upgrade, false, 0)]);
+    assert_eq!(
+        super::find_node(&mut sim, &rules, owner, -1, None),
+        None,
+        "no host with a free slot yet"
+    );
+    let host = sim
+        .spawn_object_at_height("HOST", "Russians", 10, 4, 0, 0, &rules)
+        .expect("host spawns");
+    sim.append_house_base_building_for_test(host);
+    assert_eq!(
+        super::find_node(&mut sim, &rules, owner, -1, None),
+        Some(0),
+        "the host opens the upgrade node"
+    );
+}
+
+/// `[AI] VERA20K.FixPowerUpgrades=no` reproduces the documented YR defect:
+/// with a host that has no positive `Power=`, the computer never takes the
+/// `AIBuildThis=yes` upgrade node. `yes` repairs it.
+#[test]
+fn the_fix_power_upgrades_key_admits_a_negative_power_host() {
+    let (mut rules, sim, owner) = upgrade_plan_scene(-10, -50, false, true);
+    let upgrade = rules.building_type_index("UPGRADE").unwrap();
+    let node = upgrade_node(upgrade, false, 0);
+    assert!(
+        !super::upgrade_node_ready(&sim, &rules, owner, &node),
+        "the original defect stands with the key off"
+    );
+    rules.general.ai_fix_power_upgrades = true;
+    assert!(
+        super::upgrade_node_ready(&sim, &rules, owner, &node),
+        "the opt-in fix admits the upgrade"
+    );
+}
+
+/// The same key also repairs the other half of the defect: after the host is
+/// rebuilt, a filled upgrade node whose installed type is gone may be
+/// planned again, without the stock `AIRestrictReplaceTime` wait.
+#[test]
+fn the_fix_key_replans_a_filled_upgrade_node() {
+    for (fix, expected) in [(false, None), (true, Some(0))] {
+        let (rules, mut sim, owner) = upgrade_plan_scene(100, -50, fix, true);
+        sim.session.set_game_mode(
+            crate::sim::scenario_session::ScenarioGameMode::from_legacy_nonzero(true),
+        );
+        let upgrade = rules.building_type_index("UPGRADE").unwrap();
+        sim.houses
+            .get_mut(&owner)
+            .unwrap()
+            .base_plan_mut()
+            .set_nodes_for_test(vec![upgrade_node(
+                upgrade,
+                true,
+                pack_base_plan_cell(10, 4),
+            )]);
+        assert_eq!(
+            super::find_node(&mut sim, &rules, owner, -1, None),
+            expected,
+            "fix={fix}"
+        );
+    }
+}
+
+/// A deferred upgrade node is not unfinished work: `find_node` skips it, so
+/// the `[AI]` base-size tail must still be able to append. Without this the
+/// whole base freezes at its initial plan.
+#[test]
+fn a_deferred_upgrade_node_does_not_block_base_expansion() {
+    let (rules, mut sim, owner) = upgrade_plan_scene(-10, -50, false, false);
+    sim = with_rival(sim, 10);
+    let power = rules.building_type_index("POWER").unwrap();
+    let upgrade = rules.building_type_index("UPGRADE").unwrap();
+    sim.houses
+        .get_mut(&owner)
+        .unwrap()
+        .base_plan_mut()
+        .set_nodes_for_test(vec![
+            upgrade_node(power, true, 0),
+            upgrade_node(upgrade, false, 0),
+        ]);
+    assert!(
+        super::expand_base_plan_if_needed(&mut sim, &rules, owner),
+        "the tail still appends a node"
+    );
+    assert_eq!(
+        sim.houses.get(&owner).unwrap().base_plan().nodes().len(),
+        3
     );
 }
 
