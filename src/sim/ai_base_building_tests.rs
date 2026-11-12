@@ -847,6 +847,78 @@ fn ares_retail_soviet_computer_draws_between_both_nod_plants() {
     );
 }
 
+/// Mental Omega lists the `GAPOWRUP` upgrade in three countries'
+/// `AI.PowerPlants=` next to its host `GAPOWR`. Ares's hook may draw it, but
+/// a `PowersUpBuilding=` type can only stand on its host while the computer's
+/// site search offers perimeter cells only: the spliced node is then built
+/// forever and never placed. The drawn pick must skip such a candidate.
+#[cfg(feature = "ares")]
+#[test]
+fn ares_power_plants_never_draw_a_powers_up_building() {
+    let rules = RuleSet::from_ini(&crate::sim::arena_fixture::clear_ground_ini(
+        "[Countries]\n0=Greece\n[Greece]\nAI.PowerPlants=PLANT,UPGRADE\n\
+         [BuildingTypes]\n0=PLANT\n1=UPGRADE\n2=RADAR\n3=YARD\n\
+         [PLANT]\nPower=100\n[UPGRADE]\nPowersUpBuilding=PLANT\nAIBuildThis=yes\n\
+         [RADAR]\nPower=-50\n[YARD]\nFactory=BuildingType\nConstructionYard=yes\n\
+         [General]\nGDIPowerPlant=PLANT\nBuildConst=YARD\n",
+    ))
+    .expect("country power plant rules");
+    let mut sim = crate::sim::arena_fixture::rival_arena(&rules, 7);
+    let owner = sim.interner.intern("Russians");
+    let country = sim.interner.intern("Greece");
+    sim.houses
+        .get_mut(&owner)
+        .unwrap()
+        .set_country_for_test(Some(country));
+    sim.spawn_object_at_height("YARD", "Russians", 4, 4, 0, 0, &rules)
+        .expect("construction yard spawns");
+    sim.power_states
+        .map_mut_for_test()
+        .insert(owner, PowerState::default());
+    // Both candidates pass CanBuild: the draw takes index 1, the upgrade.
+    // After the fix only PLANT remains, so no draw happens at all.
+    sim.scenario_rng = SimRng::answering(0, 1, 1);
+    let radar = rules.object("RADAR").expect("consumer type");
+    assert_eq!(
+        super::power_plant_to_splice(&mut sim, &rules, owner, radar),
+        rules.building_type_index("PLANT"),
+    );
+}
+
+/// The no-candidate fallback (`0x1001DEA2..0x1001DEC6`) must skip an upgrade
+/// too, or a country whose first listed plant is an upgrade would splice the
+/// same unplaceable node without ever drawing.
+#[cfg(feature = "ares")]
+#[test]
+fn ares_power_plant_fallback_skips_a_powers_up_building() {
+    let rules = RuleSet::from_ini(&IniFile::from_str(
+        "[Countries]\n0=Greece\n[Greece]\nAI.PowerPlants=UPGRADE,PLANT\n\
+         [BuildingTypes]\n0=UPGRADE\n1=PLANT\n2=RADAR\n\
+         [UPGRADE]\nPowersUpBuilding=PLANT\nAIBuildThis=yes\n[PLANT]\n\
+         [RADAR]\nPower=-50\n[General]\nGDIPowerPlant=PLANT\n",
+    ))
+    .expect("country power plant rules");
+    let mut sim = Simulation::new();
+    let country = sim.interner.intern("Greece");
+    let owner = sim.interner.intern("AI");
+    sim.houses.register(HouseState::new(
+        owner,
+        0,
+        Some(country),
+        false,
+        10_000,
+        10,
+    ));
+    sim.power_states
+        .map_mut_for_test()
+        .insert(owner, PowerState::default());
+    let radar = rules.object("RADAR").expect("consumer type");
+    assert_eq!(
+        super::power_plant_to_splice(&mut sim, &rules, owner, radar),
+        rules.building_type_index("PLANT"),
+    );
+}
+
 // --- `[AI]` base-size tail (ReadAI672AE0) ---------------------------------
 
 fn ai_tail_rules(tail: &str) -> RuleSet {

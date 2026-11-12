@@ -1175,6 +1175,20 @@ fn power_plant_to_splice(
 /// to the first one").
 ///
 /// [`owns_prerequisites`]: crate::sim::production::owns_prerequisites
+/// A `PowersUpBuilding=` type is an upgrade: it may only stand on its host
+/// building, while `FindBaseBuildingSite` offers the computer only perimeter
+/// cells. Splicing one as a power plant leaves a node that can never be
+/// placed, and the house rebuilds it forever. Mental Omega lists `GAPOWRUP`
+/// in three countries' `AI.PowerPlants=` next to its host `GAPOWR`, so the
+/// candidate list has to drop such types (as `recalc_candidate_allowed` and
+/// `ai_list_building_index` already do for their own plan paths).
+#[cfg(feature = "ares")]
+fn ares_power_plant_is_placeable(rules: &RuleSet, index: i32) -> bool {
+    rules
+        .building_type_at(index)
+        .is_some_and(|plant| plant.building_upgrade().host().is_none())
+}
+
 #[cfg(feature = "ares")]
 fn ares_power_plant(
     sim: &mut Simulation,
@@ -1189,16 +1203,21 @@ fn ares_power_plant(
         .iter()
         .copied()
         .filter(|&index| {
-            rules.building_type_at(index).is_some_and(|plant| {
-                can_build(sim, rules, owner, plant, false, true) == CanBuild::Yes
-                    && owns_prerequisites(sim, rules, house, plant)
-            })
+            ares_power_plant_is_placeable(rules, index)
+                && rules.building_type_at(index).is_some_and(|plant| {
+                    can_build(sim, rules, owner, plant, false, true) == CanBuild::Yes
+                        && owns_prerequisites(sim, rules, house, plant)
+                })
         })
         .collect();
     if buildable.is_empty() {
         // No candidate at all is fatal natively (`0x1001DEF6`, a module
-        // residual); VERA splices nothing.
-        return candidates.first().copied();
+        // residual); VERA splices nothing. The fallback must skip upgrades
+        // too, or it would splice the very node that cannot be placed.
+        return candidates
+            .iter()
+            .copied()
+            .find(|&index| ares_power_plant_is_placeable(rules, index));
     }
     let last = buildable.len() as i32 - 1;
     let picked = sim.scenario_rng.next_range_i32_inclusive(0, last);
