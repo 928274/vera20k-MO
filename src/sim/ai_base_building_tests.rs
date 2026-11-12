@@ -850,14 +850,15 @@ fn ares_retail_soviet_computer_draws_between_both_nod_plants() {
 /// Mental Omega lists the `GAPOWRUP` upgrade in three countries'
 /// `AI.PowerPlants=` next to its host `GAPOWR`, and the original computer
 /// does build power turbines: the exit installs the product onto a host with
-/// a free slot. With such a host the Ares draw may pick the upgrade.
+/// a free slot. MO now prefers the upgrade over the plain plant even when
+/// the native draw would have picked the plant.
 #[cfg(feature = "ares")]
 #[test]
-fn ares_power_plants_draw_an_upgrade_when_a_host_has_a_free_slot() {
+fn ares_power_plants_prefer_an_upgrade_when_a_host_has_a_free_slot() {
     let rules = RuleSet::from_ini(&crate::sim::arena_fixture::clear_ground_ini(
         "[Countries]\n0=Greece\n[Greece]\nAI.PowerPlants=PLANT,UPGRADE\n\
          [BuildingTypes]\n0=PLANT\n1=UPGRADE\n2=RADAR\n3=YARD\n\
-         [PLANT]\nPower=100\nUpgrades=1\nOwner=Greece\n\
+         [PLANT]\nPower=100\nUpgrades=1\nTechLevel=1\nOwner=Greece\n\
          [UPGRADE]\nPowersUpBuilding=PLANT\nAIBuildThis=yes\nTechLevel=7\nOwner=Greece\n\
          [RADAR]\nPower=-50\nOwner=Greece\n\
          [YARD]\nFactory=BuildingType\nConstructionYard=yes\nOwner=Greece\n\
@@ -880,12 +881,21 @@ fn ares_power_plants_draw_an_upgrade_when_a_host_has_a_free_slot() {
     sim.power_states
         .map_mut_for_test()
         .insert(owner, PowerState::default());
-    // Both candidates pass CanBuild: the draw takes index 1, the upgrade.
-    sim.scenario_rng = SimRng::answering(0, 1, 1);
+    // Both candidates pass CanBuild. The draw answers 0 (the plain plant),
+    // but an installable upgrade wins; the draw still runs so the RNG stream
+    // keeps its native cadence.
+    sim.scenario_rng = SimRng::answering(0, 1, 0);
+    let mut expected = sim.scenario_rng.clone();
+    expected.next_range_i32_inclusive(0, 1);
     let radar = rules.object("RADAR").expect("consumer type");
     assert_eq!(
         super::power_plant_to_splice(&mut sim, &rules, owner, radar),
         rules.building_type_index("UPGRADE"),
+    );
+    assert_eq!(
+        sim.scenario_rng.logical_state(),
+        expected.logical_state(),
+        "one Randomizer(0, 1)"
     );
 }
 
@@ -920,6 +930,123 @@ fn ares_power_plant_fallback_skips_an_upgrade_without_a_host() {
     assert_eq!(
         super::power_plant_to_splice(&mut sim, &rules, owner, radar),
         rules.building_type_index("PLANT"),
+    );
+}
+
+/// MO's Allied country list with a turbine and one built, bare host plant.
+/// The house has power to spare, so the stock power splice has nothing to
+/// say; only the MO upgrade splice can act here.
+#[cfg(feature = "ares")]
+fn upgrade_splice_scene() -> (RuleSet, Simulation, InternedId) {
+    let rules = RuleSet::from_ini(&crate::sim::arena_fixture::clear_ground_ini(
+        "[Countries]\n0=Greece\n[Greece]\nAI.PowerPlants=PLANT,UPGRADE\n\
+         [BuildingTypes]\n0=PLANT\n1=UPGRADE\n2=RADAR\n3=YARD\n\
+         [PLANT]\nPower=100\nUpgrades=1\nTechLevel=1\nOwner=Greece\n\
+         [UPGRADE]\nPowersUpBuilding=PLANT\nAIBuildThis=yes\nTechLevel=7\nOwner=Greece\n\
+         [RADAR]\nPower=-50\nOwner=Greece\n\
+         [YARD]\nFactory=BuildingType\nConstructionYard=yes\nOwner=Greece\n\
+         [General]\nGDIPowerPlant=PLANT\nBuildConst=YARD\n",
+    ))
+    .expect("country power plant rules");
+    let mut sim = crate::sim::arena_fixture::rival_arena(&rules, 7);
+    let owner = sim.interner.intern("Russians");
+    let country = sim.interner.intern("Greece");
+    sim.houses
+        .get_mut(&owner)
+        .unwrap()
+        .set_country_for_test(Some(country));
+    let yard = sim
+        .spawn_object_at_height("YARD", "Russians", 4, 4, 0, 0, &rules)
+        .expect("construction yard spawns");
+    let host = sim
+        .spawn_object_at_height("PLANT", "Russians", 10, 4, 0, 0, &rules)
+        .expect("host plant spawns");
+    sim.append_house_base_building_for_test(host);
+    sim.houses
+        .get_mut(&owner)
+        .unwrap()
+        .set_build_const_order_for_test(vec![yard]);
+    sim.power_states
+        .map_mut_for_test()
+        .insert(owner, PowerState::default());
+    (rules, sim, owner)
+}
+
+/// The turbine's own host node is the moment to install it. A bare host with
+/// power to spare would otherwise never see a turbine: the first turbine
+/// removes the shortage that the stock splice waits for.
+#[cfg(feature = "ares")]
+#[test]
+fn a_host_power_plant_node_splices_an_upgrade_without_a_power_shortage() {
+    let (rules, mut sim, owner) = upgrade_splice_scene();
+    let plant = rules.object("PLANT").expect("host plant type");
+    let upgrade = rules.building_type_index("UPGRADE").expect("upgrade index");
+    assert_eq!(
+        super::power_plant_to_splice(&mut sim, &rules, owner, plant),
+        None,
+        "the stock splice needs a shortage"
+    );
+    assert_eq!(
+        super::upgrade_to_splice(&sim, &rules, owner, plant),
+        Some(upgrade)
+    );
+    let consumer = rules.object("RADAR").expect("consumer type");
+    assert_eq!(
+        super::upgrade_to_splice(&sim, &rules, owner, consumer),
+        None,
+        "only the upgrade's host triggers the splice"
+    );
+}
+
+/// One open upgrade node at a time: without this guard every revisit of a
+/// plant node would push another upgrade in front of it forever.
+#[cfg(feature = "ares")]
+#[test]
+fn an_open_upgrade_node_blocks_a_second_splice() {
+    let (rules, mut sim, owner) = upgrade_splice_scene();
+    let upgrade = rules.building_type_index("UPGRADE").expect("upgrade index");
+    sim.houses
+        .get_mut(&owner)
+        .unwrap()
+        .base_plan_mut()
+        .set_nodes_for_test(vec![BasePlanNode {
+            type_or_control: upgrade,
+            packed_cell: 0,
+            filled: false,
+            retry_count: 0,
+        }]);
+    let plant = rules.object("PLANT").expect("host plant type");
+    assert_eq!(super::upgrade_to_splice(&sim, &rules, owner, plant), None);
+}
+
+/// End-to-end: `AI_Choose_Building` meets a plant node and splices the
+/// turbine in front of it, leaving the choice open for the next tick.
+#[cfg(feature = "ares")]
+#[test]
+fn choose_building_splices_an_upgrade_ahead_of_the_host_plant() {
+    let (rules, mut sim, owner) = upgrade_splice_scene();
+    let plant = rules.building_type_index("PLANT").expect("plant index");
+    let upgrade = rules.building_type_index("UPGRADE").expect("upgrade index");
+    sim.houses
+        .get_mut(&owner)
+        .unwrap()
+        .base_plan_mut()
+        .set_nodes_for_test(vec![BasePlanNode {
+            type_or_control: plant,
+            packed_cell: 0,
+            filled: false,
+            retry_count: 0,
+        }]);
+    super::choose_building(&mut sim, &rules, owner, None);
+    let house = &sim.houses[&owner];
+    let nodes = house.base_plan().nodes();
+    assert_eq!(nodes.len(), 2, "one upgrade spliced ahead of the plant");
+    assert_eq!(nodes[0].type_or_control, upgrade);
+    assert_eq!(nodes[1].type_or_control, plant);
+    assert_eq!(
+        house.ai_production().building_choice(),
+        -1,
+        "the splice does not consume the choice"
     );
 }
 
@@ -1002,6 +1129,65 @@ fn an_installed_upgrade_satisfies_its_base_plan_node() {
     assert!(
         super::node_satisfied(&sim, &rules, owner, &node, None),
         "the installed upgrade satisfies its node"
+    );
+}
+
+/// A turbine installed on one plant must not satisfy the node of another.
+/// Reading "any host of the house carries the upgrade" caps a computer base
+/// at one turbine: every later upgrade node is marked done on sight.
+#[test]
+fn an_upgrade_node_is_satisfied_only_by_its_own_host() {
+    let rules = upgrade_path_rules();
+    let (mut sim, owner, host) = upgrade_path_scene(&rules);
+    sim.spawn_object_at_height("PLANT", "Russians", 14, 4, 0, 0, &rules)
+        .expect("second host plant spawns");
+    let index = rules
+        .building_type_index("UPGRADE")
+        .expect("upgrade index");
+    let node = |packed_cell| BasePlanNode {
+        type_or_control: index,
+        packed_cell,
+        filled: false,
+        retry_count: 0,
+    };
+    let first_cell = pack_base_plan_cell(10, 4);
+    let second_cell = pack_base_plan_cell(14, 4);
+    assert!(
+        !super::node_satisfied(&sim, &rules, owner, &node(0), None),
+        "an unassigned node is not built"
+    );
+    let product = sim
+        .construct_object_limbo_at_height(
+            "UPGRADE",
+            "Russians",
+            10,
+            4,
+            0,
+            0,
+            &rules,
+            FrameEffects::default(),
+        )
+        .expect("upgrade product");
+    assert!(
+        sim.try_install_building_upgrade(
+            product,
+            host,
+            &rules,
+            crate::sim::world::UninitContext::with_rules(&rules),
+        ),
+        "the upgrade installs on the first host"
+    );
+    assert!(
+        super::node_satisfied(&sim, &rules, owner, &node(first_cell), None),
+        "the host at the node's cell carries the upgrade"
+    );
+    assert!(
+        !super::node_satisfied(&sim, &rules, owner, &node(second_cell), None),
+        "a bare host does not satisfy another node"
+    );
+    assert!(
+        !super::node_satisfied(&sim, &rules, owner, &node(0), None),
+        "a node with no host cell still waits for its installation"
     );
 }
 

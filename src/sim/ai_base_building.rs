@@ -40,13 +40,18 @@
 //!   a Soviet/Yuri authored -3 can reach this invalid native dereference.
 //!   All fourteen stock campaign plans were read without a -3 node.
 //! - Dormant in retail data: no retail type sets `PowersUpBuilding=`. Mental
-//!   Omega does, so VERA now runs two of the arms the key implies: the exit's
+//!   Omega does, so VERA now runs the arms the key implies: the exit's
 //!   upgrade installation (`0x00445614`, through `upgrade_host_site` and the
-//!   Unlimbo upgrade arm) and `0x0042E820`'s installed-upgrade node lookup
-//!   (`node_upgrade_installed`). `AI_Choose_Building`'s arm
-//!   (`0x004FE953..0x004FEA3A`) stays dormant: the `[AI]` list and Recalc
-//!   candidate paths still omit upgrade types. The exit's `FirestormWall=`
-//!   placement after Unlimbo (`0x00445355..0x004453AE`, `0x00588570`);
+//!   Unlimbo upgrade arm), `0x0042E820`'s installed-upgrade node lookup
+//!   (`node_upgrade_installed`, keyed to the node's own host cell), and an
+//!   MO-only acceleration: the Ares plant draw prefers an installable
+//!   upgrade and a node for its host splices one ahead of the plant
+//!   (`upgrade_to_splice`). That is deliberately more eager than the retail
+//!   `AI_Choose_Building` arm (`0x004FE953..0x004FEA3A`): the `[AI]` list
+//!   and Recalc candidate paths still omit upgrade types, so a plan can
+//!   never hold more upgrade nodes than the house has host slots. The exit's
+//!   `FirestormWall=` placement after Unlimbo (`0x00445355..0x004453AE`,
+//!   `0x00588570`);
 //!   retail `rulesmd.ini` sets the key on no type.
 //! - `Record_Last_Built` and Building discovery retain class-local type indices
 //!   through HouseState for built-type triggers19..22. The remaining `+0x246`
@@ -875,9 +880,16 @@ pub(crate) fn choose_building(
     let Some(ty) = rules.building_type_at(node.type_or_control) else {
         return;
     };
-    if let Some(plant) = power_plant_to_splice(sim, rules, owner, ty) {
-        // `0x004FE893..0x004FE943`: the plant takes the node's index, the
-        // node and the rest shift up.
+    let spliced = {
+        #[cfg(feature = "ares")]
+        let upgrade = upgrade_to_splice(sim, rules, owner, ty);
+        #[cfg(not(feature = "ares"))]
+        let upgrade: Option<i32> = None;
+        upgrade.or_else(|| power_plant_to_splice(sim, rules, owner, ty))
+    };
+    if let Some(plant) = spliced {
+        // `0x004FE893..0x004FE943`: the spliced type takes the node's index,
+        // the node and the rest shift up.
         if let Some(house) = sim.houses.get_mut(&owner) {
             house.base_plan_mut().insert(
                 index,
@@ -1258,8 +1270,74 @@ fn ares_power_plant(
             .find(|&index| ares_power_plant_is_placeable(sim, rules, owner, index));
     }
     let last = buildable.len() as i32 - 1;
-    let picked = sim.scenario_rng.next_range_i32_inclusive(0, last);
-    buildable.get(picked as usize).copied()
+    // Keep the native draw so the Scenario RNG stream (and everything that
+    // reads it afterwards) is unchanged by this preference.
+    let drawn = sim.scenario_rng.next_range_i32_inclusive(0, last);
+    // MO deliberately runs ahead of the stock game here: a turbine is legal
+    // only while some plant still has a free slot, so a uniform draw spends
+    // half of the scarce power splices on a plain plant. Install the upgrade
+    // first; once every host is full it drops out of `buildable` and the
+    // ordinary draw resumes.
+    if let Some(&upgrade) = buildable.iter().find(|&&index| {
+        rules
+            .building_type_at(index)
+            .is_some_and(|plant| plant.building_upgrade().host().is_some())
+    }) {
+        return Some(upgrade);
+    }
+    buildable.get(drawn as usize).copied()
+}
+
+/// The computer's Ares plant list also names MO's power turbine. Splicing it
+/// only when the next building would black out the house
+/// ([`power_plant_to_splice`]) leaves most plants bare: the first turbine
+/// supplies 150 power and removes the very shortage that would have asked
+/// for the next one. Take an `AI_Choose_Building` node for the turbine's host
+/// as the moment to install one, and splice the upgrade ahead of that plant.
+/// It is self-limiting: once every host slot is filled
+/// [`ares_power_plant_is_placeable`] rejects the candidate and the plant node
+/// builds normally.
+///
+/// This is an intentional MO-only acceleration, not the retail
+/// `AI_Choose_Building` arm (`0x004FE953..0x004FEA3A`); the `[AI]` lists and
+/// Recalc candidates still omit upgrades, so a plan can never hold more
+/// upgrade nodes than the house has host slots.
+#[cfg(feature = "ares")]
+fn upgrade_to_splice(
+    sim: &Simulation,
+    rules: &RuleSet,
+    owner: InternedId,
+    ty: &ObjectType,
+) -> Option<i32> {
+    use crate::sim::production::{CanBuild, can_build, owns_prerequisites};
+    let house = sim.houses.get(&owner)?;
+    let side = house.side_index();
+    let candidates = rules.ares_power_plants(sim.interner.resolve(house.house_type_id()), side);
+    candidates.into_iter().find(|&index| {
+        let Some(upgrade) = rules.building_type_at(index) else {
+            return false;
+        };
+        if !upgrade
+            .building_upgrade()
+            .host()
+            .is_some_and(|host| host.eq_ignore_ascii_case(&ty.id))
+        {
+            return false;
+        }
+        if !ares_power_plant_is_placeable(sim, rules, owner, index)
+            || can_build(sim, rules, owner, upgrade, false, true) != CanBuild::Yes
+            || !owns_prerequisites(sim, rules, house, upgrade)
+        {
+            return false;
+        }
+        // One open upgrade node at a time: the splice goes in front of this
+        // plant node and `find_node` takes it before the plant is revisited.
+        !house.base_plan().nodes().iter().any(|node| {
+            node.type_or_control == index
+                && !node.filled
+                && !node_satisfied(sim, rules, owner, node, None)
+        })
+    })
 }
 
 /// What the Construction Yard's exit answers `Factory_AI`
@@ -1688,14 +1766,21 @@ pub(crate) fn find_node(
 }
 
 /// `0x0042E820`'s `PowersUpBuilding=` arm: a node for an upgrade is
-/// satisfied while one of the house's hosts carries that installed type.
+/// satisfied when the host at its assigned cell carries that installed type.
 /// Retail data never sets the key, so the arm is dormant there; Mental Omega
 /// does. The upgrade is consumed at Unlimbo and leaves no building object,
 /// so `node_building` cannot find it.
+///
+/// The cell is essential: reading "any host of the house carries the type"
+/// satisfies every later upgrade node as soon as the first turbine is on a
+/// plant, which caps a computer base at one turbine no matter how many
+/// plants it owns. MO's `Upgrades=1` hosts are meant to be filled one by
+/// one, so each node has to answer for its own host.
 fn node_upgrade_installed(
     sim: &Simulation,
     rules: &RuleSet,
     owner: InternedId,
+    node: &BasePlanNode,
     ty: &ObjectType,
 ) -> bool {
     let Some(host_name) = ty.building_upgrade().host() else {
@@ -1710,21 +1795,35 @@ fn node_upgrade_installed(
     else {
         return false;
     };
-    sim.houses.get(&owner).is_some_and(|house| {
-        house
-            .base_projection()
-            .buildings()
-            .iter()
-            .filter_map(|&id| sim.substrate.entities.get(id))
-            .filter(|building| building.type_ref() == host_id)
-            .any(|building| {
-                building
-                    .building_upgrades()
-                    .types()
-                    .iter()
-                    .any(|entry| *entry == Some(upgrade_id))
-            })
-    })
+    // A node with no host cell has not been built yet; `building_site`
+    // writes the host's cell when the upgrade is installed.
+    if node.packed_cell == 0 {
+        return false;
+    }
+    let Some((rx, ry)) = map_cell(node.packed_cell) else {
+        return false;
+    };
+    let Some(id) = sim
+        .substrate
+        .occupancy
+        .first_building_on_layer(rx, ry, MovementLayer::Ground)
+    else {
+        return false;
+    };
+    let Some(building) = sim.substrate.entities.get(id) else {
+        return false;
+    };
+    if building.owner() != owner
+        || building.type_ref() != host_id
+        || (building.position.rx(), building.position.ry()) != (rx, ry)
+    {
+        return false;
+    }
+    building
+        .building_upgrades()
+        .types()
+        .iter()
+        .any(|entry| *entry == Some(upgrade_id))
 }
 
 /// `BaseClass @ 0x0042E780`: the node's building stands ([`node_building`]),
@@ -1744,7 +1843,7 @@ pub(crate) fn node_satisfied(
         return false;
     };
     if ty.building_upgrade().host().is_some() {
-        return node_upgrade_installed(sim, rules, owner, ty);
+        return node_upgrade_installed(sim, rules, owner, node, ty);
     }
     if !ty.wall {
         return false;
