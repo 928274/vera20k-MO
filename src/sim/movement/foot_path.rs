@@ -639,6 +639,10 @@ impl Simulation {
                     &self.interner,
                     rules,
                 );
+                //The search reads one unchanged world after Mark0, as a path
+                //batch's searches read theirs, so it keeps the entry facts it
+                //reads the same way (VERA-only; the answers are the same).
+                self.empty_entry_facts();
                 let counts = self.movement_pass_cache.current_blocker_plane();
                 //The track_fresh_response oracle substitutes the whole AStar
                 //core 0x4CBBA0 for a CoreNull row, so no +1AC call happens
@@ -661,7 +665,7 @@ impl Simulation {
                         grid,
                         counts,
                         MoverLift::Marked,
-                        None,
+                        self.entry_facts(),
                         None,
                     )
                     .0
@@ -783,10 +787,17 @@ impl Simulation {
         //causing nested Find_Path calls before the outer loop revisits an
         //identity. Check only this admitted traversal, without forbidding
         //cycles at map admission/save or adding a persistent graph cache.
+        //gamemd's loop at 4D3ECD never ends on such a cycle (a hang). VERA
+        //carries on: the mover keeps its own path and no follower is routed,
+        //since a walk cut at the repeat could still nest without end.
         let mut probe = next;
         while let Some(id) = probe {
             if !visited.insert(id) {
-                return Err("Find_Path reached a cyclic Unit follower chain".into());
+                log::warn!(
+                    "Unit {} heads a cyclic FOLLOWS chain (repeats at {id}); its followers are not routed",
+                    request.entity_id
+                );
+                return Ok(());
             }
             let peer = self
                 .substrate
@@ -799,11 +810,11 @@ impl Simulation {
         visited.clear();
         visited.insert(request.entity_id);
         while let Some(id) = next {
-            //The native loop has no completed result for a surviving cycle.
-            //Report that unsupported traversal instead of imposing a hop
-            //limit or pretending a truncated chain succeeded.
+            //The native loop never ends on a cycle that callbacks linked
+            //during this walk; VERA ends the chain at the repeat.
             if !visited.insert(id) {
-                return Err("Find_Path reached a cyclic Unit follower chain".into());
+                log::warn!("Unit follower chain closed on {id} during its walk; ended there");
+                break;
             }
             destination = {
                 let cells = NativeCellQuery::canonical(
@@ -872,9 +883,9 @@ impl Simulation {
 
     /// The core search (AStar 0x0042C900 with its bridge markers and both
     /// finishing passes) for `request` toward `goal` on the current world,
-    /// reading the blocker counts `counts` and a path batch's kept entry
-    /// `facts`. The flag says whether an [`MoverLift::Emulated`] search asked
-    /// about the mover's own cell.
+    /// reading the blocker counts `counts` and the kept entry `facts`
+    /// ([`Simulation::empty_entry_facts`]). The flag says whether an
+    /// [`MoverLift::Emulated`] search asked about the mover's own cell.
     pub(super) fn foot_core_search(
         &self,
         request: &FootPathRequest,
@@ -960,7 +971,7 @@ impl Simulation {
             &self.substrate.entities,
             super::PathfindingContext {
                 path_grid: Some(grid),
-                zone_grid: self.zone_grid.as_deref(),
+                zone_grid: self.zone_grid.as_ref(),
                 resolved_terrain: self.resolved_terrain.as_ref(),
                 playfield_bounds: self.playfield_bounds(),
                 blocker_neighbor_counts: Some(counts),
@@ -1295,7 +1306,7 @@ impl Simulation {
             .ok_or("Find_Path FNPC requires map cells")?;
         let zones = self
             .zone_grid
-            .as_deref()
+            .as_ref()
             .ok_or("Find_Path FNPC requires zone topology")?;
         self.map_size_diamond()
             .ok_or("Find_Path FNPC requires original Map Size")?;
@@ -1410,7 +1421,7 @@ impl Simulation {
             .ok_or("EstimateZoneCost requires map cells")?;
         let zones = self
             .zone_grid
-            .as_deref()
+            .as_ref()
             .ok_or("EstimateZoneCost requires zone topology")?;
         let cells = NativeCellQuery::canonical(terrain);
         let start_cell = cells.lookup(start.coord(&cells)); //42D1A1
@@ -1658,7 +1669,7 @@ impl Simulation {
         let cells = NativeCellQuery::canonical(terrain);
         let zones = self
             .zone_grid
-            .as_deref()
+            .as_ref()
             .ok_or("Foot precheck requires zone topology")?;
         let bounds = self
             .playfield_bounds()

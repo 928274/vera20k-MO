@@ -524,7 +524,7 @@ fn a_map_placed_chrono_miner_takes_its_authored_mission() {
     };
     use crate::sim::mission::MissionType;
     let current = |sim: &Simulation, id: u64| {
-        let mission = sim.substrate.entities.get(id).unwrap().mission;
+        let mission = sim.substrate.entities.get(id).unwrap().mission.clone();
         (mission.current().known(), mission.queued().known())
     };
 
@@ -3472,7 +3472,7 @@ fn structures_field_11_sets_the_building_lights_behaviour() {
                 .entities
                 .values()
                 .find(|entity| (entity.position.rx(), entity.position.ry()) == cell)
-                .and_then(|entity| entity.building_light.light())
+                .and_then(|entity| entity.building.building_light.light())
                 .expect("HasSpotlight building owns a light");
             sim.building_spotlight(light, None, &rules).is_some()
         })

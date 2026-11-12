@@ -805,7 +805,9 @@ fn parse_anim_runtime_config(section: &IniSection) -> AnimTypeRuntimeConfig {
         is_tiberium: section.read_bool("IsTiberium", false),
         hide_if_no_ore: section.read_bool("HideIfNoOre", false),
         #[cfg(feature = "phobos")]
-        hide_if_no_ore_threshold: section.read_ares_int("HideIfNoOre.Threshold", 0),
+        hide_if_no_ore_threshold: crate::rules::ares_switch::not_ares_read(|| {
+            section.read_ares_int("HideIfNoOre.Threshold", 0)
+        }),
         is_animated_tiberium: section.read_bool("IsAnimatedTiberium", false),
         tiberium_spread_radius: section.read_int("TiberiumSpreadRadius", 0),
         // The Type references (`TiberiumSpawnType=`, `Spawns=`, `Warhead=`,
@@ -816,27 +818,32 @@ fn parse_anim_runtime_config(section: &IniSection) -> AnimTypeRuntimeConfig {
         tiberium_spawn_type: None,
         make_infantry: section.read_int("MakeInfantry", -1),
         #[cfg(feature = "phobos")]
-        phobos_make_infantry_owner: crate::rules::ares_warhead::HouseSelector::Victim
-            .read(section, "MakeInfantryOwner"),
+        phobos_make_infantry_owner: crate::rules::ares_switch::not_ares_read(|| {
+            crate::rules::ares_warhead::HouseSelector::Victim.read(section, "MakeInfantryOwner")
+        }),
         #[cfg(feature = "ares")]
         ares_make_infantry_owner: crate::rules::ares_warhead::HouseSelector::Invoker
             .read(section, "MakeInfantryOwner"),
         #[cfg(feature = "ares")]
-        ares_custom_palette: section.read_name("CustomPalette", 2048).map(str::to_owned),
+        ares_custom_palette: crate::rules::ares_switch::ares_read(|| {
+            section.read_name("CustomPalette", 2048).map(str::to_owned)
+        }),
         // `CreateUnit` is a `Nullable<TechnoTypeClass*>`: `none` clears it and
         // an authored name is a presence signal here. A name no factory
         // resolves is treated as present (the type itself is not modeled).
         #[cfg(feature = "phobos")]
-        phobos_create_unit: section
-            .read_name("CreateUnit", 0x80)
-            .filter(|name| !crate::rules::ini_parser::is_native_none_type_name(name))
-            .map(|_| {
-                (
-                    crate::rules::ares_warhead::HouseSelector::Victim
-                        .read(section, "CreateUnit.Owner"),
-                    section.read_ares_bool("CreateUnit.RemapAnim", false),
-                )
-            }),
+        phobos_create_unit: crate::rules::ares_switch::not_ares_read(|| {
+            section
+                .read_name("CreateUnit", 0x80)
+                .filter(|name| !crate::rules::ini_parser::is_native_none_type_name(name))
+                .map(|_| {
+                    (
+                        crate::rules::ares_warhead::HouseSelector::Victim
+                            .read(section, "CreateUnit.Owner"),
+                        section.read_ares_bool("CreateUnit.RemapAnim", false),
+                    )
+                })
+        }),
         bouncer: section.read_bool("Bouncer", false),
         spawns: None,
         spawn_count: section.read_int("SpawnCount", 0),
@@ -1156,7 +1163,9 @@ impl ArtRegistry {
             #[cfg(feature = "ares")]
             let alt_cameo_pcx = section.read_ares_pcx_filename("AltCameoPCX");
             #[cfg(feature = "ares")]
-            let cameo_palette = section.read_name("CameoPalette", 2048).map(str::to_owned);
+            let cameo_palette = crate::rules::ares_switch::ares_read(|| {
+                section.read_name("CameoPalette", 2048).map(str::to_owned)
+            });
             let new_theater: bool = section.read_bool("NewTheater", false);
             let theater: bool = section.read_bool("Theater", false);
             let scorch: bool = section.read_bool("Scorch", false);
@@ -1811,24 +1820,27 @@ impl ArtRegistry {
     /// A TechnoType's `UseBuffer=`, from the ART section named by its exact
     /// type ID ([`ArtEntry::use_buffer`]); false without that section.
     pub fn use_buffer(&self, type_id: &str) -> bool {
-        self.entries
-            .get(type_id)
+        self.exact_entry(type_id)
             .is_some_and(|entry| entry.use_buffer)
     }
 
     /// A TechnoType's `DisableVoxelCache=`, from the ART section named by its
     /// exact type ID; false without that section.
     pub fn disable_voxel_cache(&self, type_id: &str) -> bool {
-        self.entries
-            .get(type_id)
+        self.exact_entry(type_id)
             .is_some_and(|entry| entry.disable_voxel_cache)
     }
 
     /// A TechnoType's `DisableShadowCache=`, read the same way.
     pub fn disable_shadow_cache(&self, type_id: &str) -> bool {
-        self.entries
-            .get(type_id)
+        self.exact_entry(type_id)
             .is_some_and(|entry| entry.disable_shadow_cache)
+    }
+
+    /// The ART section named by `type_id` exactly, with no case folding or
+    /// Image redirect: the section the flags above read.
+    pub fn exact_entry(&self, type_id: &str) -> Option<&ArtEntry> {
+        self.entries.get(type_id)
     }
 
     /// A TechnoType's `CanBeHidden=`, from the ART section named by its exact

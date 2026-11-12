@@ -24,7 +24,7 @@ const DRAG_RECT_DEPTH: f32 = 0.001;
 /// Thickness of the drag rectangle outline in pixels (1px = RA2 original style).
 const DRAG_RECT_THICKNESS: f32 = 1.0;
 
-/// VERA formation line dots: a circle [`FORMATION_DOT_SIZE`] screen pixels
+/// VERA formation line dots: a circle [`FORMATION_DOT_SIZE`] world pixels
 /// across, as rects (left, top, width, height, alpha) inside its box. A
 /// 4-pixel core and, around it, the circle's remaining pixels fainter. No
 /// two rects overlap, so each pixel is blended once.
@@ -38,26 +38,6 @@ const FORMATION_DOT: [(f32, f32, f32, f32, f32); 5] = [
     (5.0, 1.0, 1.0, 4.0, FORMATION_DOT_EDGE_ALPHA),
     (1.0, 1.0, 4.0, 4.0, FORMATION_DOT_CORE_ALPHA),
 ];
-/// What a VERA ferry circle marks, and so its colour: blue where a transport
-/// loads, yellow where it unloads, red for an armed click that would be
-/// refused.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FerryRingKind {
-    Load,
-    Unload,
-    Refused,
-}
-
-impl FerryRingKind {
-    fn tint(self) -> [f32; 3] {
-        match self {
-            Self::Load => [0.25, 0.6, 1.0],
-            Self::Unload => [1.0, 0.9, 0.15],
-            Self::Refused => [1.0, 0.25, 0.2],
-        }
-    }
-}
-
 /// Manages textures and rendering for selection overlays.
 pub struct SelectionOverlay {
     /// Solid color texture for drag rectangle lines.
@@ -83,6 +63,10 @@ pub struct SelectionOverlay {
     talk_bubble: Option<CenteredShapeStrip>,
     /// WRENCH.SHP, the repairing building's wrench.
     repair_wrench: Option<CenteredShapeStrip>,
+    /// POWEROFF.SHP, which only Ares draws (TechnoClass_DrawExtras_PowerOff
+    /// 10049FE0, hook 0x6F526C).
+    #[cfg(feature = "ares")]
+    power_off: Option<CenteredShapeStrip>,
     /// Full PIPS: health, rank, raw garrison Pip values and self-heal.
     /// Native LoadPipAssets 5F76B0 binds AC147C; both use Convert 87F6C4.
     pips: Option<CenteredShapeStrip>,
@@ -460,6 +444,19 @@ impl SelectionOverlay {
                 "mousepal.pal",
             )
         });
+        // POWEROFF.SHP by name (0x0045E970, beside WRENCH.SHP); Ares draws
+        // it through the same MOUSEPAL Convert.
+        #[cfg(feature = "ares")]
+        let power_off = assets.and_then(|assets| {
+            CenteredShapeStrip::from_assets_on_device(
+                device,
+                queue,
+                batch,
+                assets,
+                "poweroff.shp",
+                "mousepal.pal",
+            )
+        });
         // Original 5F76B0 /52BF26..52BFC1: one PIPS.SHP/PALETTE.PAL
         // resource serves health6F66BA/6F6A4A, rank70AA4F and self-heal70A6BB.
         // Keep every frame's native origin and original index plane.
@@ -485,6 +482,8 @@ impl SelectionOverlay {
             bomb_clock,
             talk_bubble,
             repair_wrench,
+            #[cfg(feature = "ares")]
+            power_off,
             pips,
             #[cfg(feature = "phobos")]
             digital_shapes: Vec::new(),
@@ -676,6 +675,12 @@ impl SelectionOverlay {
         self.repair_wrench.as_ref()
     }
 
+    /// The power-off marker art (POWEROFF.SHP), when the assets have it.
+    #[cfg(feature = "ares")]
+    pub fn power_off(&self) -> Option<&CenteredShapeStrip> {
+        self.power_off.as_ref()
+    }
+
     /// Physical PIPS.SHP shared by health, rank14/15/19 and self-heal13/20.
     pub fn pips(&self) -> Option<&CenteredShapeStrip> {
         self.pips.as_ref()
@@ -686,68 +691,21 @@ impl SelectionOverlay {
         self.pipbrd.as_ref()
     }
 
-    /// VERA ferry order (`app::input::ferry`): one closed line, a pixel
-    /// wide, through the given screen points, in the band box's batch and
-    /// coordinate frame (screen pixels plus the camera offset), in its
-    /// kind's colour. Pixels outside `clip` (left, top, right, bottom) are
-    /// left out.
-    pub fn build_ferry_ring(
-        &self,
-        screen_points: &[(f32, f32)],
-        kind: FerryRingKind,
-        clip: [f32; 4],
-        camera_x: f32,
-        camera_y: f32,
-    ) -> Vec<SpriteInstance> {
-        let tint = kind.tint();
-        let mut instances = Vec::new();
-        let mut last = None;
-        for (index, &(x0, y0)) in screen_points.iter().enumerate() {
-            let (x1, y1) = screen_points[(index + 1) % screen_points.len()];
-            let steps = (x1 - x0).abs().max((y1 - y0).abs()).ceil().max(1.0) as u32;
-            for step in 0..steps {
-                let t = step as f32 / steps as f32;
-                let pixel = ((x0 + (x1 - x0) * t).round(), (y0 + (y1 - y0) * t).round());
-                if last == Some(pixel)
-                    || pixel.0 < clip[0]
-                    || pixel.1 < clip[1]
-                    || pixel.0 >= clip[2]
-                    || pixel.1 >= clip[3]
-                {
-                    continue;
-                }
-                last = Some(pixel);
-                instances.push(SpriteInstance {
-                    position: [camera_x + pixel.0, camera_y + pixel.1],
-                    size: [1.0, 1.0],
-                    uv_origin: [0.0, 0.0],
-                    uv_size: [1.0, 1.0],
-                    depth: DRAG_RECT_DEPTH,
-                    tint,
-                    alpha: 1.0,
-                    ..Default::default()
-                });
-            }
-        }
-        instances
-    }
-
-    /// VERA formation line: one round dot per unit at the given screen
-    /// points, in the band box's batch and coordinate frame (screen pixels
-    /// plus the camera offset). `tint` is the Move action line's colour,
-    /// drawn see-through: a core with a fainter edge of the same colour.
+    /// VERA formation line: one round dot per unit at the given world-pixel
+    /// points, as world-surface stores for the ground pass (`draw_passes`,
+    /// "ground_marks"): drawn on the finished ground and before the buildings
+    /// and objects, which cover them. `tint` is the Move action line's
+    /// colour, drawn see-through: a core with a fainter edge of the same
+    /// colour.
     pub fn build_formation_dots(
-        &self,
-        screen_points: &[(f32, f32)],
+        world_points: &[(f32, f32)],
         tint: [f32; 3],
-        camera_x: f32,
-        camera_y: f32,
     ) -> Vec<SpriteInstance> {
-        let mut instances = Vec::with_capacity(screen_points.len() * FORMATION_DOT.len());
-        for &(x, y) in screen_points {
+        let mut instances = Vec::with_capacity(world_points.len() * FORMATION_DOT.len());
+        for &(x, y) in world_points {
             let corner = [
-                camera_x + x.round() - FORMATION_DOT_SIZE / 2.0,
-                camera_y + y.round() - FORMATION_DOT_SIZE / 2.0,
+                x.round() - FORMATION_DOT_SIZE / 2.0,
+                y.round() - FORMATION_DOT_SIZE / 2.0,
             ];
             for &(left, top, width, height, alpha) in &FORMATION_DOT {
                 instances.push(SpriteInstance {
@@ -755,7 +713,6 @@ impl SelectionOverlay {
                     size: [width, height],
                     uv_origin: [0.0, 0.0],
                     uv_size: [1.0, 1.0],
-                    depth: DRAG_RECT_DEPTH,
                     tint,
                     alpha,
                     ..Default::default()
@@ -971,5 +928,16 @@ mod tests {
         // With no global palette either, this is a genuine load failure.
         assert!(digital_display_palette("interior.pal", |_| None).is_none());
         assert!(digital_display_palette("palette.pal", |_| None).is_none());
+    }
+
+    #[test]
+    fn formation_dots_are_placed_in_world_pixels() {
+        let dots = SelectionOverlay::build_formation_dots(&[(100.4, 50.6)], [0.0, 1.0, 0.0]);
+        // The 4x4 core of the 6-pixel dot centred on the rounded point.
+        let core = dots
+            .iter()
+            .find(|dot| dot.size == [4.0, 4.0])
+            .expect("the dot's core");
+        assert_eq!(core.position, [98.0, 49.0]);
     }
 }

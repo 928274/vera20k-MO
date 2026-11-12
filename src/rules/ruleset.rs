@@ -51,6 +51,17 @@ use crate::util::lookup_hash::LookupMap;
 use crate::util::native_random::unit_draw_threshold;
 use crate::util::native_x87::{NativeF32Bits, NativeF64Bits};
 
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    /// Test builds only: this thread's [`RuleSet::object`] calls, for checks
+    /// of what a draw looks up by name ([`RuleSet::type_name_lookups`]). The
+    /// bound handle's debug cross-check calls `type_handle` and is not counted.
+    static TYPE_NAME_LOOKUPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Test builds only: this thread's uppercase copies of a type name made
+    /// to look it up ([`upper_name_key`], [`RuleSet::name_key_copies`]).
+    static NAME_KEY_COPIES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 #[cfg(test)]
 #[path = "building_damage_sound_tests.rs"]
 mod building_damage_sound_tests;
@@ -2604,7 +2615,7 @@ impl ParadropList {
     /// processed rules' ([`RuleSet::from_processed_rules`]).
     fn read_counts(general: &crate::rules::ini_parser::IniSection, key: &str) -> Self {
         #[cfg(feature = "ares")]
-        let counts = general.read_ares_int_list(key);
+        let counts = crate::rules::ares_switch::not_ares_read(|| general.read_ares_int_list(key));
         #[cfg(not(feature = "ares"))]
         let counts = general.read_int_list(key);
         Self {
@@ -4015,8 +4026,9 @@ impl GeneralRules {
         let airstrike_line_color =
             audio_visual.read_phobos_color("AirstrikeLineColor", defaults.airstrike_line_color);
         #[cfg(feature = "phobos")]
-        let airstrike_line_z_adjust =
-            audio_visual.read_ares_int("AirstrikeLineZAdjust", defaults.airstrike_line_z_adjust);
+        let airstrike_line_z_adjust = crate::rules::ares_switch::not_ares_read(|| {
+            audio_visual.read_ares_int("AirstrikeLineZAdjust", defaults.airstrike_line_z_adjust)
+        });
         let Some(general) = ini.section("General") else {
             return Self {
                 ai_base_size,
@@ -4665,20 +4677,23 @@ impl GeneralRules {
             #[cfg(feature = "phobos")]
             decloak_damaged_targets: general.read_bool("DecloakDamagedTargets", true),
             #[cfg(feature = "phobos")]
-            rof_random_delay: combat_damage.read_ares_partial_int_pair(
-                "ROF.RandomDelay",
-                crate::rules::ini_value::PartialIntPair {
-                    low: 0,
-                    high: 2,
-                    values: 2,
-                },
-            ),
+            rof_random_delay: crate::rules::ares_switch::not_ares_read(|| {
+                combat_damage.read_ares_partial_int_pair(
+                    "ROF.RandomDelay",
+                    crate::rules::ini_value::PartialIntPair {
+                        low: 0,
+                        high: 2,
+                        values: 2,
+                    },
+                )
+            }),
             // Ares 3.0 Buf_AI (1005B830, hook 0x672B0E): ParseList<int>
             // (1005B030) replaces the original IntVector read.
             #[cfg(feature = "ares")]
-            ai_force_prediction_fudge: ai
-                .read_ares_int_list("AIForcePredictionFudge")
-                .unwrap_or_default(),
+            ai_force_prediction_fudge: crate::rules::ares_switch::not_ares_read(|| {
+                ai.read_ares_int_list("AIForcePredictionFudge")
+            })
+            .unwrap_or_default(),
             #[cfg(not(feature = "ares"))]
             ai_force_prediction_fudge: ai
                 .read_int_list("AIForcePredictionFudge")
@@ -4909,6 +4924,67 @@ impl TypeWeapons {
     }
 }
 
+/// `id` as the uppercase key the type name indexes hold: the name itself
+/// unless it has a lowercase letter. Retail type names are uppercase, so a
+/// lookup by name rarely copies it.
+fn upper_name_key(id: &str) -> std::borrow::Cow<'_, str> {
+    if id.bytes().any(|byte| byte.is_ascii_lowercase()) {
+        #[cfg(any(test, feature = "test-support"))]
+        NAME_KEY_COPIES.with(|count| count.set(count.get() + 1));
+        std::borrow::Cow::Owned(id.to_ascii_uppercase())
+    } else {
+        std::borrow::Cow::Borrowed(id)
+    }
+}
+
+/// A value for each type name of the four native TechnoType arrays: one
+/// uppercase-keyed [`LookupMap`] per array, so a lookup borrows the name it
+/// is given ([`upper_name_key`]) and hashes it once with the cheap hasher.
+/// Only looked up, never walked.
+#[derive(Clone, Debug)]
+struct CategoryIndex<V>([LookupMap<String, V>; 4]);
+
+impl<V> Default for CategoryIndex<V> {
+    fn default() -> Self {
+        Self(Default::default())
+    }
+}
+
+impl<V: Copy> CategoryIndex<V> {
+    fn array(&self, category: ObjectCategory) -> &LookupMap<String, V> {
+        &self.0[Self::slot(category)]
+    }
+
+    fn slot(category: ObjectCategory) -> usize {
+        match category {
+            ObjectCategory::Infantry => 0,
+            ObjectCategory::Vehicle => 1,
+            ObjectCategory::Aircraft => 2,
+            ObjectCategory::Building => 3,
+        }
+    }
+
+    /// The value of `id` in `category`'s array, ignoring ASCII case.
+    fn get(&self, category: ObjectCategory, id: &str) -> Option<V> {
+        self.array(category).get(&*upper_name_key(id)).copied()
+    }
+
+    fn contains(&self, category: ObjectCategory, id: &str) -> bool {
+        self.get(category, id).is_some()
+    }
+
+    fn insert(&mut self, category: ObjectCategory, id: &str, value: V) {
+        self.0[Self::slot(category)].insert(id.to_ascii_uppercase(), value);
+    }
+
+    /// The value of `id`, after giving it `value` if it had none.
+    fn get_or_insert(&mut self, category: ObjectCategory, id: &str, value: V) -> V {
+        *self.0[Self::slot(category)]
+            .entry(id.to_ascii_uppercase())
+            .or_insert(value)
+    }
+}
+
 /// Master container for all game data parsed from rules.ini.
 ///
 /// Name lookups are case-insensitive (matching the engine's find-or-allocate),
@@ -4931,7 +5007,7 @@ pub struct RuleSet {
     /// Per-native-registry identity authority. Unlike the broad lookup above,
     /// this retains distinct types when malformed/custom rules list the same
     /// ID in more than one category.
-    object_category_index: HashMap<(ObjectCategory, String), TypeHandle>,
+    object_category_index: CategoryIndex<TypeHandle>,
     /// Read-only projection of the process owner's global TechnoType array.
     /// Constructor order can interleave categories across lazy allocations
     /// and later Rules passes; it is not TYPE_REGISTRIES order. An absent
@@ -4940,7 +5016,7 @@ pub struct RuleSet {
     native_techno_type_order: Vec<(ObjectCategory, String, Option<TypeHandle>)>,
     /// Case-insensitive identity of each type in the four native TechnoType
     /// registries to its ordered array index (`+0xDF8`).
-    type_array_indices: HashMap<(ObjectCategory, String), i32>,
+    type_array_indices: CategoryIndex<i32>,
     /// All weapons' handles indexed by ID (e.g., "105mm" → its
     /// `weapon_types` index). Built once with the set, never changed.
     weapons: LookupMap<String, WeaponHandle>,
@@ -5022,7 +5098,9 @@ pub struct RuleSet {
     /// Effective side for each country after `[Sides]` membership and the
     /// per-country `Side=` override have both run.
     country_sides: Vec<Option<SideIdx>>,
-    /// `[Colors]` scheme entries in declaration order. Source of truth for every
+    /// `[Colors]` scheme entries in declaration order, then the built-in extra
+    /// lobby colours that section leaves out
+    /// ([`crate::rules::skirmish_colors`]). Source of truth for every
     /// house-color producer (loading-bar backing, lobby swatch, map `Color=`,
     /// skirmish slot priority).
     pub color_schemes: Vec<crate::rules::color_scheme::ColorSchemeEntry>,
@@ -5117,6 +5195,9 @@ pub struct RuleSet {
     /// Immutable projection of NativeRulesRegistryState's ordered armor catalog.
     ares_armors: Option<crate::rules::ares_armor::ArmorCatalog>,
     emp_sparkles: Option<String>,
+    /// Whether Ares plays in this game, decided once from its Rules layers
+    /// and `ares.mix` by `rules::ares_switch`. Read through [`Self::ares`].
+    ares: bool,
     #[cfg(feature = "ares")]
     ares_global_controls: crate::rules::native_processing::AresGlobalControls,
     /// Presentation projection of the retained Ares `[MouseCursors]` list.
@@ -5223,9 +5304,9 @@ pub struct RuleSet {
     #[cfg(feature = "phobos")]
     pub(crate) placement_preview_globals:
         crate::rules::phobos_placement_preview::PlacementPreviewGlobals,
-    /// Phobos `[General] SkirmishUnlimitedColors=`: the player-colour
-    /// conversion every launcher and loading-screen consumer reads.
-    #[cfg(feature = "phobos")]
+    /// The player-colour conversion every launcher and loading-screen consumer
+    /// reads, and the colours a lobby lists: `[SkirmishColors]` and Phobos
+    /// `[General] SkirmishUnlimitedColors=`.
     pub(crate) skirmish_color_mode: crate::rules::skirmish_colors::SkirmishColorMode,
     /// Radar event visual parameters (ping rectangles on minimap).
     pub radar_event_config: RadarEventConfig,
@@ -5290,6 +5371,7 @@ pub struct RuleSet {
     /// active AssetManager with effect assets. Gameplay and rendering share
     /// the GPU-independent physical model loader.
     voxel_assets: crate::rules::voxel_asset_catalog::VoxelAssetCatalog,
+    pub(crate) voxel_model_plan: super::voxel_model_plan::VoxelModelPlan,
     /// Every building type's construction control from its Buildup SHP,
     /// bound once from the active assets (`bind_building_buildup_assets`).
     buildup_assets: crate::rules::buildup_asset_catalog::BuildupAssetCatalog,
@@ -5578,7 +5660,17 @@ impl RuleSet {
         Self::from_processed_rules(&layers.process()?)
     }
 
+    /// Project processed Rules into the game's rules. The projection's reader
+    /// lookups are recorded, so the per-game Ares switch it stores
+    /// ([`Self::ares`]) also counts the keys only these readers read.
     pub fn from_processed_rules(processed: &ProcessedRulesLayers) -> Result<Self, RulesError> {
+        let (rules, reads) = crate::rules::ares_switch::record(|| Self::project(processed));
+        let mut rules = rules?;
+        rules.ares = crate::rules::ares_switch::LIVE && processed.ares_inputs().decide(&reads);
+        Ok(rules)
+    }
+
+    fn project(processed: &ProcessedRulesLayers) -> Result<Self, RulesError> {
         processed.validate_saved_state()?;
         let mut rules = Self::from_projected_ini(
             processed,
@@ -5597,8 +5689,7 @@ impl RuleSet {
             let key = (category, id.to_ascii_uppercase());
             let object = rules
                 .object_category_index
-                .get(&key)
-                .copied()
+                .get(category, id)
                 .filter(|handle| rules.object_by_handle(*handle).id == id);
             if let Some(object) = object {
                 // TechnoType+634 is retained typed state, not a merged INI
@@ -5613,8 +5704,7 @@ impl RuleSet {
                 .push((category, id.to_owned(), handle));
         }
         for (category, id, coefficients) in processed.techno_threat_coefficients() {
-            let key = (category, id.to_ascii_uppercase());
-            if let Some(handle) = rules.object_category_index.get(&key).copied()
+            if let Some(handle) = rules.object_category_index.get(category, id)
                 && rules.object_by_handle(handle).id == id
             {
                 rules.object_list[handle.0 as usize].project_threat_coefficients(coefficients);
@@ -5709,8 +5799,7 @@ impl RuleSet {
             .filter_map(|alternate| {
                 rules
                     .object_category_index
-                    .get(&(alternate.category(), alternate.id().to_ascii_uppercase()))
-                    .copied()
+                    .get(alternate.category(), alternate.id())
             })
             .collect();
         rules.general.building_types = processed.building_types().clone();
@@ -5771,71 +5860,43 @@ impl RuleSet {
         }
         #[cfg(feature = "ares")]
         for (category, name, enabled, options) in processed.ares_spotlight_states() {
-            if let Some(handle) = rules
-                .object_category_index
-                .get(&(category, name.to_ascii_uppercase()))
-                .copied()
-            {
+            if let Some(handle) = rules.object_category_index.get(category, name) {
                 rules.object_list[handle.0 as usize].bind_ares_spotlight(enabled, options);
             }
         }
         #[cfg(feature = "ares")]
         for (category, name, retained) in processed.super_weapon_techno_states() {
-            if let Some(handle) = rules
-                .object_category_index
-                .get(&(category, name.to_ascii_uppercase()))
-                .copied()
-            {
+            if let Some(handle) = rules.object_category_index.get(category, name) {
                 rules.object_list[handle.0 as usize].bind_super_weapon_techno_rules(retained);
             }
         }
         #[cfg(feature = "ares")]
         for (category, name, group) in processed.selection_group_states() {
-            if let Some(handle) = rules
-                .object_category_index
-                .get(&(category, name.to_ascii_uppercase()))
-                .copied()
-            {
+            if let Some(handle) = rules.object_category_index.get(category, name) {
                 rules.object_list[handle.0 as usize].bind_selection_group(group);
             }
         }
         #[cfg(feature = "ares")]
         for (category, name, driver) in processed.driver_states() {
-            if let Some(handle) = rules
-                .object_category_index
-                .get(&(category, name.to_ascii_uppercase()))
-                .copied()
-            {
+            if let Some(handle) = rules.object_category_index.get(category, name) {
                 rules.object_list[handle.0 as usize].bind_driver_rules(driver);
             }
         }
         #[cfg(feature = "ares")]
         for (category, name, bounty) in processed.bounty_states() {
-            if let Some(handle) = rules
-                .object_category_index
-                .get(&(category, name.to_ascii_uppercase()))
-                .copied()
-            {
+            if let Some(handle) = rules.object_category_index.get(category, name) {
                 rules.object_list[handle.0 as usize].bind_bounty_rules(bounty);
             }
         }
         #[cfg(feature = "ares")]
         for (category, name, crew) in processed.crew_states() {
-            if let Some(handle) = rules
-                .object_category_index
-                .get(&(category, name.to_ascii_uppercase()))
-                .copied()
-            {
+            if let Some(handle) = rules.object_category_index.get(category, name) {
                 rules.object_list[handle.0 as usize].bind_crew_rules(crew);
             }
         }
         #[cfg(feature = "ares")]
         for (category, name, retained) in processed.techno_combat_states() {
-            if let Some(handle) = rules
-                .object_category_index
-                .get(&(category, name.to_ascii_uppercase()))
-                .copied()
-            {
+            if let Some(handle) = rules.object_category_index.get(category, name) {
                 rules.object_list[handle.0 as usize].bind_techno_combat_rules(retained);
             }
         }
@@ -5843,39 +5904,26 @@ impl RuleSet {
         for (name, infiltration) in processed.infiltration_states() {
             if let Some(handle) = rules
                 .object_category_index
-                .get(&(ObjectCategory::Building, name.to_ascii_uppercase()))
-                .copied()
+                .get(ObjectCategory::Building, name)
             {
                 rules.object_list[handle.0 as usize].bind_infiltration_rules(infiltration);
             }
         }
         #[cfg(feature = "ares")]
         for (category, name, veterancy) in processed.veterancy_states() {
-            if let Some(handle) = rules
-                .object_category_index
-                .get(&(category, name.to_ascii_uppercase()))
-                .copied()
-            {
+            if let Some(handle) = rules.object_category_index.get(category, name) {
                 rules.object_list[handle.0 as usize].bind_ares_veterancy(veterancy);
             }
         }
         #[cfg(feature = "ares")]
         {
             for (category, name, production) in processed.production_states() {
-                if let Some(handle) = rules
-                    .object_category_index
-                    .get(&(category, name.to_ascii_uppercase()))
-                    .copied()
-                {
+                if let Some(handle) = rules.object_category_index.get(category, name) {
                     rules.object_list[handle.0 as usize].bind_ares_production(production);
                 }
             }
             for (category, name, cursors) in processed.ares_cursor_states() {
-                if let Some(handle) = rules
-                    .object_category_index
-                    .get(&(category, name.to_ascii_uppercase()))
-                    .copied()
-                {
+                if let Some(handle) = rules.object_category_index.get(category, name) {
                     rules.object_list[handle.0 as usize].bind_ares_cursors(cursors);
                 }
             }
@@ -5902,8 +5950,7 @@ impl RuleSet {
         for (name, academy) in processed.academy_states() {
             if let Some(handle) = rules
                 .object_category_index
-                .get(&(ObjectCategory::Building, name.to_ascii_uppercase()))
-                .copied()
+                .get(ObjectCategory::Building, name)
             {
                 rules.object_list[handle.0 as usize].bind_academy(academy);
             }
@@ -5911,11 +5958,7 @@ impl RuleSet {
         #[cfg(feature = "ares")]
         {
             for (category, name, retained) in processed.cloak_power_states() {
-                if let Some(handle) = rules
-                    .object_category_index
-                    .get(&(category, name.to_ascii_uppercase()))
-                    .copied()
-                {
+                if let Some(handle) = rules.object_category_index.get(category, name) {
                     rules.object_list[handle.0 as usize].bind_cloak_power_rules(retained);
                 }
             }
@@ -5948,11 +5991,7 @@ impl RuleSet {
         }
         for (category, name, armor) in processed.object_armor_states() {
             if let Some(category) = category {
-                if let Some(handle) = rules
-                    .object_category_index
-                    .get(&(category, name.to_ascii_uppercase()))
-                    .copied()
-                {
+                if let Some(handle) = rules.object_category_index.get(category, name) {
                     rules.object_list[handle.0 as usize].bind_armor(armor);
                 }
             } else if let Some(terrain) = rules
@@ -6244,8 +6283,7 @@ impl RuleSet {
             for (name, ext) in processed.building_type_ext_states() {
                 if let Some(handle) = rules
                     .object_category_index
-                    .get(&(ObjectCategory::Building, name.to_ascii_uppercase()))
-                    .copied()
+                    .get(ObjectCategory::Building, name)
                 {
                     let building = &mut rules.object_list[handle.0 as usize];
                     building.bind_building_type_ext(ext);
@@ -6499,10 +6537,7 @@ impl RuleSet {
     /// approved exclusion that retail never reaches.
     pub(crate) fn ids_with_objects(&self, ids: &[String], category: ObjectCategory) -> Vec<String> {
         ids.iter()
-            .filter(|id| {
-                self.object_category_index
-                    .contains_key(&(category, id.to_ascii_uppercase()))
-            })
+            .filter(|id| self.object_category_index.contains(category, id))
             .cloned()
             .collect()
     }
@@ -6514,9 +6549,13 @@ impl RuleSet {
             object.build_const_eligible = false;
         }
         for id in self.build_const_types.clone() {
-            let handle =
-                self.object_category_index[&(ObjectCategory::Building, id.to_ascii_uppercase())];
-            self.object_list[handle.0 as usize].build_const_eligible = true;
+            // `ids_with_objects` kept only ids this index holds.
+            if let Some(handle) = self
+                .object_category_index
+                .get(ObjectCategory::Building, &id)
+            {
+                self.object_list[handle.0 as usize].build_const_eligible = true;
+            }
         }
     }
 
@@ -6767,8 +6806,8 @@ impl RuleSet {
         for object in &mut self.object_list {
             let section = match source {
                 SoundReferenceSource::Processed(processed) => type_array_indices
-                    .get(&(object.category, object.id.to_ascii_uppercase()))
-                    .and_then(|&index| processed.techno_type_read_section(object.category, index)),
+                    .get(object.category, &object.id)
+                    .and_then(|index| processed.techno_type_read_section(object.category, index)),
                 #[cfg(any(test, feature = "test-support"))]
                 SoundReferenceSource::Fixture(ini) => ini.section(&object.id),
             };
@@ -6996,9 +7035,8 @@ impl RuleSet {
         let ini = processed.ini();
         let mut object_list: Vec<ObjectType> = Vec::new();
         let mut object_index: LookupMap<String, TypeHandle> = LookupMap::default();
-        let mut object_category_index: HashMap<(ObjectCategory, String), TypeHandle> =
-            HashMap::new();
-        let mut type_array_indices: HashMap<(ObjectCategory, String), i32> = HashMap::new();
+        let mut object_category_index: CategoryIndex<TypeHandle> = CategoryIndex::default();
+        let mut type_array_indices: CategoryIndex<i32> = CategoryIndex::default();
         let mut infantry_ids: Vec<String> = Vec::new();
         let mut vehicle_ids: Vec<String> = Vec::new();
         let mut aircraft_ids: Vec<String> = Vec::new();
@@ -7112,8 +7150,6 @@ impl RuleSet {
         let placement_preview_globals =
             crate::rules::phobos_placement_preview::PlacementPreviewGlobals::from_ini(ini);
         #[cfg(feature = "phobos")]
-        let skirmish_color_mode = crate::rules::skirmish_colors::SkirmishColorMode::from_ini(ini);
-        #[cfg(feature = "phobos")]
         let radiation = {
             let mut radiation = radiation;
             radiation.radiation_types = processed.radiation_types().cloned().unwrap_or_default();
@@ -7169,7 +7205,12 @@ impl RuleSet {
                     .unwrap_or_default()
             })
             .collect();
-        let color_schemes = crate::rules::color_scheme::parse_color_schemes(ini);
+        let mut color_schemes = crate::rules::color_scheme::parse_color_schemes(ini);
+        // Product extension: the lobby's colours beyond YR's eight. The mode
+        // appends the built-in ones `[Colors]` leaves out, so the ramps below
+        // and every other scheme consumer hold them.
+        let skirmish_color_mode =
+            crate::rules::skirmish_colors::SkirmishColorMode::from_ini(ini, &mut color_schemes);
         let house_color_ramps =
             crate::rules::house_colors::HouseColorRamps::from_schemes(&color_schemes);
         let color_add = processed.color_add_state().0.clone();
@@ -7180,26 +7221,21 @@ impl RuleSet {
             log::info!("Registry [{}]: {} entries", registry_name, ids.len());
 
             for (registry_index, id) in ids.iter().enumerate() {
-                type_array_indices
-                    .entry((category, id.to_ascii_uppercase()))
-                    .or_insert(registry_index as i32);
+                let array_index =
+                    type_array_indices.get_or_insert(category, id, registry_index as i32);
                 if let Some(section) = ini.section(id) {
                     let mut obj: ObjectType = ObjectType::from_ini_section(id, section, category);
                     if category == ObjectCategory::Building {
-                        obj.base_plan_type_index = type_array_indices
-                            .get(&(category, id.to_ascii_uppercase()))
-                            .copied()
-                            .expect("BuildingType index was registered above");
+                        obj.base_plan_type_index = array_index;
                     }
                     if obj.base_reservation_writer_eligible() {
                         obj.base_reservation_spacing = Some(ai_base_spacing);
                     }
                     let key = id.to_ascii_uppercase();
-                    let category_key = (category, key.clone());
                     // Find-or-allocate is per native type registry. A duplicate
                     // within one registry reuses its slot; the same ID in a
                     // different registry remains a distinct native type.
-                    let handle = match object_category_index.get(&category_key).copied() {
+                    let handle = match object_category_index.get(category, id) {
                         Some(TypeHandle(idx)) => {
                             log::warn!(
                                 "Object '{}' merges onto an existing case-duplicate {:?} type",
@@ -7212,7 +7248,7 @@ impl RuleSet {
                         None => {
                             let handle = TypeHandle(object_list.len() as u32);
                             object_list.push(obj);
-                            object_category_index.insert(category_key, handle);
+                            object_category_index.insert(category, id, handle);
                             handle
                         }
                     };
@@ -7415,7 +7451,7 @@ impl RuleSet {
         let particle_types = processed.particle_type_projections().collect::<Vec<_>>();
         let (particle_system_types, particle_system_types_by_name) =
             parse_particle_system_types(processed);
-        let (voxel_anim_types, voxel_anim_types_by_name) = parse_voxel_anim_types(ini);
+        let (voxel_anim_types, voxel_anim_types_by_name) = parse_voxel_anim_types(processed);
 
         log::info!(
             "RuleSet loaded: {} objects ({} inf, {} veh, {} air, {} bld), \
@@ -7560,6 +7596,8 @@ impl RuleSet {
             ares_prerequisites: None,
             ares_armors: processed.ares_armors().cloned(),
             emp_sparkles: None,
+            // Decided by `from_processed_rules` once its readers ran.
+            ares: false,
             #[cfg(feature = "ares")]
             ares_global_controls: processed.ares_global_controls().clone(),
             #[cfg(feature = "ares")]
@@ -7615,7 +7653,6 @@ impl RuleSet {
             attach_effect_globals,
             #[cfg(feature = "phobos")]
             placement_preview_globals,
-            #[cfg(feature = "phobos")]
             skirmish_color_mode,
             radar_event_config,
             super_weapons,
@@ -7644,6 +7681,7 @@ impl RuleSet {
                 .collect(),
             effect_assets: crate::rules::effect_asset_catalog::EffectAssetCatalog::default(),
             voxel_assets: crate::rules::voxel_asset_catalog::VoxelAssetCatalog::default(),
+            voxel_model_plan: processed.voxel_model_plan().clone(),
             buildup_assets: crate::rules::buildup_asset_catalog::BuildupAssetCatalog::default(),
             rubble_assets: crate::rules::building_rubble::RubbleAssetCatalog::default(),
             terrain_assets: crate::rules::terrain_asset_catalog::TerrainAssetCatalog::default(),
@@ -7701,15 +7739,23 @@ impl RuleSet {
         ))
     }
 
+    /// Test builds only: how many times this thread has looked a type's
+    /// record up by name ([`Self::object`]).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn type_name_lookups() -> u64 {
+        TYPE_NAME_LOOKUPS.with(std::cell::Cell::get)
+    }
+
+    /// Test builds only: how many uppercase copies of a type name this
+    /// thread has made to look one up ([`upper_name_key`]).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn name_key_copies() -> u64 {
+        NAME_KEY_COPIES.with(std::cell::Cell::get)
+    }
+
     /// Resolve a type name to its handle, case-insensitively (engine parity).
     pub fn type_handle(&self, id: &str) -> Option<TypeHandle> {
-        // The keys are uppercase, so a name without a lowercase letter is its
-        // own key and needs no uppercase copy.
-        if id.bytes().any(|byte| byte.is_ascii_lowercase()) {
-            self.object_index.get(&id.to_ascii_uppercase()).copied()
-        } else {
-            self.object_index.get(id).copied()
-        }
+        self.object_index.get(&*upper_name_key(id)).copied()
     }
 
     /// TAction106's active6DF5D1 and FlashCameo115's6E4150 compare IDs with exact case,
@@ -7769,6 +7815,8 @@ impl RuleSet {
 
     /// Look up a game object by ID (case-insensitive, engine parity).
     pub fn object(&self, id: &str) -> Option<&ObjectType> {
+        #[cfg(any(test, feature = "test-support"))]
+        TYPE_NAME_LOOKUPS.with(|count| count.set(count.get() + 1));
         self.type_handle(id).map(|h| self.object_by_handle(h))
     }
 
@@ -7907,9 +7955,7 @@ impl RuleSet {
         category: ObjectCategory,
         id: &str,
     ) -> Option<TypeHandle> {
-        self.object_category_index
-            .get(&(category, id.to_ascii_uppercase()))
-            .copied()
+        self.object_category_index.get(category, id)
     }
 
     /// The computer's base defense candidates of a House's side
@@ -7972,9 +8018,7 @@ impl RuleSet {
 
     /// The native array index (`+0xDF8`) of `id` in `category`'s array.
     pub fn type_array_index(&self, category: ObjectCategory, id: &str) -> Option<i32> {
-        self.type_array_indices
-            .get(&(category, id.to_ascii_uppercase()))
-            .copied()
+        self.type_array_indices.get(category, id)
     }
 
     /// Installed Ares Building Find10007E50, shared with BuiltAt's current-pass
@@ -7994,7 +8038,7 @@ impl RuleSet {
     /// by `gamemd.exe 0x004C4EF0`: Infantry, Unit, then Aircraft. BuildingType
     /// is never searched.
     pub(crate) fn task_force_member_object(&self, id: &str) -> Option<&ObjectType> {
-        let key = id.to_ascii_uppercase();
+        let key = upper_name_key(id);
         [
             ObjectCategory::Infantry,
             ObjectCategory::Vehicle,
@@ -8008,7 +8052,7 @@ impl RuleSet {
     /// by `gamemd.exe 0x0041F77D..0x0041F7E4`: Infantry, Unit, Aircraft,
     /// then Building.
     pub(crate) fn ai_trigger_object(&self, id: &str) -> Option<&ObjectType> {
-        let key = id.to_ascii_uppercase();
+        let key = upper_name_key(id);
         [
             ObjectCategory::Infantry,
             ObjectCategory::Vehicle,
@@ -8249,12 +8293,17 @@ impl RuleSet {
     /// Look up a warhead by ID (case-insensitive, gamemd parity).
     pub fn warhead(&self, id: &str) -> Option<&WarheadType> {
         self.warhead_handle(id)
-            .map(|handle| &self.warhead_types[handle.0 as usize])
+            .map(|handle| self.warhead_by_handle(handle))
     }
 
     /// The handle of the warhead [`Self::warhead`] answers for `id`.
-    fn warhead_handle(&self, id: &str) -> Option<WarheadHandle> {
+    pub(crate) fn warhead_handle(&self, id: &str) -> Option<WarheadHandle> {
         Self::lookup_ci(&self.warheads, id).copied()
+    }
+
+    /// The warhead `handle` names in this set, which made it.
+    pub(crate) fn warhead_by_handle(&self, handle: WarheadHandle) -> &WarheadType {
+        &self.warhead_types[handle.0 as usize]
     }
 
     /// The warhead [`Self::warhead`] answers for `id`, to rewrite. Its
@@ -8284,9 +8333,7 @@ impl RuleSet {
             weapon.id,
             parts.warhead
         );
-        parts
-            .warhead
-            .map(|handle| &self.warhead_types[handle.0 as usize])
+        parts.warhead.map(|handle| self.warhead_by_handle(handle))
     }
 
     /// Phobos `[InsigniaTypes]` catalog.
@@ -8402,31 +8449,29 @@ impl RuleSet {
         &self.placement_preview_globals
     }
 
-    /// The player-colour conversion this rules load selects.
+    /// The player-colour conversion this rules load selects and the colours
+    /// its lobby lists.
     ///
     /// A build without the `phobos` feature reads no
-    /// `[General] SkirmishUnlimitedColors=` and always answers the vanilla
-    /// eight-priority table, so callers need no `cfg`.
+    /// `[General] SkirmishUnlimitedColors=`, so callers need no `cfg`.
     pub fn skirmish_colors(&self) -> crate::rules::skirmish_colors::SkirmishColorMode {
-        #[cfg(feature = "phobos")]
-        {
-            self.skirmish_color_mode
-        }
-        #[cfg(not(feature = "phobos"))]
-        {
-            crate::rules::skirmish_colors::SkirmishColorMode::VANILLA
-        }
+        self.skirmish_color_mode
     }
 
     /// Look up a projectile by ID (case-insensitive, gamemd parity).
     pub fn projectile(&self, id: &str) -> Option<&ProjectileType> {
         self.projectile_handle(id)
-            .map(|handle| &self.projectile_types[handle.0 as usize])
+            .map(|handle| self.projectile_by_handle(handle))
     }
 
     /// The handle of the projectile [`Self::projectile`] answers for `id`.
-    fn projectile_handle(&self, id: &str) -> Option<ProjectileHandle> {
+    pub(crate) fn projectile_handle(&self, id: &str) -> Option<ProjectileHandle> {
         Self::lookup_ci(&self.projectiles, id).copied()
+    }
+
+    /// The projectile `handle` names in this set, which made it.
+    pub(crate) fn projectile_by_handle(&self, handle: ProjectileHandle) -> &ProjectileType {
+        &self.projectile_types[handle.0 as usize]
     }
 
     /// The projectile [`Self::projectile`] answers for `id`, to rewrite. Its
@@ -8485,6 +8530,15 @@ impl RuleSet {
     /// sensitive to scalar value overrides, not just the type-registry lists.
     pub fn source_ini_hash(&self) -> u64 {
         self.source_ini_hash
+    }
+
+    /// Whether Ares plays in this game: its Rules layers or map hold an Ares
+    /// key, or the game ships `ares.mix` (`rules::ares_switch`). Sim and
+    /// presentation read this one answer. A release build keeps it off until
+    /// the `ares` feature is gone (`ares_switch::LIVE`).
+    #[inline]
+    pub fn ares(&self) -> bool {
+        self.ares
     }
 
     /// Resolve one retained palette request. Ares715857->715876 removes
@@ -8755,6 +8809,9 @@ impl RuleSet {
                 .map(|(id, country)| (id, &country.veteran_types)),
         )
         .hash(&mut hasher);
+        // Peers must list the same lobby colours and draw a priority alike.
+        b"skirmish-colors-v1".hash(&mut hasher);
+        self.skirmish_color_mode.hash(&mut hasher);
         // Which plant a computer house splices is simulation state.
         #[cfg(feature = "ares")]
         {
@@ -8847,8 +8904,6 @@ impl RuleSet {
             self.digital_display_globals.hash(&mut hasher);
             b"phobos-placement-preview-v1".hash(&mut hasher);
             self.placement_preview_globals.hash(&mut hasher);
-            b"phobos-skirmish-colors-v1".hash(&mut hasher);
-            self.skirmish_color_mode.hash(&mut hasher);
             self.object_list
                 .iter()
                 .map(|object| {
@@ -8879,7 +8934,13 @@ impl RuleSet {
         // matches this binary. Include that immutable build identity even if
         // the selected INIs contain no extension keys.
         b"rules-build-compatibility-v1".hash(&mut hasher);
-        crate::rules::ARES_ENABLED.hash(&mut hasher);
+        crate::rules::ARES_BUILD.hash(&mut hasher);
+        // The game's Ares switch: two peers or a replay with the same layers
+        // but another `ares.mix` answer play different games. Folded only
+        // when Ares plays, so a stock game's hash stays as it was.
+        if self.ares {
+            b"ares-plays-v1".hash(&mut hasher);
+        }
         #[cfg(feature = "ares")]
         {
             b"ares-global-controls-v1".hash(&mut hasher);
@@ -10042,6 +10103,7 @@ impl RuleSet {
         self.unit_shp_read_states.hash(&mut hasher);
         self.effect_assets.hash(&mut hasher);
         self.voxel_assets.hash(&mut hasher);
+        self.voxel_model_plan.hash(&mut hasher);
         self.buildup_assets.hash(&mut hasher);
         self.rubble_assets.hash(&mut hasher);
         self.terrain_assets.hash(&mut hasher);
@@ -11572,8 +11634,8 @@ impl RuleSet {
         id: &str,
     ) -> bool {
         self.object_category_index
-            .get(&(category, id.to_ascii_uppercase()))
-            .is_some_and(|handle| self.ares_prerequisite_alternates.contains(handle))
+            .get(category, id)
+            .is_some_and(|handle| self.ares_prerequisite_alternates.contains(&handle))
     }
 
     /// Resolve BuildingType FreeUnit, read by Grand_Opening446AA9. The native
@@ -11917,6 +11979,25 @@ impl RuleSet {
         );
         self.voxel_assets =
             crate::rules::voxel_asset_catalog::VoxelAssetCatalog::bind(self, asset_manager);
+    }
+
+    pub fn loaded_voxel_model(
+        &self,
+        type_id: &str,
+    ) -> Option<&crate::rules::voxel_asset_catalog::LoadedVoxelModel> {
+        let object = self.object(type_id)?;
+        self.voxel_assets.model(object.category, &object.id)
+    }
+
+    pub fn voxel_anim_model(
+        &self,
+        id: VoxelAnimTypeId,
+    ) -> Option<&crate::rules::voxel_asset_catalog::VoxelPart> {
+        self.voxel_assets.voxel_anim(id.0 as usize)
+    }
+
+    pub(crate) fn voxel_models_bound(&self) -> bool {
+        self.voxel_assets.is_bound()
     }
 
     /// Techno6F9E10's loaded-main-VXL predicate for the type `object` names,
@@ -12388,25 +12469,17 @@ fn project_country_side_registry<'a>(
 /// systems, because `DebrisTypes=` and `Spawns=` resolve by name and the ids
 /// are hashed.
 ///
-/// RESIDUAL: RulesClass::ReadVoxelAnims (`0x00672920`) allocates a type for
-/// every listed name through FindOrAllocate (`0x0074B960`), section or not;
-/// VERA skips an entry without a section, which shifts later ids and leaves a
-/// `DebrisTypes=` reference to it unresolved. Every retail entry has a
-/// section.
-fn parse_voxel_anim_types(ini: &IniFile) -> (Vec<VoxelAnimType>, HashMap<String, VoxelAnimTypeId>) {
-    let ids: Vec<String> = parse_registry(ini, "VoxelAnims");
-    let mut types: Vec<VoxelAnimType> = Vec::with_capacity(ids.len());
-    let mut by_name: HashMap<String, VoxelAnimTypeId> = HashMap::with_capacity(ids.len());
-    for id in &ids {
-        let Some(section) = ini.section(id) else {
-            log::trace!(
-                "VoxelAnimType '{}' listed in [VoxelAnims] but has no section",
-                id
-            );
-            continue;
-        };
-        by_name.insert(id.to_ascii_uppercase(), VoxelAnimTypeId(types.len() as u32));
-        types.push(VoxelAnimType::from_ini_section(id, section));
+/// Native ReadVoxelAnims672920 allocates every listed identity, including
+/// constructor-only entries; the retained processor supplies that exact order.
+fn parse_voxel_anim_types(
+    processed: &ProcessedRulesLayers,
+) -> (Vec<VoxelAnimType>, HashMap<String, VoxelAnimTypeId>) {
+    let types: Vec<_> = processed.voxel_anim_type_projections().collect();
+    let mut by_name = HashMap::new();
+    for (index, kind) in types.iter().enumerate() {
+        by_name
+            .entry(kind.name.to_ascii_uppercase())
+            .or_insert(VoxelAnimTypeId(index as u32));
     }
     (types, by_name)
 }
@@ -12577,7 +12650,7 @@ mod tests {
             RuleSet::from_processed_rules(&layers.process().unwrap()).unwrap()
         };
         let rules = make("Area Guard");
-        let expected = crate::rules::ARES_ENABLED.then_some(MissionType::AreaGuard);
+        let expected = crate::rules::ARES_BUILD.then_some(MissionType::AreaGuard);
         assert_eq!(rules.ares_emp_ai_recover_mission(), expected);
         let retained_hash = rules.simulation_config_hash();
         let mut changed = make("Hunt");
@@ -12588,11 +12661,11 @@ mod tests {
         changed.source_ini_hash = rules.source_ini_hash;
         assert_eq!(
             changed.ares_emp_ai_recover_mission(),
-            crate::rules::ARES_ENABLED.then_some(MissionType::Hunt)
+            crate::rules::ARES_BUILD.then_some(MissionType::Hunt)
         );
         assert_eq!(
             retained_hash == changed.simulation_config_hash(),
-            !crate::rules::ARES_ENABLED
+            !crate::rules::ARES_BUILD
         );
         let fresh = RuleSet::from_processed_rules(
             &RulesLayerStack::new(IniFile::from_str(
@@ -17667,6 +17740,10 @@ Projectile=Invisible
 #[cfg(test)]
 #[path = "map_lighting_tests.rs"]
 mod map_lighting_tests;
+
+#[cfg(test)]
+#[path = "name_lookup_tests.rs"]
+mod name_lookup_tests;
 
 #[cfg(test)]
 #[path = "global_promotion_tests.rs"]

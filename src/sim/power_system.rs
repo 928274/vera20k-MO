@@ -37,10 +37,15 @@ impl PowerHealthSample {
         self.0
     }
 
+    /// Whether [`Self::sample`] of `current` changes the sample.
+    pub(crate) const fn differs(self, current: i32) -> bool {
+        self.0 != current
+    }
+
     /// Sample `current`: answers whether it changed, which invalidates the
     /// owning House's power.
     pub(crate) fn sample(&mut self, current: i32) -> bool {
-        if self.0 == current {
+        if !self.differs(current) {
             return false;
         }
         self.0 = current;
@@ -527,7 +532,7 @@ pub(crate) fn building_power_drain(
         return 0;
     };
     let mut drain = native_building_power_drain(object.power);
-    if entity.gap_generator.supercharged() {
+    if entity.building.gap_generator.supercharged() {
         drain = drain.wrapping_add(object.extra_power.drain());
     }
     let upgrades = entity.building_upgrades();

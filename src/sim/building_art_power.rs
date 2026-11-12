@@ -161,7 +161,7 @@ impl Simulation {
         entity: &crate::sim::game_entity::GameEntity,
     ) -> bool {
         #[cfg(feature = "ares")]
-        if object.needs_engineer && !entity.building_has_engineer.is_set() {
+        if object.needs_engineer && !entity.building.building_has_engineer.is_set() {
             return true;
         }
         let _ = entity;
@@ -765,6 +765,7 @@ mod tests {
             let entity = sim.substrate.entities.get_mut(id).unwrap();
             entity.building_art.actually_placed = true;
             entity
+                .building
                 .building_last_operational
                 .set_for_test(i["old"].as_bool().unwrap());
             let owner = entity.owner();
@@ -788,7 +789,7 @@ mod tests {
             );
             let entity = sim.entities().get(id).unwrap();
             assert_eq!(
-                entity.building_last_operational.is_operational(),
+                entity.building.building_last_operational.is_operational(),
                 o["operational"].as_bool().unwrap(),
                 "sample row {index}"
             );

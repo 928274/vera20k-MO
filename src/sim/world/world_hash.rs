@@ -449,14 +449,21 @@ mod shared_dummy_bridge_hash_tests {
 /// raw latch/state dword, and signed timer dword is folded explicitly in the
 /// snapshot schema order. Current compatibility projections remain ordinary
 /// named writers until the production authority crosswalk is complete.
-fn hash_mission_com(mission: &crate::sim::mission::MissionCom, hasher: &mut impl Hasher) {
+///
+/// `owed_visits` are the `+0xC4` increments a sleeping object has not taken
+/// yet (`world::idle_sleep`); the hash reads the counter as settled.
+fn hash_mission_com(
+    mission: &crate::sim::mission::MissionCom,
+    owed_visits: u32,
+    hasher: &mut impl Hasher,
+) {
     mission.current().raw().hash(hasher);
     mission.suspended().raw().hash(hasher);
     mission.queued().raw().hash(hasher);
     mission.movement_bypass_latch().hash(hasher);
     mission.handler_state().hash(hasher);
     mission.mission_start_frame().hash(hasher);
-    mission.ai_counter().hash(hasher);
+    mission.ai_counter().wrapping_add(owed_visits).hash(hasher);
     mission.dispatch_timer().start_frame().hash(hasher);
     mission.dispatch_timer().delay().hash(hasher);
 }
@@ -1181,6 +1188,9 @@ impl Simulation {
             for particle in sys.particles() {
                 hash_particle(particle, hasher);
             }
+            if let Some(ext) = sys.ares() {
+                ext.hash_state(hasher);
+            }
         }
         let retiring = self.particle_systems().detached_particles();
         if retiring.len() != 0 {
@@ -1563,7 +1573,7 @@ impl Simulation {
         1u8.hash(hasher);
         let mut entries: Vec<_> = grid
             .iter_occupied()
-            .map(|(rx, ry, c)| (rx, ry, c.type_id, c.footprint_origin, c.frame_offset))
+            .map(|(rx, ry, c)| (rx, ry, c.type_id, c.frame_offset))
             .collect();
         entries.sort();
         entries.len().hash(hasher);
@@ -1655,12 +1665,28 @@ impl Simulation {
     fn entity_digests(&self, entities: &[&GameEntity]) -> Vec<u64> {
         let frame = self.session.binary_frame();
         let network = self.session.game_mode().is_network();
-        digests(entities, entities.len() >= 4096, |entity, hasher| {
-            hash_entity(entity, frame, hasher);
-            if network {
-                entity.discovery.hash_network(hasher);
-            }
-        })
+        // The visits each sleeper is owed, beside the entities: the callers
+        // pass the whole store in its own order. A partial list looks each
+        // one up instead.
+        let store = &self.substrate.entities;
+        let mut owed = store.owed_in_value_order();
+        if owed.len() != entities.len() {
+            owed = entities
+                .iter()
+                .map(|entity| store.owed_visits(entity.stable_id()))
+                .collect();
+        }
+        let entities: Vec<(&GameEntity, u32)> = entities.iter().copied().zip(owed).collect();
+        digests(
+            &entities,
+            entities.len() >= 4096,
+            |&(entity, owed), hasher| {
+                hash_entity_owed(entity, frame, owed, hasher);
+                if network {
+                    entity.discovery.hash_network(hasher);
+                }
+            },
+        )
     }
 
     /// Hash all entity components in stable-entity-ID order, as the digests
@@ -1750,7 +1776,8 @@ fn hash_particle(p: &crate::sim::particles::Particle, hasher: &mut impl Hasher) 
 
 /// One entity's components, in the order the state hash folds them.
 /// `frame` is the binary frame the pending timers measure against.
-fn hash_entity(entity: &GameEntity, frame: u32, hasher: &mut StateHasher) {
+/// `owed_visits` are the visits its sleep still owes it (`world::idle_sleep`).
+fn hash_entity_owed(entity: &GameEntity, frame: u32, owed_visits: u32, hasher: &mut StateHasher) {
     entity.stable_id().hash(hasher);
     if entity.production_start_price() != 0 {
         // Techno+300 survives factory release and can suppress FreeUnit at
@@ -1807,12 +1834,12 @@ fn hash_entity(entity: &GameEntity, frame: u32, hasher: &mut StateHasher) {
         0x5c4_u32.hash(hasher);
         entity.mega_mission.hash(hasher);
     }
-    if entity.has_been_captured.is_set() {
+    if entity.building.has_been_captured.is_set() {
         // Building+6E3: doubles the survivor divisor, widens the
         // survivor roll and skips the engineer roll at death.
         0x6e3_u32.hash(hasher);
     }
-    if entity.no_survivor.is_set() {
+    if entity.building.no_survivor.is_set() {
         // Building+6E0 (CRC `0x00454407`): no survivor leaves the building
         // that outlived its killing blow.
         0x6e0_u32.hash(hasher);
@@ -1977,9 +2004,9 @@ fn hash_entity(entity: &GameEntity, frame: u32, hasher: &mut StateHasher) {
         b"unit-firing-counter-v1".hash(hasher);
         entity.unit_firing_counter.hash(hasher);
     }
-    if !entity.tesla_charge.is_default() {
+    if !entity.building.tesla_charge.is_default() {
         b"building-tesla-charge-v1".hash(hasher);
-        entity.tesla_charge.hash(hasher);
+        entity.building.tesla_charge.hash(hasher);
     }
     if entity.tesla_charger.is_active() {
         b"foot-tesla-charger-v1".hash(hasher);
@@ -2005,7 +2032,7 @@ fn hash_entity(entity: &GameEntity, frame: u32, hasher: &mut StateHasher) {
         b"building-storage-v1".hash(hasher);
         entity.building_art.storage().hash(hasher);
     }
-    if entity.building_last_operational.is_operational() {
+    if entity.building.building_last_operational.is_operational() {
         b"building-operational-v1".hash(hasher);
     }
     if !entity.building_art.stuff_enabled() {
@@ -2017,14 +2044,14 @@ fn hash_entity(entity: &GameEntity, frame: u32, hasher: &mut StateHasher) {
         b"building-online-latch-off-v1".hash(hasher);
     }
     #[cfg(feature = "ares")]
-    if entity.building_online.ares_toggled_off() {
+    if entity.building.building_online.ares_toggled_off() {
         b"ares-building-toggled-off-v1".hash(hasher);
     }
     #[cfg(feature = "ares")]
     if entity.building_art.free_units_done() {
         b"ares-building-free-units-done-v1".hash(hasher);
     }
-    if entity.building_has_engineer.is_set() {
+    if entity.building.building_has_engineer.is_set() {
         b"building-has-engineer-v1".hash(hasher);
     }
     // Native Building ComputeCRC4542E0 includes the retained +53C value,
@@ -2061,7 +2088,7 @@ fn hash_entity(entity: &GameEntity, frame: u32, hasher: &mut StateHasher) {
     }
     // Building+662 and Techno+1C8 (`sim::powered_unit`), folded only
     // while set.
-    if entity.building_powered_center.is_counted() {
+    if entity.building.building_powered_center.is_counted() {
         b"building-powered-center-v1".hash(hasher);
     }
     if entity.deactivated.is_offline() {
@@ -2082,6 +2109,11 @@ fn hash_entity(entity: &GameEntity, frame: u32, hasher: &mut StateHasher) {
     if !entity.sensor_array_counter.is_zero() {
         b"ares-sensor-array-counter-v1".hash(hasher);
         entity.sensor_array_counter.hash(hasher);
+    }
+    #[cfg(feature = "ares")]
+    if !entity.ares_dock_reload_timers.is_empty() {
+        b"ares-dock-reload-timers-v1".hash(hasher);
+        entity.ares_dock_reload_timers.hash(hasher);
     }
     #[cfg(feature = "ares")]
     if !entity.ares_firestorm_wall.is_zero() {
@@ -2196,10 +2228,10 @@ fn hash_entity(entity: &GameEntity, frame: u32, hasher: &mut StateHasher) {
         entity.ai_sell_repair.ai_sellable().hash(hasher);
     }
     if entity.category() == crate::map::entities::EntityCategory::Structure {
-        entity.repairing.is_on().hash(hasher);
+        entity.building.repairing.is_on().hash(hasher);
         entity.ai_sell_repair.ai_repairable().hash(hasher);
     }
-    let ai_placement_timer = entity.ai_placement_timer.timer();
+    let ai_placement_timer = entity.building.ai_placement_timer.timer();
     if ai_placement_timer != crate::sim::timer::CdTimer::default() {
         b"ai-placement-timer-v1".hash(hasher);
         ai_placement_timer.hash(hasher);
@@ -2212,9 +2244,9 @@ fn hash_entity(entity: &GameEntity, frame: u32, hasher: &mut StateHasher) {
     entity.damage_fires.anim_ids().hash(hasher);
     entity.sight.range().hash(hasher);
     entity.sight_refresh_timers.hash(hasher);
-    if entity.gap_generator != crate::sim::world::GapGeneratorRuntime::default() {
+    if entity.building.gap_generator != crate::sim::world::GapGeneratorRuntime::default() {
         b"gap-operational-v144".hash(hasher);
-        entity.gap_generator.hash(hasher);
+        entity.building.gap_generator.hash(hasher);
     }
 
     {
@@ -2329,8 +2361,12 @@ fn hash_entity(entity: &GameEntity, frame: u32, hasher: &mut StateHasher) {
         .runtime_bridge_transition
         .pending_mismatch()
         .hash(hasher);
-    entity.building_light.spotlight_capable().hash(hasher);
-    entity.building_light.light().hash(hasher);
+    entity
+        .building
+        .building_light
+        .spotlight_capable()
+        .hash(hasher);
+    entity.building.building_light.light().hash(hasher);
     entity.low_bridge_tube_state.hash(hasher);
     entity.stealth_ability.granted().hash(hasher);
     #[cfg(feature = "ares")]
@@ -2373,10 +2409,10 @@ fn hash_entity(entity: &GameEntity, frame: u32, hasher: &mut StateHasher) {
     entity.rearm_timer.start_frame().hash(hasher);
     entity.rearm_timer.duration().hash(hasher);
     entity.weapon_burst.hash(hasher);
-    entity.pending_building_fire.pending().hash(hasher);
-    if entity.prism_support_count.count() != 0 {
+    entity.building.pending_building_fire.pending().hash(hasher);
+    if entity.building.prism_support_count.count() != 0 {
         b"prism-support-count-v1".hash(hasher);
-        entity.prism_support_count.count().hash(hasher);
+        entity.building.prism_support_count.count().hash(hasher);
     }
     #[cfg(feature = "ares")]
     entity.ares_prism.hash_state(hasher);
@@ -2399,7 +2435,7 @@ fn hash_entity(entity: &GameEntity, frame: u32, hasher: &mut StateHasher) {
     }
 
     entity.hash_capture_infantry_type(hasher);
-    match entity.pending_c4_detonation.pending() {
+    match entity.building.pending_c4_detonation.pending() {
         Some(pending) => {
             true.hash(hasher);
             pending.timer().remaining(frame as i32).hash(hasher);
@@ -2419,8 +2455,8 @@ fn hash_entity(entity: &GameEntity, frame: u32, hasher: &mut StateHasher) {
     entity.bunker.occupant().hash(hasher);
     // Reciprocal link + install machine are authoritative lifecycle state.
     entity.bunker.link().hash(hasher);
-    entity.bunker_runtime.hash(hasher);
-    if let Some(gate) = entity.building_gate {
+    entity.building.bunker_runtime.hash(hasher);
+    if let Some(gate) = entity.building.building_gate {
         1u8.hash(hasher);
         gate.hash_state(hasher);
     } else {
@@ -2678,7 +2714,7 @@ fn hash_entity(entity: &GameEntity, frame: u32, hasher: &mut StateHasher) {
         0u8.hash(hasher);
     }
 
-    hash_mission_com(&entity.mission, hasher);
+    hash_mission_com(&entity.mission, owed_visits, hasher);
     hash_mission_leaf(&entity.mission_leaf, hasher);
     if let Some(post) = entity.patrol_post.cell() {
         b"foot-patrol-post-v1".hash(hasher);
@@ -3131,19 +3167,20 @@ mod lifecycle_hash_tests {
                 entity.death.set_dying_for_test(!entity.death.is_dying());
             });
             assert_entity_mutation_changes_hash(|entity| {
+                let eligible = entity.removal_facts.dirty_rect_eligible();
                 entity
                     .removal_facts
-                    .set_dirty_rect_eligible_for_test(!entity.removal_facts.dirty_rect_eligible());
+                    .set_dirty_rect_eligible_for_test(!eligible);
             });
             assert_entity_mutation_changes_hash(|entity| {
+                let recorded = entity.kill_record.is_recorded();
                 entity
                     .kill_record
-                    .set_destruction_recorded_for_test(!entity.kill_record.is_recorded());
+                    .set_destruction_recorded_for_test(!recorded);
             });
             assert_entity_mutation_changes_hash(|entity| {
-                entity
-                    .removal_facts
-                    .set_occupier_for_test(!entity.removal_facts.occupier());
+                let occupier = entity.removal_facts.occupier();
+                entity.removal_facts.set_occupier_for_test(!occupier);
             });
             assert_entity_mutation_changes_hash(|entity| {
                 entity.set_in_playfield(!entity.in_playfield());
@@ -4582,7 +4619,6 @@ mod smudge_hash_tests {
                 3,
                 SmudgeCell {
                     type_id: Some(0),
-                    footprint_origin: Some((2, 3)),
                     frame_offset: 0,
                 },
             );
@@ -4765,6 +4801,7 @@ mod c4_hash_tests {
             .entities
             .get_mut(id)
             .unwrap()
+            .building
             .pending_c4_detonation
             .set_for_test(Some(PendingC4Detonation::new(
                 crate::sim::timer::CdTimer::started(100, 30),

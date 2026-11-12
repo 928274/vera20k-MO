@@ -478,7 +478,12 @@ fn record_last_built_enforces_map_authored_negative_limit() {
         super::can_build::can_build(&sim, rules, owner, e2, true, true),
         super::can_build::CanBuild::Yes
     );
-    assert!(!super::can_build::check_build_limit(&sim, rules, owner, e2));
+    // Ares 10024F80 (hook 0x50B370) also wants a usable factory, and this
+    // house owns none.
+    assert_eq!(
+        super::can_build::check_build_limit(&sim, rules, owner, e2),
+        crate::rules::ARES_BUILD
+    );
 
     let product = sim
         .construct_object_limbo_at_height(
@@ -3941,8 +3946,8 @@ fn held_build_limit_two_building_accepts_a_second_queued_copy() {
         "and the same object is the factory's count_total"
     );
     assert!(
-        super::can_build::check_build_limit(&sim, &rules, owner, gapowr),
-        "the native CheckBuildLimit keeps its double-counted answer"
+        !super::can_build::check_build_limit(&sim, &rules, owner, gapowr),
+        "Ares' CheckBuildLimit hook counts the held object once less itself"
     );
     assert!(
         !super::can_build::check_build_limit_for_queue(&sim, &rules, owner, gapowr),

@@ -456,7 +456,7 @@ fn resolve_trigger_owner(
             // the stock ID-only lookup cannot bind those triggers and turns
             // them into a fixed-source refusal. Use the native trigger lookup
             // under the compiled Ares capability.
-            let resolved = if crate::rules::ARES_ENABLED {
+            let resolved = if crate::rules::ARES_BUILD {
                 rules.trigger_house_type_index(owner)
             } else {
                 rules.country_index(owner)

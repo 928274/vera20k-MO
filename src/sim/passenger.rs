@@ -633,7 +633,7 @@ enum Role {
     #[default]
     None,
     /// Entity owns a CargoClass hold.
-    Transport { cargo: PassengerCargo },
+    Transport { cargo: Box<PassengerCargo> },
     /// Entity is inside a transport (hidden from map, not targetable).
     Inside {
         transport_id: u64,
@@ -653,7 +653,9 @@ impl PassengerRole {
     /// The role of a Cargo carrier (`Passengers=`), with its empty hold.
     pub fn transport(cargo: PassengerCargo) -> Self {
         Self {
-            role: Role::Transport { cargo },
+            role: Role::Transport {
+                cargo: Box::new(cargo),
+            },
             occupants: BuildingOccupants::default(),
             transporter: None,
         }
@@ -691,27 +693,23 @@ impl PassengerRole {
 
     /// The whole carrier relation, for a caller that restores it.
     pub(crate) fn carrier_link(&self) -> Option<CarrierLink> {
-        let (Role::Inside {
-            transport_id,
-            open_topped,
-        }
-        | Role::Transport {
-            cargo:
-                PassengerCargo {
-                    carrier_relation:
-                        CarrierRelation::Inside {
-                            transport_id,
-                            open_topped,
-                        },
-                    ..
-                },
-        }) = &self.role
-        else {
-            return None;
+        let (transport_id, open_topped) = match &self.role {
+            Role::Inside {
+                transport_id,
+                open_topped,
+            } => (*transport_id, *open_topped),
+            Role::Transport { cargo } => match cargo.carrier_relation {
+                CarrierRelation::Inside {
+                    transport_id,
+                    open_topped,
+                } => (transport_id, open_topped),
+                CarrierRelation::Outside => return None,
+            },
+            Role::None => return None,
         };
         Some(CarrierLink {
-            transport_id: *transport_id,
-            open_topped: *open_topped,
+            transport_id,
+            open_topped,
         })
     }
 
@@ -806,7 +804,9 @@ impl PassengerRole {
             };
             let mut cargo = PassengerCargo::new(0, 0.0);
             cargo.carrier_relation = carrier_relation;
-            self.role = Role::Transport { cargo };
+            self.role = Role::Transport {
+                cargo: Box::new(cargo),
+            };
         }
         match &mut self.role {
             Role::Transport { cargo } => cargo,
@@ -1516,7 +1516,7 @@ fn receive_gunner(
         != 0;
     if substrate.temporal_receive_gunner(transport_id, pax_id) {
         if let Some(transport) = substrate.entities.get_mut(transport_id) {
-            transport.set_gunner_weapon(7, object);
+            transport.set_gunner_weapon(7, object, rules.ares());
         }
         if donor_rearming {
             rearm_transferred_gunner(
@@ -1537,7 +1537,7 @@ fn receive_gunner(
         .and_then(|passenger| interner.object_type(passenger.type_ref(), rules))
         .map_or(0, |passenger| passenger.ifv_mode);
     if let Some(transport) = substrate.entities.get_mut(transport_id) {
-        transport.set_gunner_weapon(mode, object);
+        transport.set_gunner_weapon(mode, object, rules.ares());
     }
 }
 
@@ -1650,7 +1650,7 @@ impl Simulation {
             );
         }
         if let Some(transport) = self.substrate.entities.get_mut(transport_id) {
-            transport.set_gunner_weapon(0, object);
+            transport.set_gunner_weapon(0, object, rules.ares());
         }
     }
 }

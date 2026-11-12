@@ -827,8 +827,6 @@ fn ares_disk_hit_flashes_and_plays_the_enabled_damage_anim() {
         );
         let mut runtime = SimRuntime {
             simulation: sim,
-            // Upstream's phase-3 runtime lends an Arc to the simulation
-            // worker; the stock (non-Ares) CI never compiles this fixture.
             resources: std::sync::Arc::new(SimResources {
                 rules,
                 overlay_registry: registry,

@@ -37,9 +37,9 @@ use crate::sim::world::ObjectSubstrate;
 /// Construction copies the fact, and a later Unlimbo recreates the light from
 /// the copy ([`Self::stamp`]). `BuildingClass::Unlimbo @
 /// 0x00441187` constructs the light after placement succeeds and
-/// `BuildingClass::Limbo` destroys it before the remaining building-count and
-/// base-node teardown; the light exists only for a placed `HasSpotlight=yes`
-/// building.
+/// `BuildingClass::Limbo @ 0x00445D81` UnInits it before the remaining
+/// building-count and base-node teardown, and the frame's drain deletes it;
+/// the building owns one only while placed with `HasSpotlight=yes`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BuildingLight {
     spotlight_capable: bool,
@@ -1329,7 +1329,6 @@ impl Simulation {
                     position.sub_y(),
                 ));
         }
-        self.reposition_building_anim_slots(stable_id, context.rules());
         #[cfg(any(test, feature = "test-support"))]
         self.trace_lifecycle_for_test(LifecycleTestEvent::RevealCoordinatesCommitted);
 
@@ -1489,7 +1488,7 @@ impl Simulation {
         // locomotor Put and precedes owner discovery4D722F. Declaration
         // membership alone requests the owner's existing House+1FC pass.
         let rules = context.rules();
-        if crate::rules::ARES_ENABLED
+        if context.rules.ares()
             && let Some(owner) = self.substrate.entities.get(stable_id).and_then(|entity| {
                 (entity.category() != EntityCategory::Structure
                     && rules.is_ares_prerequisite_alternate(
@@ -1766,7 +1765,18 @@ impl Simulation {
         // 0x00440D07..0x00440D2D above; only House AI reads the marks.
         self.mark_building_base_reservation_with_arg(stable_id, false, context);
         self.light_building_at_unlimbo(stable_id, context);
+        // Residual: 0x00440E02..0x00440E57. A LaserFencePost= building, in
+        // the world and not in limbo outside the placement scope
+        // (0x00A8E7AC), extends fence sections toward the posts in its four
+        // directions (0x00452DC0 with 0, 2, 4, 6) and reconnects
+        // (0x004533A0(1)). VERA has no fence sections: a mod's posts stand
+        // without a fence between them. No retail type is LaserFencePost=.
         self.discover_building_owner_after_unlimbo(stable_id, context);
+        // Residual: 0x00440E99..0x00440F5B. A type with NaturalParticleSystem=
+        // (Type+0x764) and no system yet (+0x30C) constructs one
+        // (0x0062DC50) at its location plus Type+0x768, owned by the
+        // building. Not ported: such a building shows no particles. No
+        // retail BuildingType sets the key.
         #[cfg(not(feature = "ares"))]
         self.construct_spotlight(stable_id, context.rules());
         // Unlimbo44119C clears this object's retained primary before
@@ -2137,7 +2147,7 @@ impl Simulation {
         // The live owner is read after Tag callbacks, before the conditional
         //1F4 notification; repeated discovery returned before either site.
         let rules = context.rules();
-        if crate::rules::ARES_ENABLED
+        if context.rules.ares()
             && let Some(owner) = self.substrate.entities.get(stable_id).and_then(|entity| {
                 (entity.category() != EntityCategory::Structure
                     && rules.is_ares_prerequisite_alternate(
@@ -2271,9 +2281,9 @@ impl Simulation {
             let Some(owner) = self.substrate.entities.get(id).map(|entity| entity.owner()) else {
                 return;
             };
+            // Usually empty, and then no list is allocated.
             let fresh: Vec<_> = self
-                .represented_player_maps()
-                .into_iter()
+                .network_player_maps()
                 .filter(|&viewer| !self.techno_discovered_by_viewer(id, viewer))
                 .collect();
             let Some(viewer) = fresh
@@ -2295,20 +2305,22 @@ impl Simulation {
             self.discover_techno_in_views(id, viewer, context, mask);
             return;
         }
-        for viewer in self.represented_player_maps() {
-            if let Some(cell) = cell_put
-                && !self.session.game_mode_nonzero()
-            {
-                let Some(terrain) = context.terrain().or(self.resolved_terrain.as_ref()) else {
-                    return;
-                };
-                let cells = crate::map::resolved_terrain::NativeCellQuery::canonical(terrain);
-                if crate::sim::vision::cell_is_shrouded(&self.fog, &cells, viewer, cell) {
-                    continue;
-                }
+        // Outside a network game one map is represented, so no list is built.
+        let Some(viewer) = self.offline_player_map() else {
+            return;
+        };
+        if let Some(cell) = cell_put
+            && !self.session.game_mode_nonzero()
+        {
+            let Some(terrain) = context.terrain().or(self.resolved_terrain.as_ref()) else {
+                return;
+            };
+            let cells = crate::map::resolved_terrain::NativeCellQuery::canonical(terrain);
+            if crate::sim::vision::cell_is_shrouded(&self.fog, &cells, viewer, cell) {
+                return;
             }
-            self.discover_techno(id, viewer, context);
         }
+        self.discover_techno(id, viewer, context);
     }
 
     /// `BuildingClass::Unlimbo @ 0x00440580` calls
@@ -2419,23 +2431,6 @@ impl Simulation {
         let hidden_profile = entity.type_facts.building_hidden_occupancy();
         let current_cell = (entity.position.rx(), entity.position.ry());
         let (width, height) = foundation.dimensions();
-        let mut intersections = Vec::with_capacity(usize::from(width) * usize::from(height));
-        for dy in 0..height {
-            for dx in 0..width {
-                let Some(rx) = current_cell.0.checked_add(dx) else {
-                    continue;
-                };
-                let Some(ry) = current_cell.1.checked_add(dy) else {
-                    continue;
-                };
-                intersections.push((rx, ry));
-            }
-        }
-        if let Some(smudge_grid) = self.smudge_grid.as_mut() {
-            smudge_grid.clear_intersecting_footprints(&intersections);
-        }
-        Self::flush_smudge_dirty(&mut self.smudge_grid, &mut self.dirty_cells);
-
         if let Some(layer) = layer {
             for &(rx, ry) in &cells {
                 self.substrate
@@ -2455,6 +2450,9 @@ impl Simulation {
                     )
                 })
             {
+                // A sleeping object reads its cell's hidden state only in a
+                // turn (`world::idle_sleep`).
+                self.substrate.entities.wake_all();
                 #[cfg(any(test, feature = "test-support"))]
                 self.trace_lifecycle_for_test(LifecycleTestEvent::HiddenOccupationEntered);
             }
@@ -2474,6 +2472,45 @@ impl Simulation {
         // Cell Recalc47D2B0 before returning. Keep the derived path view at
         // that boundary too; the marked structures remain its authority.
         self.publish_recalculated_cells(context.rules(), &cells);
+        // BuildingMark43F738 moves its retained animations after PlaceDown
+        // publishes the cells, before43F79B begins the smudge-clear scan.
+        self.reposition_building_anim_slots(stable_id, context.rules());
+        if let (Some(grid), Some(terrain)) =
+            (self.smudge_grid.as_mut(), self.resolved_terrain.as_ref())
+        {
+            // BuildingMark43F79B..43F91E follows PlaceDown, visits the full
+            // rectangle (including refinery holes), and clears by current
+            // SmudgeData/Width rather than a placement-time origin cache.
+            'sources: for dy in 0..height {
+                for dx in 0..width {
+                    let source = (
+                        (current_cell.0 as i16).wrapping_add(dx as i16),
+                        (current_cell.1 as i16).wrapping_add(dy as i16),
+                    );
+                    let cleared = grid.clear_footprint_identity_at(
+                        source,
+                        &context.rules().smudge_types,
+                        terrain,
+                        |identity, at, _| {
+                            // Cell4852D0 invalidates every target, including
+                            // already-empty overlaps, without a radar write.
+                            if matches!(
+                                identity,
+                                crate::map::cell_index::NativeCellIdentity::Real(_)
+                            ) {
+                                self.dirty_cells.mark_tactical((at.0 as u16, at.1 as u16));
+                            }
+                        },
+                    );
+                    if cleared.is_none() {
+                        // Native faults here on an invalid type/zero divisor.
+                        // Keep committed placement and earlier clear writes.
+                        log::debug!("BuildingMark stopped an invalid smudge clear");
+                        break 'sources;
+                    }
+                }
+            }
+        }
         self.substrate
             .entities
             .get(stable_id)
@@ -2800,6 +2837,7 @@ impl Simulation {
                     )
                 })
             {
+                self.substrate.entities.wake_all();
                 #[cfg(any(test, feature = "test-support"))]
                 self.trace_lifecycle_for_test(LifecycleTestEvent::HiddenOccupationExited);
             }
@@ -3231,17 +3269,32 @@ impl Simulation {
     }
 
     /// The kind of the object `stable_id` names, or `None` when no store
-    /// holds it. Object IDs are unique across stores, so the probe order
-    /// ([`ObjectKind::ALL`]) is only a cost: entities first, as most Logic
-    /// slots are, and particles last, as finding one walks the systems.
+    /// holds it. Object IDs are unique across stores, so the probe order is
+    /// only a cost: entities and anims first, as most Logic slots are; then
+    /// the store the Logic list noted at the id's registration (a bullet's
+    /// every visit, and its retirement until it leaves Logic, ask here);
+    /// then the other stores in [`ObjectKind::ALL`]'s order, with particles
+    /// last, as finding one walks the systems. VERA-only: gamemd's objects
+    /// carry their class in their vtable.
     pub(crate) fn classify_object(&self, stable_id: u64) -> Option<ObjectKind> {
+        const COMMON: [ObjectKind; 2] = [ObjectKind::Entity, ObjectKind::Anim];
+        let holds = |kind| self.object_store_holds(kind, stable_id);
+        if let Some(kind) = COMMON.into_iter().find(|&kind| holds(kind)) {
+            return Some(kind);
+        }
+        if let Some(kind) = self.substrate.logic.kind_of(stable_id)
+            && holds(kind)
+        {
+            return Some(kind);
+        }
         ObjectKind::ALL
             .into_iter()
-            .find(|&kind| self.object_store_holds(kind, stable_id))
+            .filter(|kind| !COMMON.contains(kind))
+            .find(|&kind| holds(kind))
     }
 
     /// Whether `kind`'s store holds `stable_id`.
-    fn object_store_holds(&self, kind: ObjectKind, stable_id: u64) -> bool {
+    pub(super) fn object_store_holds(&self, kind: ObjectKind, stable_id: u64) -> bool {
         match kind {
             ObjectKind::Entity => self.substrate.entities.contains(stable_id),
             ObjectKind::Anim => self.substrate.anims.contains_key(stable_id),
@@ -3386,7 +3439,7 @@ impl Simulation {
         if !kind.joins_logic() {
             return false;
         }
-        if self.substrate.logic.try_push(stable_id).is_err() {
+        if self.substrate.logic.try_push(stable_id, kind).is_err() {
             return false;
         }
         #[cfg(any(test, feature = "test-support"))]
@@ -3990,7 +4043,9 @@ impl Simulation {
 
         // ObjectConceal5F4E98 invokes vt+0x11C here, before +81 Limbo is set
         // at5F4E9E (the same byte tested by the5F4D45 entry guard).
-        self.destroy_spotlight_for_parent(stable_id, context);
+        // BuildingClass::Limbo @ 0x00445D81 UnInits the light; its storage
+        // goes at the drain.
+        self.uninit_spotlight_for_parent_limbo(stable_id, context);
         Self::techno_clear_discovery_on_conceal(
             &self.session,
             &mut self.substrate,
@@ -4078,6 +4133,20 @@ impl Simulation {
             .get(stable_id)
             .is_some_and(|entity| !entity.lifecycle.in_limbo)
         {
+            // BuildingClass::Limbo @ 0x00445880, 0x004458E4..0x00445903: the
+            // first step behind the same gates (not in limbo 0x004458C6, has
+            // a type 0x004458D4; every entity here has one). Each of the
+            // eight damage-fire Anims (+0x5C8) gets the ordinary deferred
+            // AnimClass::UnInit @ 0x004255B0 (vt+0xF8) and its slot is
+            // nulled; +0x5E8 is not written.
+            if self
+                .substrate
+                .entities
+                .get(stable_id)
+                .is_some_and(|entity| entity.category() == EntityCategory::Structure)
+            {
+                self.clear_building_damage_fire_slots(stable_id, context.rules());
+            }
             Self::update_house_tracking(
                 &mut self.substrate,
                 &mut self.houses,
@@ -4927,6 +4996,7 @@ impl Simulation {
         }
         listener.radio_contacts.iter_live().for_each(&mut name);
         listener
+            .building
             .tesla_charge
             .chargers()
             .iter()
@@ -4963,13 +5033,14 @@ impl Simulation {
             listener.damage_smoke_system_id.system(),
             listener.ammo().and_then(|ammo| ammo.dock()),
             listener
+                .building
                 .pending_c4_detonation
                 .pending()
                 .and_then(|pending| pending.source_entity_id()),
             listener.lift.target(),
             listener.lift.source(),
             listener.drop_credit.manipulated_by(),
-            listener.building_light.light(),
+            listener.building.building_light.light(),
         ]
         .into_iter()
         .flatten()
@@ -5548,6 +5619,7 @@ impl Simulation {
         let clear_passenger_role =
             hull_gone && listener.passenger_role.inside_transport_id() == Some(expired_id);
         let clear_c4_source = listener
+            .building
             .pending_c4_detonation
             .pending()
             .as_ref()
@@ -5558,7 +5630,11 @@ impl Simulation {
         let expire_mega_pointer = listener.mega_mission.references(expired_id);
         // Building44EA77 removes a charger for either control, irrespective
         // of the base target exemptions. Only later AI changes the weapon latch.
-        let clear_tesla_charger = listener.tesla_charge.chargers().contains(&expired_id);
+        let clear_tesla_charger = listener
+            .building
+            .tesla_charge
+            .chargers()
+            .contains(&expired_id);
         // BuildingPointerExpired44EAB8..44EB02 removes a matching Occupant
         // only inside ScenarioInit(A8E7AC), after inherited Techno cleanup.
         // It neither depends on removed/control nor rewrites the fire cursor.
@@ -5572,7 +5648,7 @@ impl Simulation {
         // BuildingPointerExpired44E932..44E93A clears its owned child for
         // either control, before that storage is physically removed.
         let clear_spotlight = listener.category() == EntityCategory::Structure
-            && listener.building_light.light() == Some(expired_id);
+            && listener.building.building_light.light() == Some(expired_id);
         if !(clear_suspended_target
             || clear_fire_system
             || clear_spark_system
@@ -5649,7 +5725,7 @@ impl Simulation {
             listener.passenger_role.clear_carrier_relation();
         }
         if clear_c4_source {
-            listener.pending_c4_detonation.forget_source();
+            listener.building.pending_c4_detonation.forget_source();
         }
         if expire_mega_pointer {
             listener
@@ -5657,10 +5733,10 @@ impl Simulation {
                 .pointer_expired(expired_id, expired_get_coords_cell);
         }
         if clear_tesla_charger {
-            listener.tesla_charge.pointer_expired(expired_id);
+            listener.building.tesla_charge.pointer_expired(expired_id);
         }
         if clear_spotlight {
-            listener.building_light.take();
+            listener.building.building_light.take();
         }
         if clear_occupant {
             listener
@@ -5950,17 +6026,45 @@ impl Simulation {
         if announce_to_bombs {
             Self::bomb_planter_expired(&mut self.substrate, &self.bombs, expired_id);
         }
+        // The three listener families below compare the expired object with
+        // what they hold and write only on a match. A team holds Technos and
+        // the Terrain object that blocks its path, a factory its product and
+        // a house the building it lost, so the end of any other object (a
+        // Bullet, a Particle, a Smudge) matches nothing in them: its
+        // broadcast skips their walks (VERA-only, results unchanged). A debug
+        // build under the live-read check still walks, and asserts that.
+        // RESIDUAL: restore checks no team target and no House+54E0, so a
+        // save edited by hand can make one name such an object. Its end then
+        // leaves the name where the walk cleared it, and a checked debug
+        // build asserts. The game's own saves never hold one; such a team
+        // would wait on an object that no longer exists.
+        let techno = self.substrate.entities.contains(expired_id);
+        let team_object = techno || self.terrain_objects.objects().contains_key(&expired_id);
+        let checked = crate::sim::touch_log::live_read_check_enabled();
         // `TeamClass::PointerExpired @ 0x006EAE60`, each team a listener.
-        self.team_script_vm
-            .pointer_expired(expired_id, control == PointerExpiryControl::Uninit);
-        // FactoryClass::PointerExpired4CA580 is a control-insensitive
-        // listener in Dispatch7258D0. Its only mutation clears a matching
-        // held product; no entity listener consumes that factory pointer.
-        self.production.factories_mut().pointer_expired(expired_id);
-        // `HouseClass::PointerExpired @ 0x004FB9B0`, each house a listener
-        // (`0x004F5FFB`), forgets House+54E0 whatever the control.
-        for house in self.houses.values_mut() {
-            house.forget_lost_building(expired_id);
+        if team_object || checked {
+            let named = self
+                .team_script_vm
+                .pointer_expired(expired_id, control == PointerExpiryControl::Uninit);
+            debug_assert!(
+                team_object || !named,
+                "a team named {expired_id}, which is neither a Techno nor a Terrain object"
+            );
+        }
+        if techno || checked {
+            // FactoryClass::PointerExpired4CA580 is a control-insensitive
+            // listener in Dispatch7258D0. Its only mutation clears a matching
+            // held product; no entity listener consumes that factory pointer.
+            let mut named = self.production.factories_mut().pointer_expired(expired_id);
+            // `HouseClass::PointerExpired @ 0x004FB9B0`, each house a listener
+            // (`0x004F5FFB`), forgets House+54E0 whatever the control.
+            for house in self.houses.values_mut() {
+                named |= house.forget_lost_building(expired_id);
+            }
+            debug_assert!(
+                techno || !named,
+                "a factory or a house named {expired_id}, which is no Techno"
+            );
         }
         let Some((
             expired_target_cell,
@@ -6056,8 +6160,11 @@ impl Simulation {
 
         // BuildingLight436A00; Ares1004EBC0 preserves a cloaking parent's
         // link on control0, while the target clear remains unconditional.
-        self.substrate
-            .spotlights_pointer_expired(expired_id, control == PointerExpiryControl::Uninit);
+        self.substrate.spotlights_pointer_expired(
+            expired_id,
+            control == PointerExpiryControl::Uninit,
+            context.rules.ares(),
+        );
 
         #[cfg(any(test, feature = "test-support"))]
         if let Some(smudge) = self
@@ -6126,7 +6233,7 @@ impl Simulation {
                 .projectiles
                 .get(expired_id)
                 .and_then(|bullet| bullet.payload().projectile_type())
-                .and_then(|type_id| context.rules().projectile(self.interner.resolve(type_id)))
+                .and_then(|type_id| self.interner.projectile_type(type_id, context.rules()))
                 .is_some_and(|kind| kind.scalable)
             && self.projectiles.scalable_enrolled(expired_id);
         #[cfg(any(test, feature = "test-support"))]
@@ -6282,7 +6389,7 @@ impl Simulation {
                 // 3.0 TechnoClass_PointerGotInvalid_SpawnCloakOwner (1004A910,
                 // hook 0x707B19) skips it for the manager's own owner unless
                 // it is removed, so a cloaking carrier keeps its spawns.
-                if !(cfg!(feature = "ares")
+                if !(context.rules.ares()
                     && control == PointerExpiryControl::DetachAll
                     && expired_id == listener_id)
                 {
@@ -6878,7 +6985,7 @@ impl Simulation {
             // before LeaveTeam/RemoveTracking. Every declared alternate
             // requests a pass, even while another copy remains tracked.
             let rules = context.rules();
-            if crate::rules::ARES_ENABLED
+            if context.rules.ares()
                 && let Some(owner) = self.substrate.entities.get(stable_id).and_then(|entity| {
                     rules
                         .is_ares_prerequisite_alternate(

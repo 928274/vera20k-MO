@@ -11,8 +11,10 @@ use crate::render::native_surface_format::{
     ACTIVE_RETAIL_RGB565_PRESENTATION, RGB565, interpolate_rgb8,
 };
 use crate::render::surface_line::{clip_line, patterned_line, solid_line};
+use crate::rules::ruleset::RuleSet;
 use crate::sim::components::DriveCoord;
-use crate::sim::world::{PlanningBadgeKind, PlanningDrawSegment};
+use crate::sim::intern::InternedId;
+use crate::sim::world::{PlanningBadgeKind, PlanningDrawSegment, Simulation};
 
 // Original static bytes836880;63D8B8 negates the presentation wall clock.
 const PATTERN: [u8; 16] = [1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0];
@@ -36,41 +38,37 @@ pub(super) fn build(
     let Some(viewer) = sim.session().current_house() else {
         return (out, highlights);
     };
-    let graph = sim.planning_draw_graph(
-        viewer,
-        crate::app::input::planning_mode::hover_node(state),
-        state.match_state.input.planning.highlighted_node(),
-    );
-    let phase = ((wall_ms as i32).wrapping_neg() >> 5) & 15;
-    let color = |owner, bright| {
-        let name = sim.interner().resolve(owner);
-        let index = state
-            .match_state
-            .match_presentation
-            .house_color_map
-            .get(name)
-            .copied()
-            .unwrap_or(crate::rules::house_colors::NO_REMAP);
-        let rgb = crate::render::palette_light::house_color_rgb(
-            &rt.resources.rules.house_color_ramps,
-            index,
-        );
-        if bright {
-            interpolate_rgb8(rgb, [255; 3], 100)
-        } else {
-            interpolate_rgb8(rgb, [0; 3], 80)
-        }
+    let Some(frame) = state.match_state.sim_runtime.frame() else {
+        return (out, highlights);
     };
+    // The captured graph has no hovered or highlighted node: those are
+    // local input, applied here to the nodes it holds.
+    let Some(graph) = frame
+        .scene
+        .planning
+        .as_ref()
+        .filter(|graph| graph.viewer == viewer)
+        .map(|graph| &graph.graph)
+    else {
+        return (out, highlights);
+    };
+    let node = |id: Option<u64>| id.and_then(|id| graph.nodes.iter().find(|node| node.id == id));
+    let hovered = node(crate::app::input::planning_mode::hover_node(state));
+    let highlighted = node(state.match_state.input.planning.highlighted_node());
+    let phase = stroke_phase(wall_ms);
+    let color = |owner, bright| stroke_rgb(state, sim, &rt.resources.rules, owner, bright);
     // A derived frame-local membership index avoids scanning the whole graph
     // once per badge in large selected groups. It dies with this projection.
-    let highlighted_members: std::collections::HashSet<_> =
-        graph.highlighted_members.iter().copied().collect();
+    let highlighted_members: std::collections::HashSet<_> = highlighted
+        .into_iter()
+        .flat_map(|node| node.members.iter().copied())
+        .collect();
     let badge_white = |actor_id| {
-        if graph.highlighted_node.is_some() {
+        if highlighted.is_some() {
             highlighted_members.contains(&actor_id)
         } else {
-            sim.entities()
-                .get(actor_id)
+            frame
+                .object(actor_id)
                 .is_some_and(|actor| actor.selection.is_selected())
         }
     };
@@ -241,7 +239,10 @@ pub(super) fn build(
     // grown by4 inline); retained AC4BF0 uses the node's8x8 rect
     // (GetSurfaceRect6345A0) grown twice by4 (Inflate6357D0), giving24x24.
     // Both draw three white outlines.
-    for (coord, size) in [(graph.hovered_coord, 16), (graph.highlighted_coord, 24)] {
+    for (coord, size) in [
+        (hovered.map(|node| node.coord), 16),
+        (highlighted.map(|node| node.coord), 24),
+    ] {
         if let Some(coord) = coord {
             let at = project(coord, view);
             for inset in 0..3 {
@@ -262,9 +263,39 @@ pub(super) fn build(
     (out, highlights)
 }
 
+/// The patterned strokes' phase: 63D8B8 negates the presentation wall clock.
+pub(super) fn stroke_phase(wall_ms: u32) -> i32 {
+    ((wall_ms as i32).wrapping_neg() >> 5) & 15
+}
+
+/// A house's stroke and marker colour: toward white for a stroke not yet
+/// committed, toward black otherwise.
+pub(super) fn stroke_rgb(
+    state: &AppState,
+    sim: &Simulation,
+    rules: &RuleSet,
+    owner: InternedId,
+    bright: bool,
+) -> [u8; 3] {
+    let name = sim.interner().resolve(owner);
+    let index = state
+        .match_state
+        .match_presentation
+        .house_color_map
+        .get(name)
+        .copied()
+        .unwrap_or(crate::rules::house_colors::NO_REMAP);
+    let rgb = crate::render::palette_light::house_color_rgb(&rules.house_color_ramps, index);
+    if bright {
+        interpolate_rgb8(rgb, [255; 3], 100)
+    } else {
+        interpolate_rgb8(rgb, [0; 3], 80)
+    }
+}
+
 /// `Planning__CoordsToSurfacePoint @ 0x006339E0`: `CoordsToClient2`, then
 /// the tactical view's surface offset.
-fn project(coord: DriveCoord, view: TacticalViewport) -> [i32; 2] {
+pub(super) fn project(coord: DriveCoord, view: TacticalViewport) -> [i32; 2] {
     let (x, y) = crate::util::lepton::absolute_leptons_to_screen(coord.x, coord.y, coord.z);
     [
         x as i32 - view.camera[0] + view.clip[0],
@@ -282,7 +313,7 @@ fn emit_rect(out: &mut Vec<SpriteInstance>, rect: [i32; 4], rgb: [u8; 3], view: 
     push_surface_rect(out, rect, tint(rgb), view);
 }
 
-fn emit_marker(
+pub(super) fn emit_marker(
     out: &mut Vec<SpriteInstance>,
     at: [i32; 2],
     size: i32,
@@ -311,7 +342,7 @@ fn emit_outline(
     emit_rect(out, [x + w - 1, y, 1, h], rgb, view);
 }
 
-fn emit_marker_outer(
+pub(super) fn emit_marker_outer(
     out: &mut Vec<SpriteInstance>,
     at: [i32; 2],
     size: i32,
@@ -401,7 +432,7 @@ fn emit_badge(
     }
 }
 
-fn emit_segment(
+pub(super) fn emit_segment(
     out: &mut Vec<SpriteInstance>,
     from: [i32; 2],
     to: [i32; 2],
@@ -428,7 +459,7 @@ fn emit_segment(
     }
 }
 
-fn emit_solid_segment(
+pub(super) fn emit_solid_segment(
     out: &mut Vec<SpriteInstance>,
     from: [i32; 2],
     to: [i32; 2],
