@@ -3145,6 +3145,63 @@ mod tests {
         assert!(sensed(&sim), "a detector over the dive admits the strip");
     }
 
+    /// The other half of MO's detector reveal: `TechnoClass::VisualCharacter
+    /// @ 0x00703860` answers 5 (hidden) for an enemy's full cloak with no
+    /// sensor, and 3 (seen as cloaked) under one. The SHP/voxel draw state
+    /// turns 3 into the 50% translucent blitter (`0x0070668F..0x00706700`),
+    /// i.e. a steady ghost, not an opaque flash. Lock the whole production
+    /// chain: fog sensor -> observer_draw_context -> Seen -> DrawState.
+    /// Native controls: tools/procedural_drawing_oracle/shroud.md.
+    #[test]
+    fn a_sensed_enemy_cloak_draws_a_steady_fifty_percent_ghost() {
+        use crate::render::draw_state::DrawState;
+        use crate::sim::cloak_disguise::CloakRuntime;
+        use crate::sim::world::display_layers::DisplayLayer;
+        use crate::sim::{combat::Health, game_entity::GameEntity, world::Simulation};
+
+        let mut sim = Simulation::new();
+        let player = sim.intern("Player");
+        let owner = sim.intern("Enemy");
+        *sim.fog_mut_for_test() = crate::sim::vision::FogState::new(32, 32);
+        sim.session_mut_for_test()
+            .set_current_house_for_test(Some(player));
+        let mut entity = GameEntity::new_at_frame_zero_for_test(
+            1,
+            20,
+            20,
+            0,
+            0,
+            owner,
+            Health::new(100),
+            sim.intern("SHADOW"),
+            EntityCategory::Unit,
+            0,
+            5,
+            false,
+        );
+        entity.lifecycle.set_in_limbo_for_test(false);
+        let mut cloak = CloakRuntime::new(0);
+        cloak.set_state_for_test(2);
+        entity.cloak = Some(Box::new(cloak));
+        sim.entities_mut_for_test().insert(entity);
+        sim.submit_object_display_for_test(1, DisplayLayer::GROUND, None);
+
+        let reveal = |sim: &Simulation| {
+            let frame = frame_of(sim);
+            let record = frame.object(1).unwrap();
+            DrawState::for_entity(record, 0, 0, record.seen.observer)
+        };
+        let hidden = reveal(&sim);
+        assert!(!hidden.visible, "an unsensed enemy cloak draws nothing");
+        sim.fog_mut_for_test().increment_sensor_at(player, 20, 20);
+        let ghost = reveal(&sim);
+        assert!(ghost.visible, "a sensor reveals the enemy cloak");
+        assert_eq!(
+            ghost.state.fx_params[0], 0.5,
+            "the revealed cloak keeps the native 50% translucency"
+        );
+    }
+
     /// One full-health tank on cell (20,20) and one viewer's fog plane. The
     /// revealed case has `is_cell_revealed` without `is_cell_visible`, the
     /// state `MapRevealProjection::Transient` leaves after a trigger reveal.
