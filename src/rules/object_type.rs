@@ -2707,6 +2707,15 @@ pub struct ObjectType {
     /// ReadBool0x5295F0 with the prior byte as its default on every rules pass.
     /// VXL shadow706BF3 and SHP shadow706052 consume the same type flag.
     pub no_shadow: bool,
+    /// `IsTilter=` — whether a Unit body takes its cell's terrain slope in
+    /// `Draw_Matrix`. gamemd carries the literal beside `CarriesCrate` and
+    /// `TooBigToFitUnderBridge` in its UnitType reader region (`0x00445F60`,
+    /// found at file offset 4_480_496 in the retail 4_816_864-byte image), and
+    /// stock data omits it, so the absent-key value is `true`: `[MTNK]
+    /// IsTilter=yes` restates the default. A type set to `no` draws the level
+    /// facing matrix on every ramp instead. This gates only the terrain slope,
+    /// never the rocking angles a Drive/Hover body carries separately.
+    pub is_tilter: bool,
     /// `Cloakable=` — copied into Unit/Infantry runtime cloak ability.
     pub cloakable: bool,
     /// `CloakingSpeed=` — signed frame duration between cloak progress steps.
@@ -5753,6 +5762,7 @@ impl ObjectType {
                 .read_int("DetectDisguiseRange", 0)
                 .clamp(0, u8::MAX as i32) as u8,
             no_shadow: section.read_bool("NoShadow", false),
+            is_tilter: section.read_bool("IsTilter", true),
             cloakable: section.read_bool("Cloakable", false),
             cloaking_speed: section.read_int("CloakingSpeed", 7),
             cloak_stop: section.read_bool("CloakStop", false),
@@ -7514,6 +7524,59 @@ mod tests {
             )
             .no_shadow
         );
+    }
+
+    /// `IsTilter=` gates the cell slope a Unit body's Draw_Matrix takes. Stock
+    /// data omits it from most sections (`[MTNK] IsTilter=yes` only restates
+    /// the default), so an absent key must answer `true`; MO authors `no` on
+    /// 21 vehicles that must stay level on a ramp.
+    #[test]
+    fn is_tilter_defaults_to_the_level_facing_matrix_and_reads_authored_no() {
+        use crate::rules::native_processing::{RulesLayerKind, RulesLayerStack};
+        use crate::rules::ruleset::RuleSet;
+
+        let absent = IniFile::from_str("[DEFAULTS]\nFixtureOnly=yes\n");
+        assert!(
+            ObjectType::from_ini_section(
+                "DEFAULTS",
+                absent.section("DEFAULTS").unwrap(),
+                ObjectCategory::Vehicle,
+            )
+            .is_tilter,
+            "an absent IsTilter= keeps the constructor default: tilting on"
+        );
+        for (source, expected) in [("IsTilter=yes", true), ("IsTilter=no", false)] {
+            let ini = IniFile::from_str(&format!("[GENERATED]\n{source}\n"));
+            assert_eq!(
+                ObjectType::from_ini_section(
+                    "GENERATED",
+                    ini.section("GENERATED").unwrap(),
+                    ObjectCategory::Vehicle,
+                )
+                .is_tilter,
+                expected,
+                "{source}"
+            );
+        }
+
+        // ReadBool keeps the prior byte for an invalid or empty value, the same
+        // way the native reader does for NoShadow.
+        let mut layers = RulesLayerStack::new(IniFile::from_str(
+            "[VehicleTypes]\n0=GENERATED\n[GENERATED]\nIsTilter=no\n",
+        ));
+        for (kind, patch, expected) in [
+            (RulesLayerKind::LangRule, "IsTilter=", false),
+            (RulesLayerKind::GameMode, "istilter=maybe", false),
+            (RulesLayerKind::Scenario, "IsTilter=yes", true),
+        ] {
+            layers.push(kind, IniFile::from_str(&format!("[GENERATED]\n{patch}\n")));
+            let rules = RuleSet::from_rules_layers(&layers).unwrap();
+            assert_eq!(
+                rules.object("GENERATED").unwrap().is_tilter,
+                expected,
+                "{patch}"
+            );
+        }
     }
 
     #[test]

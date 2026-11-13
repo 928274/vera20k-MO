@@ -64,6 +64,7 @@ fn body_slope(
         0,
         EntityDrawBand::Ground,
         angles,
+        true,
     )
 }
 

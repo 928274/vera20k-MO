@@ -281,7 +281,9 @@ fn unit_shadow_slope(
 /// The slope a Unit body's locomotor Draw_Matrix draws it at. `terrain`
 /// supplies the fallback's cell slope, `cells` is the draw's isolated query
 /// of the live map, and `angles` are the rocking angles the body is drawn
-/// with, the ones [`ground_pose_with_angles`] tilts it by.
+/// with, the ones [`ground_pose_with_angles`] tilts it by. `is_tilter` is the
+/// drawn type's `IsTilter=`: a `no` type answers the level slope whatever its
+/// locomotor cached, which keeps its rocking angles (they reach `angles`).
 fn unit_render_slope_state(
     terrain: Option<&crate::map::resolved_terrain::ResolvedTerrainGrid>,
     cells: Option<&crate::map::resolved_terrain::NativeCellQuery<'_>>,
@@ -289,8 +291,15 @@ fn unit_render_slope_state(
     display_binary_frame: u32,
     band: EntityDrawBand,
     angles: [f32; 2],
+    is_tilter: bool,
 ) -> UnitRenderSlopeState {
     use crate::rules::locomotor_type::LocomotorKind;
+    // `IsTilter=no` drops the terrain slope before the locomotor cache is
+    // consulted: the type's Draw_Matrix never takes a cell slope, so neither
+    // does its three-frame transition.
+    if !is_tilter {
+        return UnitRenderSlopeState::Stable(0);
+    }
     // Drive/Ship Draw_Matrix reads the locomotor-owned cache even when the
     // cached slope is zero. Terrain is only a compatibility fallback for
     // locomotor classes excluded from the native override pair.
@@ -673,11 +682,14 @@ pub(crate) fn unit_visitor<'a>(
                 }?;
                 // Render slope comes from the locomotor's cached previous/current
                 // slope during gamemd's 3-frame transition, then falls back to the
-                // stable terrain slope path.
-                let slope_state = render_pose
-                    .slope
-                    .map(render_slope_phase)
-                    .unwrap_or_else(|| {
+                // stable terrain slope path. `IsTilter=no` answers the level slope
+                // for both, so a captured transition is dropped as well.
+                let is_tilter = state
+                    .rules()
+                    .and_then(|rules| sim.interner().object_type(entity.type_ref(), rules))
+                    .is_none_or(|object| object.is_tilter);
+                let slope_state = if is_tilter {
+                    render_pose.slope.map(render_slope_phase).unwrap_or_else(|| {
                         unit_render_slope_state(
                             state.terrain_template(),
                             cells.as_ref(),
@@ -685,8 +697,12 @@ pub(crate) fn unit_visitor<'a>(
                             display_binary_frame,
                             band,
                             render_pose.angles,
+                            is_tilter,
                         )
-                    });
+                    })
+                } else {
+                    UnitRenderSlopeState::Stable(0)
+                };
                 // A lifted body's shadow (Jumpjet, Hover) goes through
                 // [`emit_lifted_unit_shadow`].
                 let shadow_slope = unit_shadow_slope(cells.as_ref(), entity);
@@ -3345,6 +3361,53 @@ mod tests {
             ),
             BodyDraw::Turret { .. }
         ));
+    }
+
+    /// `IsTilter=no` is a UnitType gate on the terrain slope alone: the body
+    /// draws the level facing matrix even though its Drive locomotor cached a
+    /// three-frame transition, while a tilting type keeps that transition and
+    /// its rocking angles still reach the pose arm.
+    #[test]
+    fn is_tilter_no_draws_the_level_slope_and_drops_a_captured_transition() {
+        use crate::sim::movement::slope_transition::SlopeRenderPhase;
+
+        let mut entity = GameEntity::test_default(1, "GENERATED", "Americans", 0, 0);
+        entity.set_category_for_test(EntityCategory::Unit);
+        entity.locomotor = Some(LocomotorState::for_test_kind(LocomotorKind::Drive));
+        let mut record = ObjectRecord::of_test(&entity);
+        record.place.slope_render_phase = Some(SlopeRenderPhase::Transition {
+            from_slope: 0,
+            to_slope: 3,
+            phase_num: 1,
+            phase_den: 3,
+        });
+
+        assert_eq!(
+            unit_render_slope_state(None, None, &record, 0, EntityDrawBand::Ground, [0.0; 2], true),
+            UnitRenderSlopeState::Transition {
+                from_slope: 0,
+                to_slope: 3,
+                phase_num: 1,
+                phase_den: 3
+            },
+            "a tilting type keeps the locomotor's transition"
+        );
+        let level =
+            unit_render_slope_state(None, None, &record, 0, EntityDrawBand::Ground, [0.0; 2], false);
+        assert_eq!(
+            level,
+            UnitRenderSlopeState::Stable(0),
+            "IsTilter=no answers the level slope whatever the locomotor cached"
+        );
+        assert_eq!(
+            stable_slope_for_key(level),
+            0,
+            "the level answer keys the flat atlas slot"
+        );
+        assert!(
+            ground_pose(&record, level, 0).is_none(),
+            "no ground pose page is drawn for a non-tilting type"
+        );
     }
 
     #[test]
