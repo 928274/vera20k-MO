@@ -795,6 +795,63 @@ pub(crate) fn shp_visitor<'a>(
             {
                 pieces.push(shadow);
             }
+            // A `Turret=yes` SHP Unit carries its turret in the same SHP: the
+            // thirty-two heading frames after the body blocks. Each frame is
+            // authored over the body canvas, so the turret shares the body's
+            // draw point, Z and policy and paints after it; no `TurretOffset`
+            // applies to an SHP turret. Retail ships no such unit, MO's
+            // Cyclops Walker (`CYCL`) does.
+            if entity.category() == EntityCategory::Unit
+                && let Some(turret) = rules
+                    .and_then(|rules| {
+                        rules.animation_sequence_in_category(
+                            entity.category().into(),
+                            &body_key.type_id,
+                        )
+                    })
+                    .and_then(|set| set.shp_vehicle_turret())
+            {
+                // The turret heading's top five bits index the 32-frame table
+                // (`SHP_TURRET_FACING_FRAMES`), the same quantisation a
+                // building's SHP turret anim uses.
+                let slot = u16::from(canonical_turret_facing(render_pose.turret)) >> 3;
+                let turret_key = ShpSpriteKey {
+                    frame: turret
+                        .start_frame
+                        .saturating_add(slot.min(turret.facings.saturating_sub(1))),
+                    ..body_key.clone()
+                };
+                if let Some(turret_entry) = atlas.get(&turret_key) {
+                    pieces.push(ObjectPieceInstance {
+                        target: ObjectTexture::ShpPage(turret_entry.page as usize),
+                        render_z: parent.policy.render_z,
+                        instance: SpriteInstance {
+                            position: [
+                                sx + turret_entry.offset_x,
+                                sy + turret_entry.offset_y,
+                            ],
+                            size: turret_entry.pixel_size,
+                            uv_origin: turret_entry.uv_origin,
+                            uv_size: turret_entry.uv_size,
+                            source_palette: turret_entry.source_palette,
+                            depth,
+                            tint: body_tint,
+                            palette_light: palette_light.with_colour_word(
+                                if parent.policy.ors_colour_word(turret_entry.extended) {
+                                    colour_word
+                                } else {
+                                    0
+                                },
+                            ),
+                            alpha: 1.0,
+                            draw_state,
+                            z_adjust,
+                            z_gradient,
+                            zshape_origin,
+                        },
+                    });
+                }
+            }
             ground_objects.push(PlannedObjectInstance::object(parent, pieces));
         }
 
