@@ -467,14 +467,36 @@ fn walk_path_timer_waits_without_double_aging_or_losing_owner_state() {
     }
 }
 
+/// [`drive_type_rules`] with `VERA20K.SmoothSlopeTransition=` set, so a Process
+/// tick can exercise either the original mid-transition restart or the
+/// smoothing retarget through the production path.
+fn drive_type_rules_with_slope_retarget(smooth: bool) -> crate::rules::ruleset::RuleSet {
+    crate::rules::ruleset::RuleSet::from_ini(&crate::rules::ini_parser::IniFile::from_str(
+        &format!(
+            "[General]\nVERA20K.SmoothSlopeTransition={}\n[VehicleTypes]\n0=HTNK\n1=MTNK\n2=DRIVE\n[HTNK]\nSpeed=6\nSpeedType=Track\n[MTNK]\nSpeed=6\nSpeedType=Track\n[DRIVE]\nSpeed=6\nSpeedType=Track\n",
+            if smooth { "yes" } else { "no" }
+        ),
+    ))
+    .unwrap()
+}
+
 fn drive_ship_slope_process_tick(
     sim: &mut Simulation,
     terrain: &crate::map::resolved_terrain::ResolvedTerrainGrid,
     native_frame: u32,
+    smooth: bool,
 ) {
     sim.resolved_terrain = Some(terrain.clone());
     crate::sim::arena_fixture::supply_native_map(sim);
-    gsi_04_05_tick_production_movement(sim, None, native_frame);
+    sim.session.set_tick_for_test(u64::from(native_frame));
+    sim.session.set_binary_frame_for_test(native_frame);
+    sim.process_ground_locomotor_for_test(
+        1,
+        Some(&drive_type_rules_with_slope_retarget(smooth)),
+        None,
+        None,
+    )
+    .unwrap();
 }
 
 fn slope_cell(rx: u16, slope_type: u8) -> crate::map::resolved_terrain::ResolvedTerrainCell {
@@ -518,56 +540,69 @@ fn drive_ship_slope_process_samples_stationary_retargets_and_keeps_rng() {
         vec![slope_cell(0, 5), slope_cell(1, 11)],
     );
     for kind in [LocomotorKind::Drive, LocomotorKind::Ship] {
-        let mut sim = Simulation::with_seed(0x510fe);
-        let mut entity = GameEntity::test_default(1, "SLOPE", "Americans", 0, 0);
-        entity.set_owner_for_test(sim.intern("Americans"));
-        entity.set_type_ref_for_test(sim.intern("SLOPE"));
-        entity.locomotor = Some(LocomotorState::for_test_kind_at_frame(kind, 2));
-        entity
-            .locomotor
-            .as_mut()
-            .unwrap()
-            .active_slope_transition_mut()
-            .unwrap()
-            .snap(2, 2);
-        sim.substrate.entities.insert(entity);
-        let rng_before = sim.scenario_rng.logical_state();
+        for (smooth, retarget, retarget_note) in [
+            (
+                false,
+                (5, 11, 12, 3),
+                "the original write re-bases from_slope on the prior target",
+            ),
+            (
+                true,
+                (2, 11, 10, 3),
+                "the smoothing retarget keeps the origin and the running timer",
+            ),
+        ] {
+            let mut sim = Simulation::with_seed(0x510fe);
+            let mut entity = GameEntity::test_default(1, "SLOPE", "Americans", 0, 0);
+            entity.set_owner_for_test(sim.intern("Americans"));
+            entity.set_type_ref_for_test(sim.intern("SLOPE"));
+            entity.locomotor = Some(LocomotorState::for_test_kind_at_frame(kind, 2));
+            entity
+                .locomotor
+                .as_mut()
+                .unwrap()
+                .active_slope_transition_mut()
+                .unwrap()
+                .snap(2, 2);
+            sim.substrate.entities.insert(entity);
+            let rng_before = sim.scenario_rng.logical_state();
 
-        drive_ship_slope_process_tick(&mut sim, &terrain, 10);
-        let first = crate::sim::movement::slope_transition::state_for_entity(
-            sim.substrate.entities.get(1).unwrap(),
-        )
-        .unwrap()
-        .hash_fields();
-        assert_eq!(first, (2, 5, 10, 3));
-        drive_ship_slope_process_tick(&mut sim, &terrain, 11);
-        assert_eq!(
-            crate::sim::movement::slope_transition::state_for_entity(
-                sim.substrate.entities.get(1).unwrap()
+            drive_ship_slope_process_tick(&mut sim, &terrain, 10, smooth);
+            let first = crate::sim::movement::slope_transition::state_for_entity(
+                sim.substrate.entities.get(1).unwrap(),
             )
             .unwrap()
-            .hash_fields(),
-            first,
-            "equal stationary Process is a complete no-write"
-        );
+            .hash_fields();
+            assert_eq!(first, (2, 5, 10, 3));
+            drive_ship_slope_process_tick(&mut sim, &terrain, 11, smooth);
+            assert_eq!(
+                crate::sim::movement::slope_transition::state_for_entity(
+                    sim.substrate.entities.get(1).unwrap()
+                )
+                .unwrap()
+                .hash_fields(),
+                first,
+                "equal stationary Process is a complete no-write"
+            );
 
-        sim.substrate
-            .entities
-            .get_mut(1)
-            .unwrap()
-            .position
-            .set_rx_for_test(1);
-        drive_ship_slope_process_tick(&mut sim, &terrain, 12);
-        assert_eq!(
-            crate::sim::movement::slope_transition::state_for_entity(
-                sim.substrate.entities.get(1).unwrap()
-            )
-            .unwrap()
-            .hash_fields(),
-            (5, 11, 12, 3),
-            "mid-transition retarget starts from the prior target slope"
-        );
-        assert_eq!(sim.scenario_rng.logical_state(), rng_before);
+            sim.substrate
+                .entities
+                .get_mut(1)
+                .unwrap()
+                .position
+                .set_rx_for_test(1);
+            drive_ship_slope_process_tick(&mut sim, &terrain, 12, smooth);
+            assert_eq!(
+                crate::sim::movement::slope_transition::state_for_entity(
+                    sim.substrate.entities.get(1).unwrap()
+                )
+                .unwrap()
+                .hash_fields(),
+                retarget,
+                "{retarget_note} ({kind:?}, smooth={smooth})"
+            );
+            assert_eq!(sim.scenario_rng.logical_state(), rng_before);
+        }
     }
 }
 
@@ -678,7 +713,7 @@ fn drive_ship_slope_process_uses_foot_class_boundary_not_object_speed_or_art() {
         entity.locomotor = Some(LocomotorState::for_test_kind(kind));
         sim.substrate.entities.insert(entity);
 
-        drive_ship_slope_process_tick(&mut sim, &terrain, 7);
+        drive_ship_slope_process_tick(&mut sim, &terrain, 7, false);
         let state = sim
             .substrate
             .entities
@@ -711,7 +746,7 @@ fn entry_active_tube_excludes_drive_slope_process_for_the_whole_turn() {
     );
     sim.substrate.entities.insert(entity);
 
-    drive_ship_slope_process_tick(&mut sim, &terrain, 30);
+    drive_ship_slope_process_tick(&mut sim, &terrain, 30, false);
     assert_eq!(
         crate::sim::movement::slope_transition::state_for_entity(
             sim.substrate.entities.get(1).unwrap()

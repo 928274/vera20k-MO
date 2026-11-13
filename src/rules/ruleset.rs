@@ -826,6 +826,16 @@ pub struct GeneralRules {
     /// page; PPM's "AI won't rebuild the upgrade"). On, VERA admits those
     /// Recalc nodes and lets a rebuilt host's node be planned again.
     pub ai_fix_power_upgrades: bool,
+    /// VERA20K extension key `[General] VERA20K.SmoothSlopeTransition=`, read
+    /// by `sim::movement::slope_transition`. On by default. A Drive/Ship body
+    /// whose containing cell changes slope before its three-frame transition
+    /// has run keeps the transition's origin and running timer and only
+    /// retargets its destination, so the tilt keeps advancing from the pose
+    /// already on screen. Off reproduces the original
+    /// `previous = current; restart timer` write at `0x004B050B`, which snaps
+    /// the body back to the previous target's full tilt for one frame whenever
+    /// a vehicle crosses a cell boundary mid-transition.
+    pub smooth_slope_transition: bool,
     /// `[General] MaxWaypointPathLength`, Rules+90. Constructor665725
     /// writes15; ReadGeneral671DB2..671DCC passes the prior signed value to
     /// ReadInteger5276D0 and stores it unchanged, without a clamp.
@@ -2896,6 +2906,7 @@ impl Default for GeneralRules {
             ai_base_size: AiBaseSizeRules::default(),
             ai_aggressive_power_upgrades: false,
             ai_fix_power_upgrades: false,
+            smooth_slope_transition: true,
             max_waypoint_path_length: 15,
             talk_bubble_time: 300,
             flash_frame_time: 7,
@@ -4034,6 +4045,7 @@ impl GeneralRules {
                 ai_base_size,
                 ai_aggressive_power_upgrades,
                 ai_fix_power_upgrades,
+                smooth_slope_transition: defaults.smooth_slope_transition,
                 message_delay_minutes,
                 savour_delay_minutes,
                 pose_dir,
@@ -4085,12 +4097,17 @@ impl GeneralRules {
         // integer roll threshold (a struct literal can't reference sibling fields).
         let condition_red_spark_prob: f64 =
             general.read_double("ConditionRedSparkingProbability", 0.02);
+        let smooth_slope_transition = general.read_bool(
+            "VERA20K.SmoothSlopeTransition",
+            defaults.smooth_slope_transition,
+        );
         let condition_yellow_spark_prob: f64 =
             general.read_double("ConditionYellowSparkingProbability", 0.01);
         Self {
             ai_base_size,
             ai_aggressive_power_upgrades,
             ai_fix_power_upgrades,
+            smooth_slope_transition,
             pose_dir,
             deploy_dir,
             max_waypoint_path_length: general
@@ -12503,6 +12520,37 @@ fn parse_particle_system_types(
 
 #[cfg(test)]
 mod tests {
+    /// `VERA20K.SmoothSlopeTransition=` lives in `[General]`, unlike the two
+    /// `[AI]` upgrade keys, and is on when absent: the stock rules answer the
+    /// smoother retarget and only an explicit `no` reproduces the original
+    /// mid-transition snap.
+    #[test]
+    fn vera20k_smooth_slope_transition_defaults_on_and_reads_the_general_section() {
+        use crate::rules::ini_parser::IniFile;
+
+        let absent = super::RuleSet::from_ini(&IniFile::from_str("[General]\n")).unwrap();
+        assert!(absent.general.smooth_slope_transition);
+
+        let off = super::RuleSet::from_ini(&IniFile::from_str(
+            "[General]\nVERA20K.SmoothSlopeTransition=no\n",
+        ))
+        .unwrap();
+        assert!(!off.general.smooth_slope_transition);
+
+        let on = super::RuleSet::from_ini(&IniFile::from_str(
+            "[General]\nVERA20K.SmoothSlopeTransition=yes\n",
+        ))
+        .unwrap();
+        assert!(on.general.smooth_slope_transition);
+
+        // The two `[AI]` keys stay independent of it.
+        let only_ai = super::RuleSet::from_ini(&IniFile::from_str(
+            "[AI]\nVERA20K.FixPowerUpgrades=yes\n",
+        ))
+        .unwrap();
+        assert!(only_ai.general.smooth_slope_transition);
+    }
+
     #[test]
     fn vera20k_ai_upgrade_keys_default_off_and_read_the_merged_ai_section() {
         use crate::rules::ini_parser::IniFile;
