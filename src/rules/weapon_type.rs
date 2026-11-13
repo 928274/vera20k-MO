@@ -725,6 +725,30 @@ mod tests {
         assert!(!rules.weapon("AWP").unwrap().reveal_on_fire);
     }
 
+    /// MO's stealth arsenal deliberately suppresses the two native ways a
+    /// shot gives its firer away: rulesmo.ini has 115 `DecloakToFire=no`
+    /// (only `[FuryMissile]` / `[DiverbeeAttack]`, both suicide drones, say
+    /// yes) and 121 `RevealOnFire=no`. `FireError::Cloaked` is gated on the
+    /// former, `world_fire::reveal_on_fire` on the latter; a cloaked unit
+    /// firing one of these weapons must therefore stay in cloak state 2,
+    /// i.e. it cannot be the source of the "flicker".
+    #[test]
+    fn mo_cloaked_weapons_keep_the_native_fire_exposure_gates() {
+        let read = |text: &str| {
+            let file = IniFile::from_str(text);
+            WeaponType::from_ini_section("W", file.section("W").unwrap())
+        };
+        let stock = read("[W]\nDamage=5\n");
+        assert!(stock.decloak_to_fire, "retail default is yes");
+        assert!(stock.reveal_on_fire, "retail default is yes");
+        let stealth = read("[W]\nDamage=5\nDecloakToFire=no\nRevealOnFire=no\n");
+        assert!(!stealth.decloak_to_fire);
+        assert!(!stealth.reveal_on_fire);
+        let expose = read("[W]\nDamage=5\nDecloakToFire=yes\nRevealOnFire=yes\n");
+        assert!(expose.decloak_to_fire);
+        assert!(expose.reveal_on_fire);
+    }
+
     use super::*;
     use crate::rules::ini_parser::IniFile;
 
