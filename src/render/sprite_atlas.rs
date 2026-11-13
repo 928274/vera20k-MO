@@ -1490,6 +1490,23 @@ pub(crate) fn sprite_palette_choice(
     }
 }
 
+/// Ares 0.2 custom animation/projectile palettes: a BulletType's `Image=`
+/// names the AnimType whose ART section carries `CustomPalette=`, and Ares
+/// requires that name in `[Animations]`. The atlas keys a bullet by its
+/// ProjectileType id (`SEITAADMISSILEP`, not `NANOBALLSM`), so resolve the
+/// alias before looking up the ART section. Non-projectile types keep the
+/// ordinary object `Image=` alias.
+fn projectile_anim_palette_base<'a>(
+    rules: Option<&'a RuleSet>,
+    type_id: &str,
+    fallback: &'a str,
+) -> &'a str {
+    rules
+        .and_then(|rules| rules.projectile(type_id))
+        .and_then(|projectile| projectile.image_loads.first())
+        .map_or(fallback, |load| load.image.as_str())
+}
+
 /// `extra_palette_type_ids` holds the custom-palette TechnoTypes, `None` when
 /// the extra building palette did not load. TechnoClass::DrawSHP tests
 /// TerrainPalette first (`0x00705EC7`), then draws from GetRemapColour
@@ -1502,19 +1519,31 @@ fn sprite_palette_for_key(
     cell_palette_type_ids: &HashSet<String>,
     extra_palette_type_ids: Option<&HashSet<String>>,
 ) -> SpritePaletteChoice {
-    // art.ini `CustomPalette=` on an AnimType is an explicit palette override:
-    // the native draw hands that file's convert to `CC_Draw_Shape` and skips
-    // both the selected ColorScheme and the global ANIM.PAL. Only types whose
+    // Ares 0.2 `CustomPalette=` on an AnimType is an explicit palette
+    // override for both the animation and — when that type is a BulletType's
+    // `Image=` and is registered in `[Animations]` — the projectile's SHP
+    // frames. The draw hands that file's convert to `CC_Draw_Shape` and skips
+    // both the selected ColorScheme and the global ANIM.PAL; Ares extends the
+    // same convert to `BulletClass::Draw`, which otherwise picks PALETTE.PAL,
+    // ANIM.PAL or the firer's scheme (`46838D`/`468409`). Only types whose
     // palette actually loaded are registered, so a missing file keeps the
     // ordinary arm below. Tiled and fogged draws select ANIM.PAL by their own
     // literals and stay on them.
-    if matches!(
+    let custom_palette_context = matches!(
         key.palette_context,
         ShpPaletteContext::GlobalAnim
             | ShpPaletteContext::AnimScheme
             | ShpPaletteContext::SelectedScheme
-    ) && extra_palette_type_ids
-        .is_some_and(|ids| ids.contains(&key.type_id.to_ascii_uppercase()))
+    ) || (cfg!(feature = "ares")
+        && matches!(
+            key.palette_context,
+            ShpPaletteContext::BulletDefault
+                | ShpPaletteContext::BulletAnim
+                | ShpPaletteContext::BulletFirer
+        ));
+    if custom_palette_context
+        && extra_palette_type_ids
+            .is_some_and(|ids| ids.contains(&key.type_id.to_ascii_uppercase()))
     {
         return SpritePaletteChoice::ExtraBuilding;
     }
@@ -2701,6 +2730,7 @@ pub(crate) fn prepare_sprite_atlas(
         let base = type_id.strip_suffix("_MAKE").unwrap_or(type_id);
         let object = rules.and_then(|rules| rules.object(base));
         let image = object.map_or(base, |object| object.image.as_str());
+        let anim_base = projectile_anim_palette_base(rules, base, image);
         if art
             .and_then(|art| art.resolve_metadata_entry(base, image))
             .is_some_and(|entry| entry.terrain_palette)
@@ -2718,20 +2748,34 @@ pub(crate) fn prepare_sprite_atlas(
                 extra_palette_names.insert(type_id.to_ascii_uppercase(), name.to_owned());
             }
         }
-        // AnimType `CustomPalette=` names a palette *file*, not a rules palette
-        // group, so the theater suffix a TechnoType request gets must not be
-        // appended: MO writes `markpal.pal` and `unittem.pal` verbatim. A
-        // missing file leaves the animation on its ordinary scheme instead of
-        // failing the atlas.
+        // Ares 0.2 `CustomPalette=` names a palette *file*, not a rules
+        // palette group, so the theater suffix a TechnoType request gets
+        // must not be appended: MO writes `markpal.pal` and `axespam.pal`
+        // verbatim. A missing file leaves the animation on its ordinary
+        // scheme instead of failing the atlas. For a projectile the ART
+        // section is the BulletType's `Image=` AnimType, resolved above.
         if let Some(name) = art
-            .and_then(|art| art.anim_runtime_config(base))
+            .and_then(|art| art.anim_runtime_config(anim_base))
             .and_then(|config| config.custom_palette.as_deref())
         {
             let palette = extra_palettes.entry(name.to_owned()).or_insert_with(|| {
-                let file = if name.to_ascii_lowercase().ends_with(".pal") {
-                    name.to_owned()
+                // Ares replaces `~~~` with the theater's three-letter
+                // extension (`lib~~~.pal` -> `libtem.pal`). A name without
+                // the marker is used verbatim.
+                let resolved = {
+                    #[cfg(feature = "ares")]
+                    {
+                        name.replace("~~~", theater_ext)
+                    }
+                    #[cfg(not(feature = "ares"))]
+                    {
+                        name.to_owned()
+                    }
+                };
+                let file = if resolved.to_ascii_lowercase().ends_with(".pal") {
+                    resolved
                 } else {
-                    format!("{name}.pal")
+                    format!("{resolved}.pal")
                 };
                 asset_manager
                     .get_ref(&file)
@@ -2888,14 +2932,19 @@ pub(crate) fn prepare_sprite_atlas(
         // (0x0068C710), which writes the colour's ramp over indices 16..31.
         let house_remap = match key.palette_context {
             ShpPaletteContext::Legacy => palette_choice != SpritePaletteChoice::CellIso,
-            // An AnimType's `CustomPalette=` is a *plain* convert: gamemd builds
-            // no ColorScheme for it, so the SHP's 16..31 band keeps the custom
-            // file's own colours. `[MCVMARK]` depends on that — its green corner
-            // lights are indices 16 and 22 — while a TechnoType palette request
-            // (the `Legacy` arm above) is scheme-owned and does remap.
+            // Ares `CustomPalette=` (animation or projectile) is a *plain*
+            // convert: no ColorScheme is built, so the SHP's 16..31 band
+            // keeps the custom file's own colours. `[MCVMARK]` depends on
+            // that — its green corner lights are indices 16 and 22 — and so
+            // does MO's NANOBALLSM, whose low indices are an axespam.pal
+            // cyan ramp. A TechnoType palette request (`Legacy` above) is
+            // scheme-owned and does remap.
             ShpPaletteContext::GlobalAnim
             | ShpPaletteContext::AnimScheme
             | ShpPaletteContext::SelectedScheme
+            | ShpPaletteContext::BulletDefault
+            | ShpPaletteContext::BulletAnim
+            | ShpPaletteContext::BulletFirer
                 if palette_choice == SpritePaletteChoice::ExtraBuilding =>
             {
                 false
@@ -4251,5 +4300,55 @@ mod anim_custom_palette_tests {
             ),
             SpritePaletteChoice::Anim
         );
+    }
+
+    /// Ares 0.2's `CustomPalette=` also covers projectiles, provided the
+    /// BulletType's `Image=` AnimType is listed in `[Animations]`. MO does
+    /// exactly that for `[SeitaadMissileP] Image=NANOBALLSM` / `1321=NANOBALLSM`
+    /// with `CustomPalette=axespam.pal`. Without the projectile arm the rising
+    /// bullet was baked against PALETTE.PAL, whose low entries are black,
+    /// purple, green, yellow and red instead of axespam.pal's cyan ramp.
+    /// Only the rise is a Bullet; the burst (`AnimList=NANOBALLSM2`) already
+    /// took the animation arm, which is why only that phase looked wrong.
+    #[test]
+    fn ares_custom_palette_also_covers_the_projectile_frames() {
+        let registered: HashSet<String> = HashSet::from(["SEITAADMISSILEP".to_string()]);
+        let empty = HashSet::new();
+        for (context, ordinary) in [
+            (
+                ShpPaletteContext::BulletDefault,
+                SpritePaletteChoice::Bullet,
+            ),
+            (ShpPaletteContext::BulletAnim, SpritePaletteChoice::Anim),
+            (ShpPaletteContext::BulletFirer, SpritePaletteChoice::Unit),
+        ] {
+            let chosen = |ids: Option<&HashSet<String>>| {
+                sprite_palette_for_key(
+                    &key(context, "SEITAADMISSILEP"),
+                    None,
+                    &empty,
+                    &empty,
+                    ids,
+                )
+            };
+            assert_eq!(
+                chosen(None),
+                ordinary,
+                "{context:?} keeps the native arm when no custom palette loaded"
+            );
+            if cfg!(feature = "ares") {
+                assert_eq!(
+                    chosen(Some(&registered)),
+                    SpritePaletteChoice::ExtraBuilding,
+                    "{context:?} must draw through the AnimType's CustomPalette"
+                );
+            } else {
+                assert_eq!(
+                    chosen(Some(&registered)),
+                    ordinary,
+                    "the Ares projectile palette is feature-gated"
+                );
+            }
+        }
     }
 }

@@ -22,6 +22,35 @@ fn simple_rules(art: &str) -> RuleSet {
     )
 }
 
+/// Ares 0.2 custom animation/projectile palettes: `[SeitaadMissileP]` keys
+/// the atlas, but the `CustomPalette=` lives on the ART section named by its
+/// `Image=NANOBALLSM`. Without the alias the bullet fell through to
+/// PALETTE.PAL and only its rising frames were miscoloured.
+#[test]
+fn ares_projectile_custom_palette_resolves_through_the_image_anim_type() {
+    let rules = rules(
+        "[VehicleTypes]\n0=SEITAAD\n[SEITAAD]\nPrimary=SeitaadMissile\n\
+         [SeitaadMissile]\nProjectile=SeitaadMissileP\n\
+         [SeitaadMissileP]\nImage=NANOBALLSM\n",
+        "[NANOBALLSM]\nCustomPalette=axespam.pal\n",
+    );
+    assert_eq!(
+        projectile_anim_palette_base(Some(&rules), "SeitaadMissileP", "SEITAADMISSILEP"),
+        "NANOBALLSM",
+        "the bullet key must reach [NANOBALLSM]'s CustomPalette"
+    );
+    assert_eq!(
+        projectile_anim_palette_base(Some(&rules), "SEITAAD", "SEITAAD"),
+        "SEITAAD",
+        "a non-projectile type keeps its object Image alias"
+    );
+    assert_eq!(
+        projectile_anim_palette_base(None, "SEITAADMISSILEP", "SEITAADMISSILEP"),
+        "SEITAADMISSILEP",
+        "without Rules the lookup cannot invent an alias"
+    );
+}
+
 #[test]
 fn retail_projectile_reader_matches_original_selected_cannon_inputs() {
     let Some(rules) = retail_unlayered_rules_with_art() else {

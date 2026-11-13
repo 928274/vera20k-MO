@@ -134,9 +134,11 @@ dialog caching ([ares-side-defaults.md](ares-side-defaults.md)).
 - Sidebar and screens: the observer strip art (`0x6AA0CA`, `0x6AA164`;
   [ares-country-presentation.md](ares-country-presentation.md)), the Money superweapon
   tooltip (`0x6A932B`).
-- Palettes and draw order: an anim's `CustomPalette` (`0x4232CE`), a ParticleType's
-  `Palette` (`0x62D015`) and the Ground layer's per-frame sort (`0x551A30`). See
-  [ares-anim-particles.md](ares-anim-particles.md) and [ares-bugfixes.md](ares-bugfixes.md).
+- Palettes and draw order: a ParticleType's `Palette` (`0x62D015`) and the
+  Ground layer's per-frame sort (`0x551A30`). An anim/projectile's
+  `CustomPalette` (`0x4232CE`) is now ported; see
+  [ini-anim-custom-palette.md](ini-anim-custom-palette.md) and
+  [ares-anim-particles.md](ares-anim-particles.md).
 - Audio: the move sound under a Magnetron (`0x4DAA68`, `0x7101CF`), the amphibious
   water sound (`0x51D799`), and loose WAV samples and extra audio bags (`0x4016F0`).
 - The Ares campaign menu (uimd.ini `[UISettings]` `CampaignList`, `Campaign1`..`Campaign4`,
