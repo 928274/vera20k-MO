@@ -650,7 +650,6 @@ impl Simulation {
                 entity,
                 slope,
                 sim.session.binary_frame(),
-                rules.general.smooth_slope_transition,
             );
         }
         match sim.process_track_turn(stable_id, rules, overlay_registry, effects) {

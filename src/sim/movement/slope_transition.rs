@@ -58,42 +58,7 @@ impl SlopeTransitionState {
     /// Drive/Ship `Process` entry starts a literal three-frame timer only when
     /// the current containing-cell slope differs from the cached target.
     pub fn sample_process_entry(&mut self, sampled_slope: u8, binary_frame: u32) {
-        self.sample_process_entry_with(sampled_slope, binary_frame, false);
-    }
-
-    /// [`Self::sample_process_entry`] for `VERA20K.SmoothSlopeTransition=`.
-    ///
-    /// A vehicle crossing cell boundaries usually meets the next cell's slope
-    /// before the three-frame timer has run out. The original write
-    /// `previous = current; current = sampled; timer = 3` then snaps the body
-    /// back to the *previous target's* full tilt for the next frame, because
-    /// `render_phase` answers `blend(previous, current, 0/3)`, while the frame
-    /// before it drew `blend(previous_old, current_old, 1/3..2/3)`. On a
-    /// sequence of differing slopes that reads as the hull pumping up and down.
-    /// Retargeting instead keeps the origin and the running timer, so the tilt
-    /// keeps advancing from the pose already on screen and still lands on the
-    /// new slope when the timer expires. A retarget back onto the origin is
-    /// still a normal restart: the two table entries must differ for a blend
-    /// to mean anything.
-    pub fn sample_process_entry_smooth(&mut self, sampled_slope: u8, binary_frame: u32) {
-        self.sample_process_entry_with(sampled_slope, binary_frame, true);
-    }
-
-    fn sample_process_entry_with(
-        &mut self,
-        sampled_slope: u8,
-        binary_frame: u32,
-        smooth_retarget: bool,
-    ) {
         if sampled_slope == self.current_slope {
-            return;
-        }
-        if smooth_retarget
-            && self.transition_total != 0
-            && self.remaining(binary_frame) > 0
-            && self.previous_slope != sampled_slope
-        {
-            self.current_slope = sampled_slope;
             return;
         }
         self.previous_slope = self.current_slope;
@@ -196,20 +161,9 @@ pub(crate) fn process_entry_changes(entity: &GameEntity, sampled_slope: u8) -> b
 
 /// Drive Process `0x004B050B..0x004B0557` and Ship Process
 /// `0x0069FC1B..0x0069FC67` sample before any track/movement branch.
-/// `smooth_retarget` is `VERA20K.SmoothSlopeTransition=`, which only changes
-/// what a sample landing inside a running transition does.
-pub(crate) fn sample_process_entry(
-    entity: &mut GameEntity,
-    sampled_slope: u8,
-    binary_frame: u32,
-    smooth_retarget: bool,
-) {
+pub(crate) fn sample_process_entry(entity: &mut GameEntity, sampled_slope: u8, binary_frame: u32) {
     if let Some(state) = state_for_entity_mut(entity) {
-        if smooth_retarget {
-            state.sample_process_entry_smooth(sampled_slope, binary_frame);
-        } else {
-            state.sample_process_entry(sampled_slope, binary_frame);
-        }
+        state.sample_process_entry(sampled_slope, binary_frame);
     }
 }
 
@@ -303,83 +257,6 @@ mod tests {
                 phase_den: super::SLOPE_TRANSITION_FRAMES,
             }
         );
-    }
-
-    /// The original `Process` write snaps a body back to the previous target's
-    /// full tilt whenever the containing cell changes slope while the
-    /// three-frame timer still runs, because it re-bases `previous` on the old
-    /// target and zeroes the phase. Retargeting keeps both the origin and the
-    /// timer, so the tilt continues from the pose already on screen.
-    #[test]
-    fn smooth_retarget_keeps_the_running_transition_instead_of_snapping_to_the_old_target() {
-        let phase = |state: &SlopeTransitionState, frame: u32| state.render_phase(frame);
-
-        let mut native = SlopeTransitionState::at_binary_frame(0);
-        native.snap(0, 0);
-        native.sample_process_entry(1, 2);
-        assert_eq!(
-            phase(&native, 2),
-            SlopeRenderPhase::Transition {
-                from_slope: 0,
-                to_slope: 1,
-                phase_num: 0,
-                phase_den: 3
-            }
-        );
-        assert_eq!(
-            phase(&native, 3),
-            SlopeRenderPhase::Transition {
-                from_slope: 0,
-                to_slope: 1,
-                phase_num: 1,
-                phase_den: 3
-            }
-        );
-        native.sample_process_entry(2, 4);
-        assert_eq!(
-            phase(&native, 4),
-            SlopeRenderPhase::Transition {
-                from_slope: 1,
-                to_slope: 2,
-                phase_num: 0,
-                phase_den: 3
-            },
-            "the original write re-bases from_slope on the old target and restarts the phase"
-        );
-
-        let mut smooth = SlopeTransitionState::at_binary_frame(0);
-        smooth.snap(0, 0);
-        smooth.sample_process_entry_smooth(1, 2);
-        assert_eq!(
-            phase(&smooth, 3),
-            SlopeRenderPhase::Transition {
-                from_slope: 0,
-                to_slope: 1,
-                phase_num: 1,
-                phase_den: 3
-            }
-        );
-        smooth.sample_process_entry_smooth(2, 4);
-        assert_eq!(smooth.hash_fields(), (0, 2, 2, 3));
-        assert_eq!(
-            phase(&smooth, 4),
-            SlopeRenderPhase::Transition {
-                from_slope: 0,
-                to_slope: 2,
-                phase_num: 2,
-                phase_den: 3
-            },
-            "the origin and the running timer survive, so the tilt keeps converging"
-        );
-        assert_eq!(phase(&smooth, 5), SlopeRenderPhase::Stable(2));
-
-        // A sample back onto the origin still restarts: a blend needs two
-        // different table entries.
-        let mut back = SlopeTransitionState::at_binary_frame(0);
-        back.snap(0, 0);
-        back.sample_process_entry_smooth(1, 2);
-        back.sample_process_entry_smooth(0, 3);
-        assert_eq!(back.hash_fields(), (1, 0, 3, 3));
     }
 
     fn entity_with(category: EntityCategory, kind: LocomotorKind) -> GameEntity {
