@@ -118,7 +118,7 @@ impl DigEffects {
 }
 
 /// One `TunnelLocomotionClass` object's state.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct TunnelRuntime {
     /// `+0x18`.
     state: TunnelState,
@@ -156,11 +156,6 @@ impl TunnelRuntime {
     /// `Is_Moving` (`0x00728A50`): State is not Idle.
     pub(crate) fn is_moving(&self) -> bool {
         self.state != TunnelState::Idle
-    }
-
-    /// `Is_Moving_Now` (`0x00728A60`): moving and past PreDigIn.
-    pub(crate) fn is_moving_now(&self) -> bool {
-        self.is_moving() && self.state != TunnelState::PreDigIn
     }
 
     /// `Destination` (`0x00728A90`): the stored coordinate while moving, else
@@ -420,11 +415,7 @@ mod tests {
             let mut runtime = TunnelRuntime::for_test(from, target);
             assert_eq!(runtime.stop_moving(), searches, "{from:?}");
             assert_eq!(runtime.state(), to, "{from:?}");
-            assert_eq!(
-                runtime.raw_destination() == NULL_COORD,
-                cleared,
-                "{from:?}"
-            );
+            assert_eq!(runtime.raw_destination() == NULL_COORD, cleared, "{from:?}");
         }
     }
 

@@ -14,9 +14,6 @@ use crate::sim::timer::CdTimer;
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct StealthAbility {
     granted: bool,
-    #[cfg(feature = "ares")]
-    #[serde(default)]
-    attached: bool,
 }
 
 /// Whether the constructor seeds `Techno+0x3D2` from the type's `Cloakable=`
@@ -38,11 +35,11 @@ pub(crate) fn type_seeds_stealth(
 }
 
 impl StealthAbility {
+    /// The permanent capability: the type's seed or a crate's grant. An Ares
+    /// attached-effect cloak is held in the object's Ares part, so ask
+    /// [`GameEntity::cloak_ability_active`](crate::sim::game_entity::GameEntity::cloak_ability_active)
+    /// where the object is at hand.
     pub(crate) fn active(self, type_seed: bool) -> bool {
-        #[cfg(feature = "ares")]
-        if self.attached {
-            return true;
-        }
         type_seed || self.granted
     }
 
@@ -52,16 +49,6 @@ impl StealthAbility {
 
     pub(crate) fn granted(self) -> bool {
         self.granted
-    }
-    #[cfg(feature = "ares")]
-    pub(crate) fn attached(self) -> bool {
-        self.attached
-    }
-    /// RecalculateStats1004617D/1004613B ORs descriptor+38 into the
-    /// raw capability, without replacing permanent crate Ext+98.
-    #[cfg(feature = "ares")]
-    pub(crate) fn set_attached(&mut self, value: bool) {
-        self.attached = value;
     }
 }
 
@@ -852,7 +839,9 @@ impl Default for DisguiseRuntime {
 impl crate::sim::game_entity::GameEntity {
     /// The disguise runtime, created at `frame` when the object has none yet.
     /// Native keeps the disguise fields inline; sparse Rust storage creates
-    /// them on the first disguise write, stamped with that frame.
+    /// them on the first disguise write, stamped with that frame. A stored
+    /// object's writer that puts a disguise on also calls
+    /// `EntityStore::note_look`, which the atlas check reads.
     pub(crate) fn disguise_mut(&mut self, frame: u32) -> &mut DisguiseRuntime {
         self.disguise
             .get_or_insert_with(|| DisguiseRuntime::new(frame))
@@ -1105,6 +1094,8 @@ impl crate::sim::world::Simulation {
             }
         };
         let frame = self.session.binary_frame();
+        // A worn type and house are a new look for the atlas check.
+        self.substrate.entities.note_look(firer);
         let disguise = self
             .substrate
             .entities
@@ -1246,6 +1237,7 @@ impl crate::sim::world::Simulation {
                 let disguise_type = self
                     .interner
                     .intern(&rules.general.default_mirage_disguises[picked]);
+                self.substrate.entities.note_look(id);
                 self.substrate
                     .entities
                     .get_mut(id)

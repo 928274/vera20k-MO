@@ -130,22 +130,22 @@ pub(crate) enum SuperWeaponEvaStage {
 }
 
 /// Ares Ready hooks10035070/100350D0, detection100349D0 and common
-/// Launch10032FC3 select the retained EVA ordinal. New handlers suppress
-/// stock fallbacks even for -1; unported stock redirects keep their old owner.
+/// Launch10032FC3 select the retained EVA ordinal, when the Rules were read
+/// the Ares way (`ares`, `RuleSet::ares_form`). New handlers suppress stock
+/// fallbacks even for -1; unported stock redirects keep their old owner.
 pub(crate) fn resolved_superweapon_eva<'a>(
     sw: &'a crate::rules::superweapon_type::SuperWeaponType,
     stage: SuperWeaponEvaStage,
     stock: Option<&'static str>,
+    ares: bool,
 ) -> Option<&'a str> {
-    #[cfg(feature = "ares")]
-    if let Some(eva) = sw.ares_eva() {
+    if ares && let Some(eva) = sw.ares_eva() {
         return match stage {
             SuperWeaponEvaStage::Ready => eva.ready(),
             SuperWeaponEvaStage::Activated => eva.activated(),
             SuperWeaponEvaStage::Detected => eva.detected(),
         };
     }
-    let _ = (sw, stage);
     stock
 }
 
@@ -158,8 +158,7 @@ pub(crate) const EVA_STRUCTURE_SOLD: &str = "EVA_StructureSold";
 pub(crate) const EVA_REPAIRING: &str = "EVA_Repairing";
 /// String `0x00818FAC`.
 pub(crate) const EVA_BUILDING_CAPTURED: &str = "EVA_BuildingCaptured";
-/// String `0x00818FC4` (Ares builds play the type's `LostEvaEvent`).
-#[cfg(any(test, not(feature = "ares")))]
+/// String `0x00818FC4` (a game Ares plays in plays the type's `LostEvaEvent`).
 pub(crate) const EVA_TECH_BUILDING_LOST: &str = "EVA_TechBuildingLost";
 /// String `0x00824B70`.
 pub(crate) const EVA_PLAYER_DEFEATED: &str = "EVA_PlayerDefeated";
@@ -363,7 +362,6 @@ pub(crate) fn infiltration_eva_events(
         InfiltrationEffect::None => {}
         // Ares 3.0 10012000 (hook 0x004571E0): each arm's lines in its
         // order, every one behind the radar event.
-        #[cfg(feature = "ares")]
         InfiltrationEffect::Ares(arms) => {
             let either = owner || infiltrator;
             if let Some(owner_spy_sat) = arms.radar_reset

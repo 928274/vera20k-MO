@@ -433,11 +433,11 @@ pub(crate) enum LeftUp {
     /// release resolves its own pick and action (`0x00693271..0x0069328B`).
     Tactical,
     /// The radar's release (`0x00653D58`): `GetObjectAtRadarPixel`'s pick
-    /// and whether the action the radar kept is a superweapon's
+    /// and, when the action the radar kept is a superweapon's, that action
     /// ([`crate::app::input::radar`]).
     Radar {
         target: crate::render::radar::NativeRadarInputTarget,
-        super_weapon: bool,
+        super_weapon: Option<crate::app::input::commands::PlaceAction<'static>>,
     },
 }
 
@@ -488,8 +488,15 @@ fn left_up_branches(state: &mut AppState, click: LeftUp) {
     // Cell. Trigger: a kept superweapon, or a Cell Harvest, Guard or Attack,
     // in Planning Mode. Effect: that record's third target. Frequency: rare.
     try_queue_context_order(state, ContextOrderTarget::Radar(target), true);
-    if super_weapon && let Some(section) = state.armed_super_weapon_type().map(str::to_owned) {
-        crate::app::input::commands::launch_super_weapon_at_cell(state, &section, target.cell);
+    if let Some(action) = super_weapon
+        && let Some(armed) = state.armed_super_weapon_type().map(str::to_owned)
+    {
+        crate::app::input::commands::launch_super_weapon_at_cell(
+            state,
+            &armed,
+            action,
+            target.cell,
+        );
     }
 }
 
@@ -1257,8 +1264,8 @@ pub(crate) fn push_local_eva(state: &mut AppState, event: &str) {
 /// gamemd reads the modifier for the right button only (`0x006AAD66`), so an
 /// unshifted or right-button press is byte-for-byte the ported decision. The
 /// sound and the EVA line are spoken once per click regardless of the repeat.
-/// An `ares` build repeats on Shift without the option, five copies
-/// ([`sidebar_eva::produce_copies`]).
+/// When Ares plays in the game (`RuleSet::ares`) Shift repeats without the
+/// option, five copies ([`sidebar_eva::produce_copies`]).
 fn sidebar_cameo_press(
     state: &mut AppState,
     type_id: &str,
@@ -1404,7 +1411,9 @@ fn sidebar_cameo_press(
             // issue order; the sound and EVA above were spoken once. Shift
             // repeats while the Options page's Shift-Click Batch Queue
             // (`[VERA] ShiftQueue=`) is ticked, `[VERA] ShiftQueueCount=` times,
-            // and in an `ares` build always (Ares.dll 10064520, hook 0x6AB773).
+            // and always when Ares plays in the game (`RuleSet::ares`; Ares.dll
+            // 10064520, hook 0x6AB773).
+            let ares = state.rules().is_some_and(|rules| rules.ares());
             let profile = &state.persistence.options_profile;
             let repeat = sidebar_eva::produce_copies(
                 category,
@@ -1413,6 +1422,7 @@ fn sidebar_cameo_press(
                 profile.shift_queue,
                 profile.shift_queue_count,
                 building_production_queue,
+                ares,
             );
             // VERA's Alt + left click (same option): the new copies jump the
             // waiting builds of other types, through ordinary ABANDON and
@@ -1487,7 +1497,7 @@ fn sidebar_cameo_press(
             let Some((owner_id, held, held_type, is_building, builder)) = ready_target else {
                 return;
             };
-            let Some(_builder) = builder else {
+            let Some(builder) = builder else {
                 cancel_build_by_type(state, type_id, false);
                 push_local_eva(state, sidebar_eva::EVA_UNABLE_TO_COMPLY);
                 return;
@@ -1522,6 +1532,7 @@ fn sidebar_cameo_press(
                 .input
                 .begin_building_placement(&held_type, held, owner_id)
             {
+                centre_placement_on_factory(state, builder);
                 // ManualPlace4FB881 calls UnselectAll48DC90 only on entry.
                 // This existing owner clears immediate selection/follow and
                 // schedules the authoritative membership commit. A clear has
@@ -2018,13 +2029,19 @@ fn place_ready_building_for_tab(state: &mut AppState, tab: SidebarTab) {
             .ready_building_for_tab(sim, owner_id, tab)
             .and_then(|(type_id, held)| {
                 // Native hands Manual_Place4FB840 the object's Factory
-                // 5F5C20(0,0), and 4FB840 refuses a null one. VERA's placement
-                // owner takes no factory, so this lookup is admission only.
-                crate::sim::production::object_find_factory(sim, rules, held, false, false)?;
-                Some((owner_id, held, sim.interner().resolve(type_id).to_string()))
+                // 5F5C20(0,0), and 4FB840 refuses a null one; placement
+                // start centres the foundation on it.
+                let builder =
+                    crate::sim::production::object_find_factory(sim, rules, held, false, false)?;
+                Some((
+                    owner_id,
+                    held,
+                    builder,
+                    sim.interner().resolve(type_id).to_string(),
+                ))
             })
     };
-    let Some((owner_id, held, held_type)) = ready_target else {
+    let Some((owner_id, held, builder, held_type)) = ready_target else {
         return;
     };
     if state
@@ -2032,11 +2049,34 @@ fn place_ready_building_for_tab(state: &mut AppState, tab: SidebarTab) {
         .input
         .begin_building_placement(&held_type, held, owner_id)
     {
+        centre_placement_on_factory(state, builder);
         // ManualPlace4FB881 calls UnselectAll48DC90 only on entry.
         queue_selection_snapshot_command(state, Vec::new(), false);
         let gadgets = &mut state.match_state.match_presentation.sidebar_gadget_state;
         gadgets.disable_cursor_modes();
     }
+}
+
+/// Placement start centres the foundation on the Cell of `factory`, the
+/// product's `ObjectClass::FindFactory` (0, 0) (`0x005F5C20`) that
+/// `HouseClass::Begin_Building_Placement @ 0x004FB840` was handed, at its
+/// Location (`ObjectClass::Get_Cell_Packed @ 0x0041BEA0`, at `0x004FB8FE`).
+fn centre_placement_on_factory(state: &mut AppState, factory: u64) {
+    use crate::app::match_runtime::sim_tick::{
+        FoundationCentre, update_building_placement_preview,
+    };
+    let Some(cell) = state.match_state.sim_runtime.runtime().and_then(|runtime| {
+        let sim = &runtime.simulation;
+        let location =
+            crate::sim::movement::ground_pose::object_location(sim.entities().get(factory)?, None);
+        Some((
+            crate::util::lepton::lepton_to_cell_packed(location.x) as u16,
+            crate::util::lepton::lepton_to_cell_packed(location.y) as u16,
+        ))
+    }) else {
+        return;
+    };
+    update_building_placement_preview(state, FoundationCentre::Cell(cell));
 }
 
 fn dispatch_retail_hotkey(state: &mut AppState, command: HotkeyCommand) {
@@ -2090,6 +2130,12 @@ fn dispatch_retail_hotkey(state: &mut AppState, command: HotkeyCommand) {
                 .and_then(|minimap| minimap.cycle_radar_event(crate::util::time::Instant::now()));
             if let Some((rx, ry)) = event {
                 crate::app::input::camera::center_camera_on_cell(state, rx, ry);
+                // With a building armed, its foundation follows the cursor's
+                // new Cell (`Center_View_On_Radar_Event`, `0x00734200`).
+                crate::app::match_runtime::sim_tick::update_building_placement_preview(
+                    state,
+                    crate::app::match_runtime::sim_tick::FoundationCentre::Cursor,
+                );
             }
         }
         HotkeyCommand::ScreenCapture => {
@@ -2242,6 +2288,9 @@ pub(crate) fn run_window_command(state: &mut AppState, command: HotkeyCommand) {
 /// `LaunchSuper` without the `GUIBuildSound` its button's `Action` plays, so
 /// they pass `gui_sound: false`.
 fn press_super_weapon(state: &mut AppState, section: &str, right: bool, gui_sound: bool) {
+    let ares = state
+        .rules()
+        .is_some_and(crate::rules::ruleset::RuleSet::ares_form);
     let selection = (|| {
         let runtime = state.match_state.sim_runtime.runtime()?;
         let sim = &runtime.simulation;
@@ -2269,13 +2318,10 @@ fn press_super_weapon(state: &mut AppState, section: &str, right: bool, gui_soun
     match click {
         super::superweapon_cameo::SuperWeaponClick::Refused
             if selection.as_ref().is_some_and(|(view, _)| {
-                #[cfg(feature = "ares")]
-                {
+                if ares {
                     view.ares_refusal
                         == Some(crate::sim::superweapon::AresCameoRefusal::InsufficientFunds)
-                }
-                #[cfg(not(feature = "ares"))]
-                {
+                } else {
                     view.can_fire && !view.can_afford
                 }
             }) =>
@@ -2294,15 +2340,17 @@ fn press_super_weapon(state: &mut AppState, section: &str, right: bool, gui_soun
         }
         super::superweapon_cameo::SuperWeaponClick::Target => {
             queue_selection_snapshot_command(state, Vec::new(), false);
+            // When the Rules were read the Ares way (`RuleSet::ares_form`),
             // Ares 10034D60 (hook 6AAF9D) plays the type's EVA.SelectTarget,
             // whose constructor default is the stock literal.
-            #[cfg(feature = "ares")]
-            let cue = state
-                .rules()
-                .and_then(|rules| rules.super_weapon(section))
-                .and_then(|sw| sw.select_target_eva.clone());
-            #[cfg(not(feature = "ares"))]
-            let cue = Some(sidebar_eva::EVA_SELECT_TARGET.to_owned());
+            let cue = if ares {
+                state
+                    .rules()
+                    .and_then(|rules| rules.super_weapon(section))
+                    .and_then(|sw| sw.select_target_eva.clone())
+            } else {
+                Some(sidebar_eva::EVA_SELECT_TARGET.to_owned())
+            };
             if let Some(cue) = cue {
                 push_local_eva(state, &cue);
             }
@@ -2318,8 +2366,8 @@ fn press_super_weapon(state: &mut AppState, section: &str, right: bool, gui_soun
         }
         _ => {}
     }
-    #[cfg(feature = "ares")]
-    if click == super::superweapon_cameo::SuperWeaponClick::Refused
+    if ares
+        && click == super::superweapon_cameo::SuperWeaponClick::Refused
         && let Some(refusal) = selection.as_ref().and_then(|(view, _)| view.ares_refusal)
     {
         // 10034DA0: CanFire's refusal plays EVA.Impatient (default -1).

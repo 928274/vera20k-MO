@@ -168,15 +168,12 @@ impl Simulation {
             return Ok(VehicleCaptureOutcome::default());
         };
         if !self.entity_object_type(actor, rules).is_some_and(|ty| {
-            #[cfg(not(feature = "ares"))]
-            {
-                ty.thief
-            }
-            // Ares 3.0 InfantryClass_UpdateVehicleThief_Check (10049970,
-            // hook 0x5202F9): VehicleThief (+EC6) or CanDrive.
-            #[cfg(feature = "ares")]
-            {
+            if rules.ares() {
+                // Ares 3.0 InfantryClass_UpdateVehicleThief_Check (10049970,
+                // hook 0x5202F9): VehicleThief (+EC6) or CanDrive.
                 ty.vehicle_thief || ty.driver_rules().can_drive()
+            } else {
+                ty.thief
             }
         }) {
             return Ok(VehicleCaptureOutcome::default());
@@ -205,8 +202,7 @@ impl Simulation {
             < crate::util::lepton::GROUND_LEVEL_HEIGHT_LEPTONS
             && distance < 128
         {
-            #[cfg(feature = "ares")]
-            {
+            if rules.ares() {
                 //5203F7 ->100499A0: the shared Ares receiver returns whether
                 //this caller must consume the actor (Drive can board it).
                 let outcome =
@@ -218,9 +214,7 @@ impl Simulation {
                     );
                 }
                 return Ok(outcome);
-            }
-            #[cfg(not(feature = "ares"))]
-            {
+            } else {
                 //5203F7..52046D: each callback finishes before the next live
                 // read. Radio+274 addresses slot zero, not the broadcast walk.
                 let context = super::UninitContext::new(rules, registry).with_effects(effects);
@@ -319,7 +313,6 @@ mod self_deploy_site_tests;
 /// enter a `Spyable=` building (`+0x1576`) if it is an `Agent=` one
 /// (`+0xEC4`), else a `Capturable=` one (`+0x1572`). Ares replaces it with
 /// `Simulation::infiltrate_action`.
-#[cfg(not(feature = "ares"))]
 fn infiltrator_admits(
     infantry: &crate::rules::object_type::ObjectType,
     building: &crate::rules::object_type::ObjectType,
@@ -335,7 +328,6 @@ fn infiltrator_admits(
 /// What an infantryman does entering a building with Ares
 /// (`InfantryExt::GetInfiltrateAction @ 100252D0`'s answers 0..4; names
 /// inferred). [`Simulation::infiltrate_action`] decides it.
-#[cfg(feature = "ares")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InfiltrateAction {
     None,
@@ -353,7 +345,6 @@ pub enum InfiltrateAction {
 /// `a = ftol(S * R * 0.5)`, `c = S * ((1 - R * 0.5) * 0.5)` and the damage is
 /// `ftol(c)` when `c` compares below `H - a` (or unordered), else `H - a`.
 /// It never takes the building below `S * R * 0.5`.
-#[cfg(not(feature = "ares"))]
 fn multi_engineer_damage(health: combat::Health, strength: i32, condition_red: f64) -> Option<i32> {
     use crate::util::native_x87::{MaskedX87Chop53 as X87, MaskedX87Ordering, NativeF64Bits};
     //519DB8..519DCE: HealthRatio5F5C60 above Rules+1708; TEST AH,41.
@@ -762,8 +753,8 @@ impl Simulation {
     /// contact (`0x0065ADF0`), an empty building `+0x118` and CAN_LOAD (0xF)
     /// and answers Enter on ROGER. Retail lists only GAAIRC and AMRADR, which
     /// are not `UnitRepair=`, so every retail aircraft answers NoEnter here,
-    /// as this row does for a listed type too. Ares builds port the whole
-    /// row in its own form (hook `0x417E16`, below).
+    /// as this row does for a listed type too. When Ares plays, the whole
+    /// row takes its own form (hook `0x417E16`, below).
     pub fn entry_click_action(
         &self,
         actor_id: u64,
@@ -813,7 +804,6 @@ impl Simulation {
                     return match tote {
                         CarryallTote::Tote => Some(EntryClickAction::Tote),
                         CarryallTote::Nothing => Some(EntryClickAction::Nothing),
-                        #[cfg(feature = "ares")]
                         CarryallTote::Kept => None,
                     };
                 }
@@ -833,8 +823,7 @@ impl Simulation {
                 // (+0x118, TechnoClass Passengers.FirstPassenger, which
                 // BuildingClass::Receive_Radio 0x0043C2D0 also tests) and its
                 // CAN_LOAD (vt+0x278(0xF)) is ROGER, else NoEnter.
-                #[cfg(feature = "ares")]
-                let action = {
+                if rules.ares() {
                     let docks =
                         self.object_type(actor.type_ref(), rules)
                             .is_some_and(|actor_obj| {
@@ -855,10 +844,9 @@ impl Simulation {
                             EntryClickAction::NoEnter
                         }
                     })
-                };
-                #[cfg(not(feature = "ares"))]
-                let action = target_obj.unit_repair.then_some(EntryClickAction::NoEnter);
-                action
+                } else {
+                    target_obj.unit_repair.then_some(EntryClickAction::NoEnter)
+                }
             }
             _ => None,
         }
@@ -900,10 +888,7 @@ impl Simulation {
         };
         // Ares 3.0 Infantry 100176E0 (hook 0x51ED8E) also lets him enter a
         // `Tunnel=` building, whatever its Passengers= (`sim::ares_tunnel`).
-        #[cfg(feature = "ares")]
-        let tunnel = infantry && self.ares_tunnel_type(target_id, rules).is_some();
-        #[cfg(not(feature = "ares"))]
-        let tunnel = false;
+        let tunnel = rules.ares() && infantry && self.ares_tunnel_type(target_id, rules).is_some();
         if !combat::combat_weapon::is_ally_by_object(
             Some(&self.house_alliances),
             &self.interner,
@@ -920,8 +905,8 @@ impl Simulation {
         // Ares 3.0 Unit 1004BEA0 (hook 0x74031A) and Infantry 100176E0
         // (hook 0x51ED8E) refuse a `NoManualEnter` transport at the same
         // Passengers test (0x74037A, 0x51EE3B).
-        #[cfg(feature = "ares")]
-        if !tunnel
+        if rules.ares()
+            && !tunnel
             && self
                 .object_type(target.type_ref(), rules)?
                 .techno_combat()
@@ -1163,8 +1148,8 @@ impl Simulation {
     /// Ordinary Infantry +504 EMP starts zero in the native constructor.
     /// EMPulseApply4C575E admits RTTI1/2, not Infantry15. The deactivated
     /// latch +1C8 (700CBC) has its owner in `sim::powered_unit`.
-    /// Unit+6D8 death-frame remains separate. The shared+504 predicate uses
-    /// the entity EMP owner; only Ares currently supplies ordinary hits.
+    /// vt+0x37C (700C58) is `GameEntity::is_under_emp`: EMP, which only Ares
+    /// currently supplies, or a Unit's running `DeathFrames=` counter.
     /// Arbitrary authored native raw-save bytes are outside this producer.
     /// See engineer_bridge_cursor_caller.md for executed gate controls/bounds.
     pub fn techno_player_controllable(&self, id: u64, rules: &RuleSet) -> bool {
@@ -1204,7 +1189,7 @@ impl Simulation {
             || actor.is_warping_in()
             || actor.slave.owner().is_some()
             || actor.deactivated.is_offline()
-            || actor.emp_remaining() > 0
+            || actor.is_under_emp()
         {
             return false;
         }
@@ -1221,15 +1206,14 @@ impl Simulation {
 
     /// `TechnoClass::IsActive @ 0x007010D0` (vt+0x9C, no override): not
     /// deactivated (`+0x1C8`), owned by the player's house (`0x0050B6F0`),
-    /// its current weapon (vt+0x3F4) typed and not vt+0x37C. `is_armed`
-    /// stands in for the weapon test; shared EMP+504 comes from its private
-    /// entity owner. Unit death frames retain their existing ctor subset.
+    /// its current weapon (vt+0x3F4) typed and not vt+0x37C
+    /// (`GameEntity::is_under_emp`). `is_armed` stands in for the weapon test.
     pub fn techno_is_active(&self, id: u64, rules: &RuleSet) -> bool {
         let Some(actor) = self.substrate.entities.get(id) else {
             return false;
         };
         !actor.deactivated.is_offline()
-            && actor.emp_remaining() <= 0
+            && !actor.is_under_emp()
             && self.house_is_human_player(actor.owner())
             && self
                 .object_type(actor.type_ref(), rules)
@@ -1251,7 +1235,6 @@ impl Simulation {
     /// unless `EngineerAlwaysCaptureTech` holds for a building whose
     /// initial owner (`+0x14C`) is `MultiplayPassive=`. Otherwise it is
     /// captured.
-    #[cfg(feature = "ares")]
     pub(crate) fn ares_engineer_enemy_building_action(
         &self,
         building_id: u64,
@@ -1291,7 +1274,6 @@ impl Simulation {
     /// @ 10025420` (hook `0x51E635`): an Engineer over a `Rubble.Intact` or
     /// `Rubble.Intact.Remove` building whose house is allied with it (the
     /// building's owner asks) repairs it at any health.
-    #[cfg(feature = "ares")]
     pub fn ares_engineer_repairs_rubble(
         &self,
         actor_id: u64,
@@ -1336,12 +1318,13 @@ impl Simulation {
         let object = self.object_type(target.type_ref(), rules)?;
         // Ares 3.0 10014850 (hook 0x51E4ED): `EngineerRepairable`, default
         // `Repairable=`.
-        #[cfg(feature = "ares")]
-        let repairable = object
-            .building_type_ext()
-            .engineer_repairable(object.repairable);
-        #[cfg(not(feature = "ares"))]
-        let repairable = object.repairable;
+        let repairable = if rules.ares() {
+            object
+                .building_type_ext()
+                .engineer_repairable(object.repairable)
+        } else {
+            object.repairable
+        };
         if object.is_1x1_with_undeploy() || !repairable {
             return None;
         }
@@ -1371,12 +1354,11 @@ impl Simulation {
                 }
                 // Ares 3.0 10025540/10025550 (hooks 0x51E5BB, 0x51E5E1): the
                 // action is GetEngineerEnterEnemyBuildingAction's.
-                #[cfg(feature = "ares")]
-                return Some(self.ares_engineer_enemy_building_action(target_id, rules));
-                //51E5C6 compares threshold < health ratio (C0), not the
-                //opposite. Equality returns Capture; masked NaN keeps C0=1.
-                #[cfg(not(feature = "ares"))]
-                {
+                if rules.ares() {
+                    return Some(self.ares_engineer_enemy_building_action(target_id, rules));
+                } else {
+                    //51E5C6 compares threshold < health ratio (C0), not the
+                    //opposite. Equality returns Capture; masked NaN keeps C0=1.
                     use crate::util::native_x87::{MaskedX87Chop53 as X87, MaskedX87Ordering};
                     return Some(
                         if matches!(
@@ -1404,8 +1386,7 @@ impl Simulation {
             // Ares 3.0 10025420 (hook 0x51E635): over a rubble its house is
             // allied with, the repair action at any health; the cursor shows
             // RepairTrench (`app::input::ares_cursor`).
-            #[cfg(feature = "ares")]
-            if self.ares_engineer_repairs_rubble(actor_id, target_id, rules) {
+            if rules.ares() && self.ares_engineer_repairs_rubble(actor_id, target_id, rules) {
                 return Some(EngineerBuildingAction::Repair(true));
             }
             let full = matches!(
@@ -1475,15 +1456,11 @@ impl Simulation {
             .is_allied(&self.interner, actor.owner(), target.owner());
         // Ares 3.0 10025FC0 (hook 0x0051EE6B) asks the shared Ares
         // classification instead of the type flags.
-        #[cfg(feature = "ares")]
-        {
-            let _ = building;
+        if rules.ares() {
             infantry.infiltrate
                 && !allied
                 && self.infiltrate_action(actor_id, target_id, rules) != InfiltrateAction::None
-        }
-        #[cfg(not(feature = "ares"))]
-        {
+        } else {
             infiltrator_admits(infantry, building) && !allied
         }
     }
@@ -1502,7 +1479,6 @@ impl Simulation {
     /// None for anything else, or when either object is missing or the
     /// target is not a building. It asks neither `Infiltrate=` nor the
     /// owner's control; its callers do.
-    #[cfg(feature = "ares")]
     pub fn infiltrate_action(
         &self,
         infantry_id: u64,
@@ -1571,17 +1547,14 @@ impl Simulation {
         }
         // Ares 3.0 10026080 (hook 0x0051B2CB): after the `Infiltrate=`
         // test, every action but C4 heads for the building.
-        #[cfg(feature = "ares")]
-        {
+        if rules.ares() {
             (self.object_type(actor.type_ref(), rules)?.infiltrate
                 && matches!(
                     self.infiltrate_action(actor_id, building_id, rules),
                     InfiltrateAction::Spy | InfiltrateAction::Sabotage | InfiltrateAction::Capture
                 ))
             .then_some(building_id)
-        }
-        #[cfg(not(feature = "ares"))]
-        {
+        } else {
             infiltrator_admits(
                 self.object_type(actor.type_ref(), rules)?,
                 self.object_type(building.type_ref(), rules)?,
@@ -1667,8 +1640,7 @@ impl Simulation {
         let capture_eva_event = capture_eva_event.map(|name| self.interner.intern(&name));
         // Ares 3.0 10013E40 (hook 0x0044840B): the tech block's LostEvaEvent
         // and Message.Lost/Message.Capture labels.
-        #[cfg(feature = "ares")]
-        let ares_tech = {
+        let ares_tech = if rules.ares() {
             let (lost_eva, labels) = self
                 .object_type(type_ref, rules)
                 .map(|obj| {
@@ -1686,6 +1658,8 @@ impl Simulation {
                 message_lost: lost,
                 message_capture: capture,
             }
+        } else {
+            crate::sim::world::AresTechCaptureLines::default()
         };
         let radar = (!tech_building).then(|| {
             crate::sim::radar::RadarEventRequest::new(
@@ -1700,7 +1674,6 @@ impl Simulation {
             tech_building,
             radar,
             capture_eva_event,
-            #[cfg(feature = "ares")]
             ares_tech,
         });
     }
@@ -1905,43 +1878,41 @@ impl Simulation {
                     rules,
                 )
                 .unwrap_or(-1);
-            //519D82..519EA5: with MultiEngineer on, a hostile building above
-            //ConditionRed takes damage and consumes the Engineer before the
-            //Capturable, Selling and warp tests.
-            //
-            // Ares/MO neutral tech buildings (nuclear reactor, oil derrick,
-            // ...) are `Capturable=yes` + `NeedsEngineer=yes`; they are meant
-            // to change owner on the first Engineer, not to be worn down by
-            // repeated MultiEngineer C4 hits. Leaving them on that branch
-            // makes the building lose health, enter the damaged art and eat
-            // the Engineer before the capture branch at 519F44 can run.
-            #[cfg(not(feature = "ares"))]
-            let multi_engineer = (!repair
-                && !object.needs_engineer
-                && self.session.game_mode_nonzero()
-                && self.session.game_options().multi_engineer)
-                .then(|| {
-                    multi_engineer_damage(
-                        building.health,
-                        object.strength,
-                        rules.general.condition_red,
-                    )
-                })
-                .flatten();
-            // Ares 3.0 InfantryClass_UpdatePosition_MultiEngineer (hook
-            // 0x519D9C): the Damage action destroys
-            // ceil(Strength * EngineerDamage) and spends him (0x51A010);
-            // anything else goes on to the capture (0x519EAA).
-            #[cfg(feature = "ares")]
-            let multi_engineer = (!repair
-                && !object.needs_engineer
-                && self.ares_engineer_enemy_building_action(building_id, rules)
-                    == EngineerBuildingAction::Damage)
-                .then(|| {
-                    let share =
-                        f64::from_bits(rules.ares_building_globals().engineer_damage.bits());
-                    (f64::from(object.strength) * share).ceil() as i32
-                });
+            let multi_engineer = if rules.ares() {
+                // Ares 3.0 InfantryClass_UpdatePosition_MultiEngineer (hook
+                // 0x519D9C): the Damage action destroys
+                // ceil(Strength * EngineerDamage) and spends him (0x51A010);
+                // anything else goes on to the capture (0x519EAA).
+                // MO: `Capturable=yes` + `NeedsEngineer=yes` neutral tech
+                // buildings must reach the capture branch, not be worn down
+                // by repeated C4 hits before it can run.
+                (!repair
+                    && !object.needs_engineer
+                    && self.ares_engineer_enemy_building_action(building_id, rules)
+                        == EngineerBuildingAction::Damage)
+                    .then(|| {
+                        let share =
+                            f64::from_bits(rules.ares_building_globals().engineer_damage.bits());
+                        (f64::from(object.strength) * share).ceil() as i32
+                    })
+            } else {
+                //519D82..519EA5: with MultiEngineer on, a hostile building above
+                //ConditionRed takes damage and consumes the Engineer before the
+                //Capturable, Selling and warp tests. MO keeps NeedsEngineer
+                //buildings out of this branch so the first Engineer captures.
+                (!repair
+                    && !object.needs_engineer
+                    && self.session.game_mode_nonzero()
+                    && self.session.game_options().multi_engineer)
+                    .then(|| {
+                        multi_engineer_damage(
+                            building.health,
+                            object.strength,
+                            rules.general.condition_red,
+                        )
+                    })
+                    .flatten()
+            };
             if let Some(damage) = multi_engineer {
                 let warhead = self.interner.intern(&rules.bridge_warheads.c4_name);
                 let receipt = self.commit_direct_damage_receiver(
@@ -1976,8 +1947,7 @@ impl Simulation {
             // its full-health test: a rubble is rebuilt (sim::ares_rubble),
             // and only an `EngineerRepairable` (default `Repairable=`)
             // building is repaired; any other turns him away (0x519FB9).
-            #[cfg(feature = "ares")]
-            if repair {
+            if rules.ares() && repair {
                 let ext = object.building_type_ext();
                 let turned_away = if ext.rubble_intact.applies() {
                     Some(!self.ares_engineer_rebuilds_rubble(
@@ -2157,13 +2127,10 @@ impl Simulation {
         };
         // Ares 3.0 100260D0 (hook 0x00519FF8): the shared classification
         // picks the arm; a Saboteur plants its charge.
-        #[cfg(feature = "ares")]
-        let action = {
-            let _ = agent;
-            self.infiltrate_action(infantry_id, building_id, rules)
-        };
-        #[cfg(feature = "ares")]
-        let agent = action == InfiltrateAction::Spy;
+        let action = rules
+            .ares()
+            .then(|| self.infiltrate_action(infantry_id, building_id, rules));
+        let agent = action.map_or(agent, |action| action == InfiltrateAction::Spy);
         let consumed = if agent {
             if let Some(owner) = self
                 .substrate
@@ -2175,21 +2142,14 @@ impl Simulation {
             }
             true
         } else {
-            #[cfg(feature = "ares")]
-            {
-                action == InfiltrateAction::Sabotage
-                    && self.infantry_per_cell_sabotage(
-                        infantry_id,
-                        building_id,
-                        rules,
-                        registry,
-                        frame_effects,
-                    )
-            }
-            #[cfg(not(feature = "ares"))]
-            {
-                false
-            }
+            action == Some(InfiltrateAction::Sabotage)
+                && self.infantry_per_cell_sabotage(
+                    infantry_id,
+                    building_id,
+                    rules,
+                    registry,
+                    frame_effects,
+                )
         };
         if consumed {
             self.dispatch_object_tag_event(

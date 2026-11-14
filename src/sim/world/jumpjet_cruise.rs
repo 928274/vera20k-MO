@@ -192,6 +192,7 @@ impl JumpjetFlightHost for CruiseHost<'_> {
                 z: location[2],
             },
             false,
+            self.rules.ares_form(),
         );
         self.sim
             .substrate
@@ -486,6 +487,7 @@ impl JumpjetFlightHost for CruiseHost<'_> {
                 z: destination[2],
             },
             true,
+            self.rules.ares_form(),
         );
     }
     fn deploy_latched(&self) -> bool {
@@ -495,8 +497,7 @@ impl JumpjetFlightHost for CruiseHost<'_> {
         // Ares 3.0 JumpjetLocomotionClass_State4_54C550_DeployDir (100499F0,
         // hook 0x54C767): only a type with a `DeployingAnim=` turns, to its
         // own `DeployDir` (eighth turns, << 13) when set.
-        #[cfg(feature = "ares")]
-        {
+        if self.rules.ares() {
             let object = self
                 .sim
                 .interner

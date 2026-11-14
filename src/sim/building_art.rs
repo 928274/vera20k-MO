@@ -66,7 +66,6 @@ pub struct BuildingArt {
     actually_placed: bool,
     /// Ares BuildingExt `FreeUnits_Done` (`+0xC`): a Place has reached the
     /// free-unit block (BuildingClass_Place_SkipFreeUnits, `10036860`).
-    #[cfg(feature = "ares")]
     #[serde(default)]
     free_units_done: bool,
     /// Derived draw cache from UpdateAnimation, before this object's Techno
@@ -195,20 +194,17 @@ impl BuildingArt {
     /// Ares 3.0 BuildingClass_Place_SkipFreeUnits (10036860, hook 0x446AAF):
     /// whether this Place runs the free-unit block, which only the first
     /// Place to reach it does.
-    #[cfg(feature = "ares")]
     fn take_free_units(&mut self) -> bool {
         !std::mem::replace(&mut self.free_units_done, true)
     }
 
     /// Whether a Place has reached the free-unit block (hashed).
-    #[cfg(feature = "ares")]
     pub(crate) fn free_units_done(&self) -> bool {
         self.free_units_done
     }
 
     /// Ares ChronoWarpStateMachine::Update (`10070230`) drops +6E4 when it
     /// removes a chronoshifted building, so its next Place opens it again.
-    #[cfg(feature = "ares")]
     pub(crate) fn clear_actually_placed(&mut self) {
         self.actually_placed = false;
     }
@@ -287,7 +283,6 @@ impl Default for BuildingArt {
             storage: BuildingStorage::default(),
             stuff_enabled: true,
             actually_placed: false,
-            #[cfg(feature = "ares")]
             free_units_done: false,
             tint_sample: None,
         }
@@ -397,8 +392,8 @@ impl Simulation {
         // Ares445F80 entry hook100100B0 ->10013700 (a SecretLab type's roll)
         // ->100449D0 precedes the vanilla ActuallyPlaced early return,
         // including repeated and capture calls.
-        #[cfg(feature = "ares")]
-        {
+        let ares = rules.ares_form();
+        if ares {
             self.ares_update_secret_lab(id, rules);
             self.grant_factory_plans(id, rules);
         }
@@ -417,7 +412,7 @@ impl Simulation {
         let owner = entity.owner();
         let cell = (entity.position.rx(), entity.position.ry());
         let refinery = object.refinery;
-        let powered = Self::anim_power_policy(object, entity);
+        let powered = Self::anim_power_policy(object, entity, rules);
         let damaged = requested_damage_state(
             entity.health,
             object.strength,
@@ -426,8 +421,7 @@ impl Simulation {
         let garrisoned = !entity.passenger_role.occupants().is_empty();
         // Ares BuildingClass_Place_Academy (hook 0x00446366 -> 10023750),
         // inside the first-opening block: an academy joins its owner's list.
-        #[cfg(feature = "ares")]
-        if first_opening {
+        if ares && first_opening {
             self.update_ares_academy_membership(id, true, rules);
         }
         // 0x00446382..0x004463B4: the built type's InfantryGainSelfHeal and
@@ -535,14 +529,12 @@ impl Simulation {
         // 446AAF: Ares marks the block run on its first reach, whatever the
         // capture and ScenarioInit arguments, and skips it afterwards (a
         // building ChronoWarp put back opens again with +6E4 clear).
-        #[cfg(feature = "ares")]
-        let free_units = self
-            .substrate
-            .entities
-            .get_mut(id)
-            .is_some_and(|entity| entity.building_art.take_free_units());
-        #[cfg(not(feature = "ares"))]
-        let free_units = true;
+        let free_units = !rules.ares()
+            || self
+                .substrate
+                .entities
+                .get_mut(id)
+                .is_some_and(|entity| entity.building_art.take_free_units());
         if free_units && !captured && !scenario_initialization {
             if crate::sim::production::spawn_building_free_unit(self, id, rules, registry, effects)
             {
@@ -551,9 +543,10 @@ impl Simulation {
         }
         // Ares 3.0 BuildingClass_Place_InitialPayload (10048EB0, hook
         // 0x446EE2), where every reached opening resumes past the free unit:
-        // the building's InitialPayload, once.
-        #[cfg(feature = "ares")]
-        self.create_ares_initial_payload(id, rules, registry, effects);
+        // the building's InitialPayload, once, when Ares plays.
+        if rules.ares() {
+            self.create_ares_initial_payload(id, rules, registry, effects);
+        }
     }
     fn building_anim_config(
         &self,
@@ -900,7 +893,7 @@ impl Simulation {
         let enabled = self.substrate.entities.get(id)?.building_art.stuff_enabled
             && self.building_operational_state(id, rules) == Some(true);
         if !enabled
-            && Self::anim_power_policy(object, self.substrate.entities.get(id)?)
+            && Self::anim_power_policy(object, self.substrate.entities.get(id)?, rules)
             && self.building_anim_power_flags(id, slot, rules).powered
         {
             self.substrate.anims.get_mut(new_id)?.pause();
@@ -923,7 +916,6 @@ impl Simulation {
     /// Whether the building's type names an anim for `slot`, the first-byte
     /// test of the anim name (`+0x11F4` for the SpecialAnim) the Ares Prism
     /// charge makes before it swaps anims (`100169A0`, `10017970`).
-    #[cfg(feature = "ares")]
     pub(crate) fn building_has_anim(&self, id: u64, slot: u8, rules: &RuleSet) -> bool {
         self.building_anim_config(id, slot, rules)
             .is_some_and(|config| !config.anim_type.is_empty())
@@ -934,7 +926,6 @@ impl Simulation {
     /// Special (`+0x584`) or SpecialTwo (`+0x588`) slot, not through
     /// `0x00451890`: no other slot or the damage flag changes, and the anim
     /// keeps its constructor's offsets (`sim::ares_firestorm`).
-    #[cfg(feature = "ares")]
     pub(crate) fn install_ares_firewall_anim(&mut self, id: u64, slot: u8, anim: u64) {
         let Some(entity) = self.substrate.entities.get_mut(id) else {
             return;
@@ -1281,14 +1272,10 @@ pub fn building_image(entity: &GameEntity, has_buildup: bool) -> BuildingImage {
 /// of a stock `FirestormWall=` type, whose only writer is gone from YR (the
 /// constructor's 0); the Ares hook replaces the test
 /// ([`crate::sim::ares_firestorm::firewall_body_frame`]).
-fn firestorm_body_frame(entity: &GameEntity, object: &ObjectType) -> Option<i32> {
-    #[cfg(feature = "ares")]
-    {
+fn firestorm_body_frame(entity: &GameEntity, object: &ObjectType, rules: &RuleSet) -> Option<i32> {
+    if rules.ares_form() {
         crate::sim::ares_firestorm::firewall_body_frame(entity, object)
-    }
-    #[cfg(not(feature = "ares"))]
-    {
-        let _ = entity;
+    } else {
         object.firestorm_wall.then_some(0)
     }
 }
@@ -1311,7 +1298,7 @@ pub fn current_body_frame(
             state: entity.building_body_state().unwrap_or(1),
             base_frame: entity.construction_stage_value(),
             laser_frame: object.laser_fence.then_some(0),
-            firestorm_frame: firestorm_body_frame(entity, object),
+            firestorm_frame: firestorm_body_frame(entity, object, rules),
             gate_stages: object
                 .gate
                 .then_some(art.map_or(9, |entry| entry.building_gate_stages)),
@@ -1356,7 +1343,7 @@ pub(crate) fn receiver_body_frame(
             },
             base_frame: 0,
             laser_frame: object.laser_fence.then_some(0),
-            firestorm_frame: firestorm_body_frame(entity, object),
+            firestorm_frame: firestorm_body_frame(entity, object, rules),
             gate_stages: object
                 .gate
                 .then_some(art.map_or(9, |art| art.building_gate_stages)),

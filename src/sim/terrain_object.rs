@@ -71,7 +71,6 @@ pub struct TerrainObjectState {
     /// `TerrainClass+0xCC` IsOnFire (constructor false). Only the Ares
     /// terrain fire sets it (`sim::terrain_fire`); stock YR never calls
     /// `Catch_Fire @ 0x0071C5B0`.
-    #[cfg(feature = "ares")]
     #[serde(default)]
     on_fire: bool,
 }
@@ -88,7 +87,6 @@ impl std::hash::Hash for TerrainObjectState {
         self.occupation_bits.hash(state);
         self.spawns_tiberium.hash(state);
         self.lifecycle.hash(state);
-        #[cfg(feature = "ares")]
         if self.on_fire {
             b"ares-terrain-on-fire-v1".hash(state);
         }
@@ -146,7 +144,6 @@ impl TerrainObjectState {
             occupation_bits: terrain_type.raw_occupation_bits(snow_theater),
             spawns_tiberium: terrain_type.spawns_tiberium,
             lifecycle,
-            #[cfg(feature = "ares")]
             on_fire: false,
         }
     }
@@ -247,7 +244,6 @@ impl TerrainObjectState {
             occupation_bits: 0,
             spawns_tiberium: false,
             lifecycle: TerrainObjectLifecycle::Live,
-            #[cfg(feature = "ares")]
             on_fire: false,
         }
     }
@@ -367,17 +363,20 @@ impl TerrainObjectState {
     /// ObjectClass::Unlimbo5F4FEF..5F5040 (original instructions): Terrain
     /// joins Logic only for IsLogic/SpawnsTiberium types. Modes0/5 bypass
     /// the native non-player identity (-2) exclusion; Display is independent.
+    /// `ares` is the caller's `RuleSet::ares_form`.
     pub(crate) fn joins_logic_on_unlimbo(
         &self,
         terrain_type: &TerrainObjectType,
         game_mode: crate::sim::scenario_session::ScenarioGameMode,
+        ares: bool,
     ) -> bool {
         // Ares 3.0 ObjectClass_Put_IsFlammable (1004F470, hook 0x5F4FF9):
         // an `IsFlammable=` type joins too, so a burning tree can spread.
-        #[cfg(feature = "ares")]
-        let needs_update = terrain_type.spawns_tiberium || terrain_type.is_flammable;
-        #[cfg(not(feature = "ares"))]
-        let needs_update = terrain_type.spawns_tiberium;
+        let needs_update = if ares {
+            terrain_type.spawns_tiberium || terrain_type.is_flammable
+        } else {
+            terrain_type.spawns_tiberium
+        };
         terrain_type.is_logic()
             && needs_update
             && (game_mode.is_single_player() || self.native_unique_id != Some(-2))
@@ -455,7 +454,6 @@ impl TerrainObjectState {
     }
 
     /// `TerrainClass+0xCC` IsOnFire.
-    #[cfg(feature = "ares")]
     pub(crate) const fn on_fire(&self) -> bool {
         self.on_fire
     }
@@ -504,7 +502,7 @@ pub struct TerrainObjectStore {
     #[serde(skip)]
     cell_grid: CellGrid,
     animations: BTreeMap<u64, TerrainAnimationState>,
-    /// Shared copy-on-write with presentation frames (docs/sim-thread.md).
+    /// Synced into the presentation copy (docs/sim-thread.md).
     objects: crate::util::synced::Synced<BTreeMap<u64, TerrainObjectState>>,
     cells: BTreeMap<(u16, u16), u64>,
     tiberium_spawning_cells: BTreeSet<(u16, u16)>,
@@ -655,7 +653,6 @@ impl TerrainObjectStore {
 
     /// Write `TerrainClass+0xCC` IsOnFire, the Ares terrain fire's one
     /// writer (`sim::terrain_fire`). False for an object not stored.
-    #[cfg(feature = "ares")]
     pub(crate) fn set_on_fire(&mut self, stable_id: u64, on_fire: bool) -> bool {
         let Some(terrain) = self.objects.get_mut(&stable_id) else {
             return false;
@@ -1027,14 +1024,15 @@ impl TerrainObjectStore {
         // Ares ObjectClass_ReceiveDamage_Relative (10053A80, hook 0x5F53E5)
         // runs for TerrainClass too: RelativeDamage.Terrain of the type's
         // Strength or the current Health, with the packet's sign.
-        #[cfg(feature = "ares")]
-        if let Some(relative) = warhead.ares_combat().and_then(|combat| {
-            combat.relative_damage(
-                Some(crate::rules::ares_warhead::RelativeDamageKind::Terrain),
-                snapshot.health,
-                Some(snapshot.max_health),
-            )
-        }) {
+        if rules.ares_form()
+            && let Some(relative) = warhead.ares_combat().and_then(|combat| {
+                combat.relative_damage(
+                    Some(crate::rules::ares_warhead::RelativeDamageKind::Terrain),
+                    snapshot.health,
+                    Some(snapshot.max_health),
+                )
+            })
+        {
             *raw_damage = if *raw_damage < 0 {
                 relative.wrapping_neg()
             } else {
@@ -1565,9 +1563,9 @@ mod tests {
         crate::map::resolved_terrain::test_grid(2, 2, ResolvedTerrainCell::clear_for_test)
     }
 
-    #[cfg(feature = "ares")]
     #[test]
     fn ares_custom_armor_terrain_receiver_uses_the_same_effective_record() {
+        let _ares = crate::rules::ares_switch::read_ares_way(true);
         let rules = RuleSet::from_ini(&IniFile::from_str(
             "[ArmorTypes]\npaper=steel\n[General]\nTreeStrength=100\n\
              [TerrainTypes]\n0=TREE01\n[TREE01]\nStrength=100\nArmor=paper\n\

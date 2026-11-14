@@ -73,7 +73,7 @@
 //!   the BuildingType array or a negative control other than -1/-2/-3 reads
 //!   memory past the array (`0x004FE537`, `0x004FE6F6`); a null power plant
 //!   slot is dereferenced (`0x004FE8A9`, `0x00505368`). VERA makes no choice
-//!   for such a node and splices nothing for a missing plant. With `ares`, a
+//!   for such a node and splices nothing for a missing plant. Read the Ares way, a
 //!   house whose country lists no plant and whose side has none (side 3 and
 //!   later, or unset `[General]` plants) stops the game (`0x1001DEF6`, "did
 //!   not find any powerplants it could construct"); VERA splices nothing.
@@ -336,7 +336,10 @@ pub(crate) fn economy_state_machine(
     let Some(house) = houses.get(&owner) else {
         return;
     };
-    if house.is_controlled_by_human(game_mode_nonzero) || !game_mode_nonzero {
+    if house.is_controlled_by_human(game_mode_nonzero)
+        || house.command_driven()
+        || !game_mode_nonzero
+    {
         return;
     }
     let mode = house.ai_production().mode;
@@ -1147,7 +1150,8 @@ fn append_perimeter_run(
 /// drained (`+0x577B`). Returns the plant's BuildingType index: the side 0
 /// house's `GDIPowerPlant=`, the side 2 house's `ThirdPowerPlant=`, any other
 /// side's `NodAdvancedPower=` when `0x00505360` admits it, else
-/// `NodRegularPower=`. With `ares`, [`ares_power_plant`] chooses instead.
+/// `NodRegularPower=`. In a game read the Ares way, [`ares_power_plant`]
+/// chooses instead.
 fn power_plant_to_splice(
     sim: &mut Simulation,
     rules: &RuleSet,
@@ -1166,12 +1170,9 @@ fn power_plant_to_splice(
     {
         return None;
     }
-    #[cfg(feature = "ares")]
-    {
+    if rules.ares_form() {
         ares_power_plant(sim, rules, owner, side)
-    }
-    #[cfg(not(feature = "ares"))]
-    {
+    } else {
         let plants = &rules.general.building_types;
         let index = |name: Option<&str>| name.and_then(|name| rules.building_type_index(name));
         // A missing plant is dereferenced natively (module residual): no splice.
@@ -1295,7 +1296,6 @@ fn upgrade_node_ready(
 /// A `PowersUpBuilding=` type is a legal Ares plant only while a host with a
 /// free slot exists. Without one the spliced node could never be placed and
 /// the house would rebuild it forever.
-#[cfg(feature = "ares")]
 fn ares_power_plant_is_placeable(
     sim: &Simulation,
     rules: &RuleSet,
@@ -1309,7 +1309,6 @@ fn ares_power_plant_is_placeable(
         || upgrade_host_site(sim, rules, owner, plant).is_some()
 }
 
-#[cfg(feature = "ares")]
 fn ares_power_plant(
     sim: &mut Simulation,
     rules: &RuleSet,
@@ -1695,8 +1694,9 @@ fn place_building(
     }
     // Ares BuildingClass_KickOutUnit_Firewall (10014A50, hook 0x445355):
     // a firestorm wall section fills the gaps to the sections it links to.
-    #[cfg(feature = "ares")]
-    sim.ares_build_lines(product, (rx, ry), owner, rules, registry, effects);
+    if rules.ares_form() {
+        sim.ares_build_lines(product, (rx, ry), owner, rules, registry, effects);
+    }
     true
 }
 

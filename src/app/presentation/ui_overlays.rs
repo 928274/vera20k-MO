@@ -113,9 +113,11 @@ impl HudBomb {
 }
 
 impl HudFacts {
+    /// `location` is `ground_pose::object_location` on the live map.
     pub(crate) fn capture(
         entity: &crate::sim::game_entity::GameEntity,
         at: &crate::app::presentation::frame::Capture<'_>,
+        location: DriveCoord,
     ) -> Self {
         let sim = at.sim;
         let rules = at.rules();
@@ -189,7 +191,7 @@ impl HudFacts {
         };
         Self {
             get_coords: crate::sim::movement::ground_pose::object_get_coords(entity, terrain),
-            location: crate::sim::movement::ground_pose::object_location(entity, terrain),
+            location,
             structure,
             more: (!more.is_empty()).then(|| Box::new(more)),
         }
@@ -355,8 +357,19 @@ pub(crate) fn health_bar_drawable(
     local_owner: Option<&str>,
 ) -> bool {
     let player = local_owner.and_then(|owner| sim.interner().get(owner));
+    health_bar_drawable_for(sim, entity, hovered_id, local_owner, player)
+}
+
+/// [`health_bar_drawable`] for `local_owner` and its interned id `player`.
+fn health_bar_drawable_for(
+    sim: &crate::sim::world::Simulation,
+    entity: &ObjectRecord,
+    hovered_id: Option<u64>,
+    local_owner: Option<&str>,
+    player: Option<crate::sim::intern::InternedId>,
+) -> bool {
     let (_, draw_pips) = health_strip_visibility(sim, entity, hovered_id, player, false);
-    draw_pips && admitted_techno_observer(sim, entity, local_owner).is_some()
+    draw_pips && admitted_techno_observer(sim, entity, local_owner, player).is_some()
 }
 
 /// DrawExtras' health dispatch: [`status_visibility`], except that a hovered,
@@ -450,13 +463,14 @@ pub(crate) fn foot_select_bracket(sx: f32, sy: f32, infantry: bool) -> [f32; 4] 
 
 /// Retained Display membership and the shared tactical draw admission.
 /// Return the already derived observer facts for native Extras queries.
+/// `local_owner_id` is `local_owner`'s interned id.
 fn admitted_techno_observer(
     sim: &crate::sim::world::Simulation,
     entity: &ObjectRecord,
     local_owner: Option<&str>,
+    local_owner_id: Option<crate::sim::intern::InternedId>,
 ) -> Option<crate::render::draw_state::ObserverDrawContext> {
     sim.display_layers().layer_of(entity.stable_id())?;
-    let local_owner_id = local_owner.and_then(|owner| sim.interner().get(owner));
     // `observer_draw_context` for the frame's local player, `local_owner`.
     let observer = entity.seen.observer;
     crate::app::presentation::instances::tactical_entity_admission(
@@ -497,11 +511,12 @@ fn entity_status_pips_drawable(
     let Some(current_house_id) = current_house_id else {
         return false;
     };
-    if !health_bar_drawable(
+    if !health_bar_drawable_for(
         sim,
         entity,
         hovered_entity_id,
         Some(sim.interner().resolve(current_house_id)),
+        Some(current_house_id),
     ) {
         return false;
     }
@@ -559,36 +574,36 @@ pub(crate) fn control_group_status_labels(
     if slot_by_id.is_empty() {
         return Vec::new();
     }
-
-    sim.display_layers()
-        .ordered_ids()
-        .filter_map(|&stable_id| {
-            let slot = *slot_by_id.get(&stable_id)?;
-            let entity = frame.object(stable_id)?;
-            if entity.sinking.is_active()
-                || entity.passenger_role.is_inside_transport()
-                || !entity_status_pips_drawable(
-                    sim,
-                    entity,
-                    hovered_entity_id,
+    let labelled = |stable_id: u64| {
+        let slot = *slot_by_id.get(&stable_id)?;
+        let entity = frame.object(stable_id)?;
+        if entity.sinking.is_active()
+            || entity.passenger_role.is_inside_transport()
+            || !entity_status_pips_drawable(sim, entity, hovered_entity_id, current_house_id, rules)
+            || (entity.category() == EntityCategory::Structure
+                && !status_entity_visible_plain(
                     current_house_id,
-                    rules,
-                )
-                || (entity.category() == EntityCategory::Structure
-                    && !status_entity_visible_plain(
-                        current_house_id,
-                        sim.fog(),
-                        &entity.position,
-                        entity.owner(),
-                        ignore_visibility,
-                    ))
-            {
-                return None;
-            }
-            let digit = char::from(b'0' + slot as u8);
-            Some((stable_id, digit))
-        })
-        .collect()
+                    sim.fog(),
+                    &entity.position,
+                    entity.owner(),
+                    ignore_visibility,
+                ))
+        {
+            return None;
+        }
+        let digit = char::from(b'0' + slot as u8);
+        Some((stable_id, digit))
+    };
+    // A digit shows only on a Display member the admission passes, a selected
+    // or hovered one, in Display order. The group members are few, so they
+    // are put in that order rather than walking every Display member.
+    let order = frame.display_order(sim.display_layers());
+    let mut labels: Vec<_> = slot_by_id
+        .keys()
+        .filter_map(|&stable_id| Some((order.position(stable_id)?, labelled(stable_id)?)))
+        .collect();
+    labels.sort_unstable_by_key(|&(position, _)| position);
+    labels.into_iter().map(|(_, label)| label).collect()
 }
 
 /// One parent's fill/outline followed by its GAME.FNT glyphs. Both materials
@@ -898,17 +913,16 @@ pub(crate) fn build_building_status_render_instances(
     let mut labels = BuildingStatusTextInstances::default();
     let current_house = sim.interner().resolve(current_house_id);
     // `current_house_id` is the frame's local player, whom its records answer
-    // for.
-    let structures = frame
-        .objects()
+    // for. Only the buildings drawn this frame can pass the body-opportunity
+    // test, so they are walked instead of every record; both ascend by id.
+    let structures = body_opportunities
+        .iter()
+        .filter_map(|&id| frame.object(id))
         .filter(|entity| entity.category() == EntityCategory::Structure);
     for entity in structures {
         //6D944D/9458 tests Mark+74 and body-opportunity+99.43E7C7
         //requires selected, including when the object is also hovered.
-        if !body_opportunities.contains(&entity.stable_id())
-            || !entity.lifecycle.cell_marked()
-            || !entity.selection.is_selected()
-        {
+        if !entity.selection.is_selected() || !entity.lifecycle.cell_marked() {
             continue;
         }
         let allied = crate::map::houses::is_allied_with(
@@ -1513,7 +1527,7 @@ fn phobos_insignia_draw<'a>(
         .then(|| {
             let cargo = entity.passenger_role.cargo();
             let index = if object.phobos_passengers_by_size {
-                cargo.map_or(0, crate::sim::passenger::PassengerCargo::total_size)
+                cargo.map_or(0, crate::app::presentation::frame::Cargo::total_size)
             } else {
                 cargo.map_or(0, |cargo| cargo.count() as i32)
             };
@@ -1657,6 +1671,7 @@ pub(crate) fn techno_extras_for_parent(
     if entity.sinking.is_active() || entity.passenger_role.is_inside_transport() {
         return strip;
     }
+    let local_owner_id = local_owner.and_then(|name| sim.interner().get(name));
     //6F519B..524E clock and6F5253..5345 wrench precede observer/selection
     // admission. Both use the existing per-parent MOUSEPAL N1 material; the
     // clock's886FA0 clip is the tactical viewport, not a sprite's body bounds.
@@ -1677,8 +1692,7 @@ pub(crate) fn techno_extras_for_parent(
     let power_off = false;
     if (bomb_visible || repairing || power_off)
         && (viewport.ignore_visibility
-            || local_owner
-                .and_then(|name| sim.interner().get(name))
+            || local_owner_id
                 .zip(sim.resolved_terrain())
                 .is_some_and(|(viewer, terrain)| {
                     let cells = crate::map::resolved_terrain::NativeCellQuery::isolated(terrain);
@@ -1768,7 +1782,7 @@ pub(crate) fn techno_extras_for_parent(
             strip.power_off = prefix(shape, frame, if repairing { 18.0 } else { 0.0 });
         }
     }
-    let Some(observer) = admitted_techno_observer(sim, entity, local_owner) else {
+    let Some(observer) = admitted_techno_observer(sim, entity, local_owner, local_owner_id) else {
         return strip;
     };
     #[cfg(not(feature = "phobos"))]
@@ -1800,7 +1814,7 @@ pub(crate) fn techno_extras_for_parent(
     // from drawing disguise art; +68 uses VisualCharacter's screen(0,NULL)
     // query. The first screen argument means graphical client, not force_sensor.
     // Both are captured for the frame's local player, `local_owner`.
-    let observer_id = local_owner.and_then(|owner| sim.interner().get(owner));
+    let observer_id = local_owner_id;
     let disguised = observer_id.is_some() && entity.seen.disguised_to_observer;
     let character = entity.seen.visual_character;
     #[cfg(not(feature = "phobos"))]
@@ -1967,7 +1981,7 @@ pub(crate) fn techno_extras_for_parent(
         //6F659E projects the foundation edge at Z=0;6F682C passes it to
         //the shared709A90 owner. Building rows use PIPS, (+6,-1), step(4,2).
         //Garrison and passenger arms restart at that origin independently.
-        for pip in scale_pip_draws(sim, entity, hovered_id, local_owner, rules) {
+        for pip in scale_pip_draws(sim, entity, hovered_id, local_owner_id, rules) {
             strip.fills.extend(instance(
                 shape,
                 pip.frame,
@@ -2066,7 +2080,7 @@ pub(crate) fn techno_extras_for_parent(
     // `0x006F6A8E..0x006F6AB0` passes the draw point itself, without the
     // Type+3E0 PixelSelectionBracketDelta that moves the health bar.
     if let Some(art) = overlay.scale_pips() {
-        for pip in scale_pip_draws(sim, entity, hovered_id, local_owner, rules) {
+        for pip in scale_pip_draws(sim, entity, hovered_id, local_owner_id, rules) {
             let x = sx - 15.0 + if infantry { 11.0 } else { 0.0 } + pip.offset_pixels[0] as f32;
             strip.scale.extend(instance(
                 art,
@@ -2153,7 +2167,6 @@ pub(super) fn passenger_pip_filler_count(size: f64) -> i32 {
 /// building, anything else 1), then `Size - 1` frame-3 pips, clipped to the
 /// pips left. `Passengers.BySize=no` and absorbers give every passenger one
 /// pip; the size is truncated by the DLL's CRT conversion (`100772B0`).
-#[cfg(feature = "ares")]
 fn ares_passenger_pip_frames(
     sim: &crate::sim::world::Simulation,
     entity: &crate::sim::game_entity::GameEntity,
@@ -2225,7 +2238,7 @@ pub(crate) fn scale_pip_draws<'a>(
     sim: &crate::sim::world::Simulation,
     entity: &'a ObjectRecord,
     hovered_id: Option<u64>,
-    local_owner: Option<&str>,
+    local_owner_id: Option<crate::sim::intern::InternedId>,
     rules: &RuleSet,
 ) -> &'a [ScalePipDraw] {
     // Ares6F6A58 ->1004A260 skips mobile scale pips to6F6AB6. The health
@@ -2236,13 +2249,7 @@ pub(crate) fn scale_pip_draws<'a>(
     }
     if entity.sinking.is_active()
         || entity.passenger_role.is_inside_transport()
-        || !entity_status_pips_drawable(
-            sim,
-            entity,
-            hovered_id,
-            local_owner.and_then(|owner| sim.interner().get(owner)),
-            Some(rules),
-        )
+        || !entity_status_pips_drawable(sim, entity, hovered_id, local_owner_id, Some(rules))
     {
         return &[];
     }
@@ -2306,8 +2313,9 @@ fn scale_pip_rows(
     // GetPipMax frames of GetPassengerPips, stepping once more after the
     // first GapAfter pips; any other PipScale resumes at the other scale
     // arms (0x70A083).
-    #[cfg(feature = "ares")]
-    if object.passengers > 0 && object.pip_scale == crate::rules::object_type::PipScale::Passengers
+    if rules.ares()
+        && object.passengers > 0
+        && object.pip_scale == crate::rules::object_type::PipScale::Passengers
     {
         let (frames, gap_after) = ares_passenger_pip_frames(sim, entity, object, rules);
         pips.extend(frames.into_iter().enumerate().map(|(slot, frame)| {

@@ -18,14 +18,12 @@ use crate::sim::world::Simulation;
 /// Ares BuildingExt+4C SensorArrayActiveCounter: Activate (10016D60) counts
 /// every call and adds the sensors only from zero; Deactivate (10016DB0)
 /// removes them only while the count is positive, then clears it.
-#[cfg(feature = "ares")]
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
 )]
 #[serde(transparent)]
 pub(crate) struct SensorArrayCounter(i32);
 
-#[cfg(feature = "ares")]
 impl SensorArrayCounter {
     /// Counts one activation; true when it was the first, so the sensors go up.
     fn activate(&mut self) -> bool {
@@ -284,12 +282,13 @@ impl Simulation {
         };
         // Ares SensorArrayActivate10016D60 (hook455828) replaces the array's
         // Is_Operational gate with its own, counted one.
-        #[cfg(feature = "ares")]
-        let sight = {
+        let sight = if rules.ares_form() {
             if sight.is_some() {
                 self.ares_sensor_array_activate(stable_id, rules, registry);
             }
-            None::<u16>
+            None
+        } else {
+            sight
         };
         if (sight.is_none() && detect_radius.is_none())
             || self.building_operational_state(stable_id, rules) != Some(true)
@@ -352,12 +351,13 @@ impl Simulation {
         };
         // Ares SensorArrayDeactivate10016DB0 (hook4556E1) removes only an
         // active array, with the SensorsSight its add used.
-        #[cfg(feature = "ares")]
-        let cloak_radius = {
+        let cloak_radius = if rules.ares_form() {
             if cloak_radius.is_some() {
                 self.ares_sensor_array_deactivate(stable_id, rules, registry);
             }
-            None::<i8>
+            None
+        } else {
+            cloak_radius
         };
         if let Some(radius) = cloak_radius {
             self.apply_building_sensor_remove(owner, center, radius.max(0) as u16, rules, registry);
@@ -372,7 +372,6 @@ impl Simulation {
     /// of AddSensorArrayAt455820: an online (vt+0x350, the shared4555D0
     /// adapter), not Deactivated building counts the call in BuildingExt+4C
     /// and adds its SensorsSight circle only when the count was zero.
-    #[cfg(feature = "ares")]
     pub(crate) fn ares_sensor_array_activate(
         &mut self,
         stable_id: u64,
@@ -388,7 +387,7 @@ impl Simulation {
         if entity.deactivated.is_offline() {
             return;
         }
-        if !entity.sensor_array_counter.activate() {
+        if !entity.ares.sensor_array_counter.activate() {
             return;
         }
         let Some((owner, center, sight)) =
@@ -410,7 +409,6 @@ impl Simulation {
     /// Ares BuildingClass_SensorArrayDeactivate10016DB0 (hook4556E1), the
     /// body of RemoveSensorArrayAt4556D0: only a positive count removes, with
     /// SensorsSight rather than CloakRadiusInCells, and clears the count.
-    #[cfg(feature = "ares")]
     pub(crate) fn ares_sensor_array_deactivate(
         &mut self,
         stable_id: u64,
@@ -420,7 +418,7 @@ impl Simulation {
         let Some(entity) = self.substrate.entities.get_mut(stable_id) else {
             return;
         };
-        if !entity.sensor_array_counter.deactivate() {
+        if !entity.ares.sensor_array_counter.deactivate() {
             return;
         }
         let Some((owner, center, sight)) =
@@ -444,7 +442,6 @@ impl Simulation {
     /// and454B5F, 10016E30) and DisableStuff (hook4524A3, 10016D00): an
     /// online, not Deactivated array is active; a change activates or
     /// deactivates it.
-    #[cfg(feature = "ares")]
     pub(crate) fn update_ares_sensor_array(
         &mut self,
         stable_id: u64,
@@ -462,7 +459,7 @@ impl Simulation {
         {
             return;
         }
-        let was_active = entity.sensor_array_counter.is_active();
+        let was_active = entity.ares.sensor_array_counter.is_active();
         let active = !entity.deactivated.is_offline()
             && self.building_operational_state(stable_id, rules) == Some(true);
         if active == was_active {
@@ -479,7 +476,6 @@ impl Simulation {
     /// ChangeOwnership_SensorArrayB10016CD0: a `SensorArray=` building
     /// dispatches RemoveSensorArrayAt (vt+0x4F8) or AddSensorArrayAt
     /// (vt+0x4F4) with the empty cell.
-    #[cfg(feature = "ares")]
     pub(crate) fn ares_sensor_array_dispatch(
         &mut self,
         stable_id: u64,
@@ -766,9 +762,9 @@ mod tests {
     /// AI (hook43FE69) and Limbo: the array follows its power, removes the
     /// SensorsSight circle it added (hook4556E1), and an inactive array's
     /// Limbo debits nothing.
-    #[cfg(feature = "ares")]
     #[test]
     fn ares_sensor_array_follows_power_and_removes_what_it_added() {
+        let _ares = crate::rules::ares_switch::read_ares_way(true);
         let rules = rules();
         let mut sim = sim_with_map_authority();
         let id = map_placed_napsis(&mut sim, &rules);
@@ -785,6 +781,7 @@ mod tests {
                 .entities
                 .get(id)
                 .unwrap()
+                .ares
                 .sensor_array_counter
                 .count()
         };

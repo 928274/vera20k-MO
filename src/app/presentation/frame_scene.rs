@@ -16,10 +16,16 @@ pub(crate) struct SceneFacts {
 }
 
 impl SceneFacts {
-    pub(crate) fn capture(entity: &GameEntity, at: &Capture<'_>) -> Self {
+    /// `location` is `ground_pose::object_location` on the live map.
+    pub(crate) fn capture(
+        entity: &GameEntity,
+        at: &Capture<'_>,
+        location: crate::sim::components::DriveCoord,
+    ) -> Self {
         Self {
             radar: crate::render::radar::RadarFacts::capture(
                 entity,
+                location,
                 at.sim,
                 at.rules(),
                 at.cells.as_ref(),
@@ -33,8 +39,6 @@ impl SceneFacts {
 /// The frame's part that belongs to no one object.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SceneFrame {
-    /// What the radar reads beside its objects (`render::radar`).
-    pub(crate) radar: crate::render::radar::RadarFrame,
     /// What the sidebar, the house UI and the sounds read of the objects
     /// (`presentation::sidebar_render`).
     pub(crate) ui: crate::app::presentation::sidebar_render::UiFrame,
@@ -66,7 +70,6 @@ pub(crate) struct PlanningGraph {
 impl SceneFrame {
     pub(crate) fn capture(at: &Capture<'_>) -> Self {
         Self {
-            radar: crate::render::radar::RadarFrame::default(),
             ui: crate::app::presentation::sidebar_render::UiFrame::capture(at),
             spotlights: spotlights(at),
             psi_warnings_detected: psi_warnings_detected(at),
@@ -102,12 +105,16 @@ fn psi_warnings_detected(at: &Capture<'_>) -> HashSet<u64> {
     let Some(viewer) = at.observer_id else {
         return HashSet::new();
     };
+    // Each type's `PsiWarning=` is asked once, not once per Anim by name.
+    let mut psi_warning = crate::util::lookup_hash::LookupMap::default();
     sim.anims()
         .filter(|(_, anim)| {
-            rules
-                .art()
-                .anim_runtime_config(sim.interner().resolve(anim.type_id()))
-                .is_some_and(|config| config.psi_warning)
+            *psi_warning.entry(anim.type_id()).or_insert_with(|| {
+                rules
+                    .art()
+                    .anim_runtime_config(sim.interner().resolve(anim.type_id()))
+                    .is_some_and(|config| config.psi_warning)
+            })
         })
         .filter(|(_, anim)| sim.psi_warning_detected_by(viewer, anim, rules))
         .map(|(&id, _)| id)

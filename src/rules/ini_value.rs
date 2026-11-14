@@ -444,7 +444,6 @@ impl IniSection {
     /// anything else, or an absent key, keeps `current`. Phobos's
     /// `ValueableIdx<ColorScheme>::Read` (`Utilities/TemplateDef.h`) is the
     /// same read over `ColorScheme::FindIndex(name, 1)` and `IsBlank`.
-    #[cfg(any(feature = "ares", feature = "phobos"))]
     pub(crate) fn read_ares_color_scheme_index(
         &self,
         key: &str,
@@ -460,7 +459,6 @@ impl IniSection {
     /// ([`crate::rules::ares_mouse_cursor::MouseCursors::find`]): a named
     /// entry stores its index, `none`/`<none>` stores -1, anything else keeps
     /// `current`.
-    #[cfg(feature = "ares")]
     pub(crate) fn read_ares_mouse_cursor(
         &self,
         key: &str,
@@ -471,7 +469,6 @@ impl IniSection {
         self.read_ares_found_index(key, current, find)
     }
 
-    #[cfg(any(feature = "ares", feature = "phobos"))]
     fn read_ares_found_index(
         &self,
         key: &str,
@@ -603,7 +600,6 @@ impl IniSection {
     /// token uses the shared Parser<int> and a 128-byte scanf_s buffer.
     /// A partial native parse copies uninitialized trailing locals; retain
     /// the prior coordinate for that malformed-input boundary in Rust.
-    #[cfg(feature = "ares")]
     pub(crate) fn read_ares_coord3(&self, key: &str, current: [i32; 3]) -> [i32; 3] {
         let _ares = crate::rules::ares_switch::ares_reads();
         self.read_string_with(key, 2048, current, |previous, value| {
@@ -615,7 +611,6 @@ impl IniSection {
     /// coordinate reader 100406D0 as [`Self::read_ares_coord3`]: a read
     /// that converts sets the value and its presence, anything else retains
     /// both (the partial-parse boundary keeps the prior pair here).
-    #[cfg(feature = "ares")]
     pub(crate) fn read_ares_nullable_coord3(
         &self,
         key: &str,
@@ -630,7 +625,6 @@ impl IniSection {
     /// Ares `Valueable<CSFText>::Read` (CsfText::Read 10076510 over
     /// ReadString 2048): a present value replaces the label with its first
     /// 31 bytes; absent or empty keeps it.
-    #[cfg(feature = "ares")]
     pub(crate) fn read_ares_csf_label(&self, key: &str, current: &str) -> String {
         let _ares = crate::rules::ares_switch::ares_reads();
         self.read_string_with(key, 2048, current.to_owned(), |_, name| {
@@ -642,7 +636,6 @@ impl IniSection {
     /// 10008EE0: ReadString(2048), then `detail::parse<unsigned char>`
     /// 100089C0 must convert all three channels. Only then are the color and
     /// its presence set; absent, empty and invalid text retain both.
-    #[cfg(feature = "ares")]
     pub(crate) fn read_ares_nullable_color(
         &self,
         key: &str,
@@ -684,7 +677,6 @@ impl IniSection {
     /// Ares `read<Leptons>` (Utilities/TemplateDef.h): INI_EX::ReadDouble
     /// (the [`Self::read_ares_double_bits`] scan, cells), then
     /// `Game::F2I(cells * 256.0)`. A failed read keeps the current leptons.
-    #[cfg(feature = "ares")]
     pub fn read_ares_leptons(&self, key: &str, current: i32) -> i32 {
         let _ares = crate::rules::ares_switch::ares_reads();
         self.read_string_with(key, 2048, current, |current, value| {
@@ -699,7 +691,6 @@ impl IniSection {
     /// Ares `Nullable<Leptons>::Read @ 10019660` over the same
     /// `detail::read<Leptons> @ 1000A6D0` as [`Self::read_ares_leptons`]:
     /// only a successful parse sets the value and its presence.
-    #[cfg(feature = "ares")]
     pub fn read_ares_nullable_leptons(&self, key: &str, current: Option<i32>) -> Option<i32> {
         let _ares = crate::rules::ares_switch::ares_reads();
         self.read_string_with(key, 2048, current, |current, value| {
@@ -1046,7 +1037,6 @@ impl IniSection {
     /// buffer, then copy31 bytes into char[32] and lowercase. An absent/empty
     /// read retains the previous filename (the projected read_name policy).
     /// Original reader controls: tools/sidebar_oracle/pcx_cameos.json.
-    #[cfg(feature = "ares")]
     pub(crate) fn read_ares_pcx_filename(&self, key: &str) -> Option<String> {
         let _ares = crate::rules::ares_switch::ares_reads();
         self.read_name(key, 0x800)
@@ -1088,7 +1078,7 @@ impl IniSection {
         default: u32,
         mut find_house: impl FnMut(&str) -> Option<usize>,
     ) -> u32 {
-        let capacity = if crate::rules::ARES_BUILD {
+        let capacity = if crate::rules::ares_switch::ares_way() {
             0x800
         } else {
             0x80
@@ -2014,7 +2004,6 @@ fn parse_phobos_color(value: &str) -> Option<[u8; 3]> {
 /// 100089C0 for BYTE): [`scan_partial_int_fields`], except that NextToken's
 /// `sscanf_s("%[^,]")` into its 0x80-byte buffer fails on a token of 128
 /// bytes or more (after the leading spaces), which ends the scan there.
-#[cfg(feature = "ares")]
 fn scan_ares_fields(value: &str, out: &mut [i32]) -> u8 {
     let limit = value
         .split(',')
@@ -2032,7 +2021,6 @@ fn scan_ares_fields(value: &str, out: &mut [i32]) -> u8 {
 }
 
 /// The three-value coordinate reader 100406D0, when all three convert.
-#[cfg(feature = "ares")]
 fn parse_ares_coord3(value: &str) -> Option<[i32; 3]> {
     let mut fields = [0; 3];
     (scan_ares_fields(value, &mut fields) == 3).then_some(fields)
@@ -2042,7 +2030,6 @@ fn parse_ares_coord3(value: &str) -> Option<[i32; 3]> {
 /// `Parser<BYTE>::TryParse` (10076A10) scans the token like `Parser<int>`
 /// (`$%hu`, `%hxh`, `%hu`) into a WORD, keeping its low 16 bits, and accepts
 /// it only up to 255.
-#[cfg(feature = "ares")]
 fn parse_ares_color(value: &str) -> Option<[u8; 3]> {
     let mut fields = [0; 3];
     if scan_ares_fields(value, &mut fields) != 3 {
@@ -2133,9 +2120,9 @@ mod tests {
     use super::{crt_atoi, parse_leading_f32, strtok, truncate_native_bytes};
     use crate::rules::ini_parser::{IniFile, IniSection};
 
-    #[cfg(feature = "ares")]
     #[test]
     fn ares_integer_reader_retains_failed_values_and_uses_ares_dollar_decimal() {
+        let _ares = crate::rules::ares_switch::read_ares_way(true);
         use crate::rules::native_processing::{RulesLayerKind, RulesLayerStack};
 
         for (value, expected) in [
@@ -2178,8 +2165,9 @@ mod tests {
         use crate::rules::ruleset::RuleSet;
 
         // ReadAction474EE0, called by SuperWeaponType ReadINI6CEA9B. A Type no
-        // Ares handler takes keeps the stock read in every build (Ares builds
-        // redirect the Lightning Storm, whose Initialize installs its action).
+        // Ares handler takes keeps the stock read either way (read the Ares
+        // way, the Lightning Storm is redirected; its Initialize installs its
+        // action).
         let mut layers = RulesLayerStack::new(sec(
             "[SuperWeaponTypes]\n0=Strike\n[Strike]\nType=PsychicReveal\nAction=nUkE\n",
         ));
@@ -2669,10 +2657,11 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "ares"))]
+#[cfg(test)]
 mod pcx_cameo_tests {
     #[test]
     fn filename_projection_matches_original_ares_reader_controls() {
+        let _ares = crate::rules::ares_switch::read_ares_way(true);
         let corpus: serde_json::Value = serde_json::from_str(crate::test_fixture::text(
             "tools/sidebar_oracle/pcx_cameos.json",
         ))

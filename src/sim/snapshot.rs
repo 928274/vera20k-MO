@@ -345,7 +345,6 @@ pub enum SnapshotError {
 pub enum SnapshotRestoreError {
     #[error(transparent)]
     Tiberium(#[from] crate::rules::overlay_types::TiberiumImageError),
-    #[cfg(feature = "ares")]
     #[error("object {object_id} has invalid attached stats: {reason}")]
     InvalidAttachedStatsState {
         object_id: u64,
@@ -359,7 +358,6 @@ pub enum SnapshotRestoreError {
     InvalidUnitDelivery(&'static str),
     #[error("invalid paid two-stage selection: {0}")]
     InvalidPaidSuperWeaponSelection(&'static str),
-    #[cfg(feature = "ares")]
     #[error("invalid superweapon launch history: {0}")]
     InvalidSuperWeaponLaunchHistory(&'static str),
     #[error("invalid detached Particle {object_id}: {reason}")]
@@ -427,7 +425,6 @@ pub enum SnapshotRestoreError {
     InvalidFrameContinuation { reason: &'static str },
     #[error("invalid saved multiplayer session: {reason}")]
     InvalidMultiplayerSession { reason: &'static str },
-    #[cfg(feature = "ares")]
     #[error("invalid saved factory-source Country reference: {reason}")]
     InvalidFactoryCountry { reason: &'static str },
     #[error("entity {object_id} is a live infantryman with the dying mark")]
@@ -1789,6 +1786,24 @@ impl Simulation {
         }
     }
 
+    /// Saved Ares state (a delivery base override, an attached superweapon,
+    /// a pending unit delivery, a paid superweapon selection) loads only into
+    /// a game Ares plays in; the player load checks it with the loading
+    /// game's switch before restoring.
+    pub fn validate_ares_state_for_load(&self, ares: bool) -> Result<(), SnapshotRestoreError> {
+        for (_, entity) in self.substrate.entities.iter_sorted() {
+            entity
+                .validate_ares_build_compatibility(ares)
+                .map_err(SnapshotRestoreError::InvalidUnitDelivery)?;
+        }
+        self.unit_deliveries
+            .validate_ares_build_compatibility(ares)
+            .map_err(SnapshotRestoreError::InvalidUnitDelivery)?;
+        self.validate_paid_super_weapon_selections_for_load(ares)
+            .map_err(SnapshotRestoreError::InvalidPaidSuperWeaponSelection)?;
+        Ok(())
+    }
+
     /// Validate and re-register a deserialized simulation before it can resume.
     ///
     /// Native load registers old identities and pointer slots, resolves them,
@@ -1804,13 +1819,9 @@ impl Simulation {
                     object_id: entity.stable_id(),
                 });
             }
-            entity
-                .validate_ares_build_compatibility()
-                .map_err(SnapshotRestoreError::InvalidUnitDelivery)?;
         }
         self.validate_paid_super_weapon_selections()
             .map_err(SnapshotRestoreError::InvalidPaidSuperWeaponSelection)?;
-        #[cfg(feature = "ares")]
         self.super_weapons
             .validate_ares_launch_history()
             .map_err(SnapshotRestoreError::InvalidSuperWeaponLaunchHistory)?;
@@ -2176,7 +2187,11 @@ impl Simulation {
                 }
             })?;
             if !terrain.in_logic_vector()
-                && terrain.joins_logic_on_unlimbo(terrain_type, self.session.game_mode())
+                && terrain.joins_logic_on_unlimbo(
+                    terrain_type,
+                    self.session.game_mode(),
+                    rules.ares_form(),
+                )
             {
                 return Err(SnapshotRestoreError::MissingRequiredLogicIdentity {
                     registry: "TerrainObjectStore",
@@ -2184,17 +2199,18 @@ impl Simulation {
                 });
             }
         }
-        #[cfg(feature = "ares")]
-        self.validate_attached_stats_after_restore(rules)
-            .map_err(
-                |(object_id, reason)| SnapshotRestoreError::InvalidAttachedStatsState {
-                    object_id,
-                    reason,
-                },
-            )?;
-        #[cfg(feature = "ares")]
-        self.validate_factory_country_references(rules)
-            .map_err(|reason| SnapshotRestoreError::InvalidFactoryCountry { reason })?;
+        let ares = rules.ares_form();
+        if ares {
+            self.validate_attached_stats_after_restore(rules)
+                .map_err(
+                    |(object_id, reason)| SnapshotRestoreError::InvalidAttachedStatsState {
+                        object_id,
+                        reason,
+                    },
+                )?;
+            self.validate_factory_country_references(rules)
+                .map_err(|reason| SnapshotRestoreError::InvalidFactoryCountry { reason })?;
+        }
         self.validate_disk_lasers_after_restore(rules)
             .map_err(
                 |(object_id, reason)| SnapshotRestoreError::InvalidDiskLaserState {
@@ -2352,8 +2368,9 @@ impl Simulation {
 
         // Ares 3.0 10014B70 (hook 0x483D94): a powered firestorm section's
         // Impassable class is a Recalc product the template lacks.
-        #[cfg(feature = "ares")]
-        self.ares_firestorm_restore_zone_classes(rules);
+        if ares {
+            self.ares_firestorm_restore_zone_classes(rules);
+        }
         if !self.rebuild_dynamic_navigation(rules) {
             return Err(SnapshotRestoreError::NavigationAuthorityPublicationFailed);
         }
@@ -2368,7 +2385,7 @@ impl Simulation {
         // CellTag identities are meaningful only after the canonical Cell
         // allocation is restored. Keep their final owner validation in this
         // shared admission seam, before an app can publish the candidate.
-        self.validate_restored_trigger_runtime()
+        self.validate_restored_trigger_runtime(rules.ares_form())
             .map_err(|reason| SnapshotRestoreError::InvalidTriggerRuntime { reason })?;
         Ok(SnapshotMapRestoreOutput {
             occupied_overlays,
@@ -6270,7 +6287,7 @@ mod tests {
         let entity = restored.substrate.entities.get(entity_id).unwrap();
         assert_eq!(entity.air_spatial_bucket(), Some(143));
         assert_eq!(entity.air_spatial_enter_order(), 91);
-        assert_eq!(entity.crate_multipliers.armor().bits(), 1.5_f64.to_bits());
+        assert_eq!(entity.armor_multiplier().bits(), 1.5_f64.to_bits());
         assert!(entity.berserk.is_active());
         assert_eq!(entity.berserk.timer(), -17);
         assert!(entity.ai_sell_repair.was_attacked_by_enemy());
@@ -6693,6 +6710,7 @@ mod tests {
             &"4x3".into(),
             profile,
             Some((32, 32)),
+            false,
         );
         assert_ne!(sim.state_hash(), expected_hash);
         sim.substrate.hidden_occupation.enter_building(
@@ -6700,6 +6718,7 @@ mod tests {
             &"4x3".into(),
             profile,
             Some((32, 32)),
+            false,
         );
         let mut stored = profile;
         stored.occupy_height = 4;
@@ -7595,8 +7614,7 @@ mod tests {
             .set_for_test(Some(crate::sim::c4_plant::PendingC4Detonation::new(
                 crate::sim::timer::CdTimer::from_raw(-1, 0),
                 Some(9_999),
-            ),
-        ));
+            )));
         let mut manager = SpawnManagerState::for_test(
             sim.interner.intern("HORNET"),
             vec![

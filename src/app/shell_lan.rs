@@ -64,7 +64,7 @@ pub(crate) enum LanServiceRequest {
     Refresh,
     SelectGame { game_id: Option<u64>, changed: bool },
     NameChanged(String),
-    Chat { text: Vec<u16>, color: u32 },
+    Chat { text: Vec<u16> },
     Join { game_id: u64, observe: bool },
     CancelJoin { game_id: u64 },
 }
@@ -196,9 +196,12 @@ impl App {
             .match_state
             .session
             .enter_network(NetworkReturnContext::LanLobby);
-        let local = state.frontend.multiplayer_shell_runtime.local_participant();
-        let observer = state.frontend.multiplayer_shell_runtime.lan_observer();
-        let mut runtime = LanShellRuntime::new(&local.name, observer);
+        let owner = &mut state.frontend.multiplayer_shell_runtime;
+        let local = owner.local_participant();
+        // The name box shows the name as typed; the lobby row shows it as
+        // every other player sees it.
+        let name = owner.open_lan_name_box();
+        let mut runtime = LanShellRuntime::new(&name, owner.lan_observer());
         runtime
             .lobby
             .replace_players(vec![local_lobby_row(&local.name)]);
@@ -555,7 +558,16 @@ pub(crate) fn dispatch(state: &mut AppState, action: LanLobbyAction) {
             .multiplayer_shell_runtime
             .set_lan_observer(value),
         LanLobbyAction::NameChanged(value) => {
-            state.frontend.multiplayer_shell_runtime.set_handle(&value);
+            state
+                .frontend
+                .multiplayer_shell_runtime
+                .set_lan_name(&value);
+            // The row shows the name as sent, as the service's rebuild does.
+            let name = state
+                .frontend
+                .multiplayer_shell_runtime
+                .local_participant()
+                .name;
             let runtime = state.frontend.lan.as_mut().unwrap();
             runtime
                 .requests
@@ -567,8 +579,8 @@ pub(crate) fn dispatch(state: &mut AppState, action: LanLobbyAction) {
             if runtime.lobby.game_list.selected == Some(0) {
                 let mut players = runtime.lobby.players.clone();
                 match players.first_mut() {
-                    Some(local) => local.name = value,
-                    None => players.push(local_lobby_row(&value)),
+                    Some(local) => local.name = name,
+                    None => players.push(local_lobby_row(&name)),
                 }
                 runtime.lobby.replace_players(players);
             }
@@ -580,7 +592,8 @@ pub(crate) fn dispatch(state: &mut AppState, action: LanLobbyAction) {
                 state,
                 LanChatLine {
                     text: display,
-                    //5DDEB9..5DDECA: echo uses7EEF44, outgoing uses7EEF2C.
+                    // `0x005DDEB9..0x005DDECA`: the echo uses `[0x7EEF44]`;
+                    // the packet's `[0x7EEF2C]` is `lan_service::chat_packet`'s.
                     color: 0x0040_FFFF,
                 },
             );
@@ -590,10 +603,7 @@ pub(crate) fn dispatch(state: &mut AppState, action: LanLobbyAction) {
                 .as_mut()
                 .unwrap()
                 .requests
-                .push(LanServiceRequest::Chat {
-                    text: message,
-                    color: 0x0000_F0F0,
-                });
+                .push(LanServiceRequest::Chat { text: message });
         }
         LanLobbyAction::SelectGame { game_id, changed } => {
             let runtime = state.frontend.lan.as_mut().unwrap();

@@ -1759,7 +1759,7 @@ fn mutable_handouts_and_setters_are_owner_operations() {
         "a command's payload bytes under construction, which the simulation decodes";
     const CELL_MAP: &str =
         "a generic cell-keyed container; every CellMap is a private field of its owner";
-    const COW_CELLS: &str = "the resolved terrain grid's private cell storage (pub(super)); \
+    const TERRAIN: &str = "the resolved terrain grid's private cell storage (pub(super)); \
                              ResolvedTerrainGrid owns every write to its cells";
     const SHARED: &str = "generic change-tracking containers the presentation copy syncs from \
                           (docs/sim-thread.md); every Synced, DerivedCache and ChunkedVec is a \
@@ -1769,9 +1769,13 @@ fn mutable_handouts_and_setters_are_owner_operations() {
     const LASER: &str = "LaserDraw 0x0054FE60 returns the new laser for its caller's postprocessing \
                          (FireAt 0x006FF50A..0x006FF571); the caller finishes its own frame fact";
     const PINNED_HANDOUTS: &[(&str, &str, &str)] = &[
-        ("map/resolved_terrain/cow_cells.rs", "get_mut", COW_CELLS),
-        ("map/resolved_terrain/cow_cells.rs", "iter_mut", COW_CELLS),
-        ("map/resolved_terrain/cow_cells.rs", "index_mut", COW_CELLS),
+        ("map/resolved_terrain/terrain_cells.rs", "get_mut", TERRAIN),
+        ("map/resolved_terrain/terrain_cells.rs", "iter_mut", TERRAIN),
+        (
+            "map/resolved_terrain/terrain_cells.rs",
+            "index_mut",
+            TERRAIN,
+        ),
         ("map/rmg/grid.rs", "get_mut", RMG),
         ("map/rmg/grid.rs", "ref_cell_mut", RMG),
         ("map/rmg/grid.rs", "cell_native_mut", RMG),
@@ -1938,12 +1942,6 @@ fn mutable_handouts_and_setters_are_owner_operations() {
              PointerExpired's NULL store (0x00707A33)",
         ),
         (
-            "sim/cloak_disguise.rs",
-            "set_attached",
-            "Ares RecalculateStats 0x1004613B/0x1004617D commits the cloak aggregate \
-             derived from the canonical attachment vector; permanent crate capability stays separate",
-        ),
-        (
             "sim/combat/base_defense_response.rs",
             "set_team_recruitable",
             "TeamClass::Add_Member stores AreTeamMembersRecruitable into +0x422 (0x006EA500)",
@@ -1958,6 +1956,12 @@ fn mutable_handouts_and_setters_are_owner_operations() {
             "set",
             "the native +0x6C stores outside ReceiveDamage listed on Health::set, \
              such as a crash's kill (0x004DEC72) and a parasite's death (0x0062A46A)",
+        ),
+        (
+            "sim/components.rs",
+            "set_attached",
+            "Ares RecalculateStats 0x100460A0 derives Foot+580 from the attachment vector; \
+             GameEntity::set_attached_speed records here whether it differs from the crate baseline",
         ),
         (
             "sim/game_entity.rs",
@@ -2119,6 +2123,12 @@ fn mutable_handouts_and_setters_are_owner_operations() {
             "set_credits_counter",
             "MouseClass::Save (0x005BE6D0, store 0x005BE715) captures CreditsClass+4; \
              this snapshot field records the presentation owner's displayed counter",
+        ),
+        (
+            "sim/snapshot/saved_local_view.rs",
+            "set_radar_housing",
+            "RadarClass::Load (0x006568A0) and MouseClass::Load (0x005BDF70, 0x005BE092) \
+             read the radar housing back; this snapshot field records the render owner's housing",
         ),
         (
             "sim/stage.rs",

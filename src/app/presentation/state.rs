@@ -43,6 +43,11 @@ pub(crate) struct MatchPresentationState {
     pub(crate) sprite_atlas: Option<SpriteAtlas>,
     /// The unit and sprite atlas growths rasterizing on workers.
     pub(crate) atlas_growth: crate::render::entity_atlas_growth::EntityAtlasGrowth,
+    /// The changed looks the tick's tail checks the atlases against.
+    pub(crate) atlas_check: crate::render::entity_atlas_growth::EntityAtlasCheck,
+    /// An atlas refresh asked beside a lent tick, which the tick's tail runs
+    /// (`sim_tick::refresh_entity_atlases`).
+    pub(crate) atlas_refresh_owed: bool,
     pub(crate) overlay_atlas: Option<OverlayAtlas>,
     pub(crate) bridge_atlas: Option<BridgeAtlas>,
     pub(crate) sidebar_cameo_atlas: Option<SidebarCameoAtlas>,
@@ -52,6 +57,11 @@ pub(crate) struct MatchPresentationState {
     /// process InitGame GRFXTXT art.
     pub(crate) outcome_banner_side_art:
         Option<crate::app::presentation::outcome_banner::OutcomeBannerArt>,
+    /// This match's Ares `Text.*` superweapon status labels (hook 6CC2B0),
+    /// resolved once with the incoming world: its Rules and the process
+    /// string table stay fixed for the match. `None` unless Ares plays in
+    /// the game (`RuleSet::ares`).
+    pub(crate) ares_status_texts: Option<crate::app::presentation::sidebar_build::AresStatusTexts>,
     /// The local country's own win/lose card from `[EndGameScreens]`, drawn in
     /// the same tactical slot as the retail banner. `None` keeps the native
     /// art; the player's Custom End Game Banner switch is read at draw time.
@@ -140,6 +150,9 @@ pub(crate) struct MatchPresentationState {
     pub(crate) radar_content_insets: Option<[u32; 4]>,
     /// Whether the local player currently has operational radar (power-gated).
     pub(crate) has_radar: bool,
+    /// A loaded game's radar housing, held until the radar is built for it.
+    pub(crate) loaded_radar_housing:
+        Option<crate::sim::snapshot::saved_local_view::SavedRadarHousing>,
     /// Selection overlay renderer — highlights and drag rectangle.
     pub(crate) selection_overlay: Option<SelectionOverlay>,
     /// Phobos `[Phobos] DigitalDisplay.Enable` from the imported client

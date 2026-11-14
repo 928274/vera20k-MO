@@ -1536,7 +1536,6 @@ impl Simulation {
     /// building, which the caller has given a queued Construction, builds up
     /// through the ordinary Unlimbo and is then DiscoveredBy its owner with
     /// its ready byte (`+0x6DD`) set.
-    #[cfg(feature = "ares")]
     pub(crate) fn reveal_delivered_object_at_coord(
         &mut self,
         stable_id: u64,
@@ -2464,7 +2463,14 @@ impl Simulation {
         stable_id: u64,
         rules: &RuleSet,
     ) {
-        let Some((category, veterancy, in_playfield, type_ref, stealth_ability)) =
+        let Some((
+            category,
+            veterancy,
+            in_playfield,
+            type_ref,
+            stealth_ability,
+            attached_cloak,
+        )) =
             substrate.entities.get(stable_id).map(|entity| {
                 (
                     entity.category(),
@@ -2472,6 +2478,7 @@ impl Simulation {
                     entity.in_playfield(),
                     entity.type_ref(),
                     entity.stealth_ability,
+                    entity.cloak_attached(),
                 )
             })
         else {
@@ -2485,7 +2492,7 @@ impl Simulation {
             return;
         };
         let rank_cloak = has_weapon_ability(rank_from_u16(veterancy), object, Ability::Cloak);
-        let intrinsic_cloak = stealth_ability.active(object.cloakable);
+        let intrinsic_cloak = attached_cloak || stealth_ability.active(object.cloakable);
         if !intrinsic_cloak && !rank_cloak {
             return;
         }
@@ -2716,7 +2723,7 @@ impl Simulation {
         // back (`0x0073953B..0x00739565` / `0x0073959C..0x007395B4`) before
         // either outcome acts.
         self.foot_mark_remove(stable_id, rules, registry, frame_effects);
-        self.locomotor_mark_all_occupation_bits(stable_id, false);
+        self.locomotor_mark_all_occupation_bits(stable_id, false, rules.ares_form());
         let yard = rules.object(&yard_type);
         let placeable = yard.is_some_and(|yard| {
             crate::sim::build_site::can_place_building_at(
@@ -2741,7 +2748,7 @@ impl Simulation {
                 frame_effects,
             );
         }
-        self.locomotor_mark_all_occupation_bits(stable_id, true);
+        self.locomotor_mark_all_occupation_bits(stable_id, true, rules.ares_form());
         self.foot_mark_put(stable_id, rules, registry, frame_effects);
         if !placeable {
             log::info!("MCV deploy blocked at origin {origin:?}");
@@ -2862,7 +2869,7 @@ impl Simulation {
         // Slave Miner's DeploysInto transaction. Original Steam739660..739711
         // and failure739A6E..739AA7 are retained in mcv-placement-causality.
         self.foot_mark_remove(stable_id, rules, registry, frame_effects);
-        self.locomotor_mark_all_occupation_bits(stable_id, false);
+        self.locomotor_mark_all_occupation_bits(stable_id, false, rules.ares_form());
         let owner_str = self.interner.resolve(owner_id).to_string();
         let Some(mut destination) = self
             .construct_runtime_techno(
@@ -2878,7 +2885,7 @@ impl Simulation {
             .expect("fresh Techno constructor initialization cannot fail")
         else {
             //739A77..739AA7 restores locomotor head bits before Mark(DOWN).
-            self.locomotor_mark_all_occupation_bits(stable_id, true);
+            self.locomotor_mark_all_occupation_bits(stable_id, true, rules.ares_form());
             self.foot_mark_put(stable_id, rules, registry, frame_effects);
             if let Some(entity) = self.substrate.entities.get_mut(stable_id) {
                 entity.mcv_deploy_pending.clear();
@@ -2919,7 +2926,7 @@ impl Simulation {
             //739A6E first scalar-deletes the refused constructor-complete
             // Building; only then739A94/+124(1) restore the original Unit.
             self.discard_constructed_limbo(new_sid, rules, frame_effects);
-            self.locomotor_mark_all_occupation_bits(stable_id, true);
+            self.locomotor_mark_all_occupation_bits(stable_id, true, rules.ares_form());
             self.foot_mark_put(stable_id, rules, registry, frame_effects);
             //739AA7 clears+68C only after both original restoration calls.
             if let Some(entity) = self.substrate.entities.get_mut(stable_id) {
@@ -3027,7 +3034,16 @@ impl Simulation {
             let gather = rules.general.gather_when_mcv_deploy;
             #[cfg(not(feature = "phobos"))]
             let gather = true;
-            if gather {
+            // A command-layer-driven house manages its own forces: the
+            // regroup overwrites every own ground unit's NavCom, which the
+            // external controller only observes a tick later. Every write
+            // above this gate stays.
+            if gather
+                && !self
+                    .houses
+                    .get(&owner_id)
+                    .is_some_and(|house| house.command_driven())
+            {
                 self.move_ground_forces_to_base(owner_id, rules, registry, frame_effects);
             }
         }
@@ -3037,8 +3053,7 @@ impl Simulation {
         // leaves; the refinery's own fresh slaves are freed.
         // Ares UnitClass_Deploy_Transfer (10048E90 -> 10045A80): the bomb,
         // then the original owner.
-        #[cfg(feature = "ares")]
-        {
+        if rules.ares() {
             self.transfer_ivan_bomb(stable_id, new_sid);
             self.transfer_factory_country(stable_id, new_sid);
         }
@@ -3279,16 +3294,16 @@ impl Simulation {
             unit.veterancy.inherit(&veterancy);
         }
         // Ares BuildingClass_Mi_Selling_Transfer (10048E90 -> 10045A80).
-        #[cfg(feature = "ares")]
-        {
+        if rules.ares() {
             self.transfer_ivan_bomb(sid, new_sid);
             self.transfer_factory_country(sid, new_sid);
         }
         self.transfer_slave_manager(sid, new_sid, false, rules, overlay_registry, frame_effects);
         // Ares hook 0x44A04C (10053D60), right after that handover: the unit
         // takes the building's EMP counter and sparkle.
-        #[cfg(feature = "ares")]
-        self.copy_ares_emp_to_undeployed(sid, new_sid, rules);
+        if rules.ares() {
+            self.copy_ares_emp_to_undeployed(sid, new_sid, rules);
+        }
         // BuildingClass::Mission_Selling 0x0044A0D4..0x0044A115: the unit
         // takes the building's voice handle and latch.
         self.move_unit_voice(sid, new_sid);

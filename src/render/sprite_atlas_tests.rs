@@ -4,6 +4,25 @@ use super::*;
 use crate::assets::asset_manager::MediaArchiveMode;
 use crate::util::save_codec;
 
+/// Whether `atlas` covers every live anim's colour remap, asked as the atlas
+/// check asks it of the anims whose look changed.
+fn atlas_covers_anim_remaps(
+    atlas: Option<&SpriteAtlas>,
+    sim: &crate::sim::world::Simulation,
+    colors: &HouseColorMap,
+) -> bool {
+    let anims: Vec<_> = sim.anims().map(|(_, anim)| anim).collect();
+    atlas_covers_changes(
+        atlas,
+        &[],
+        &anims,
+        std::iter::empty(),
+        sim.interner(),
+        None,
+        colors,
+    )
+}
+
 #[test]
 #[ignore = "requires a wgpu adapter; asynchronous loading uploads"]
 fn loading_job_publishes_the_same_index_pages_after_gpu_retirement() {
@@ -934,6 +953,59 @@ fn gate_structure_keys_cover_every_stage_and_damaged_stage_frame() {
         .flat_map(|frame| [frame, frame + 21])
         .collect();
     assert_eq!(frames, expected);
+}
+
+/// Unit73C6AD..73C6D3: a still SHP Unit with a running death count draws
+/// StartDeathFrame plus the count over DeathFrameRate, held on the last of
+/// DeathFrames; a moving one keeps walking. The atlas holds the death images
+/// its SHP has (`DTH.SHP` here ends at frame 41).
+#[test]
+fn a_counting_shp_unit_draws_death_frames_the_atlas_holds() {
+    use crate::rules::ini_parser::IniFile;
+
+    let art_ini = IniFile::from_str(
+        "[DTH]\nWalkFrames=6\nDeathFrames=3\nDeathFrameRate=2\nStartDeathFrame=40\n",
+    );
+    let mut rules = RuleSet::from_ini_with_fixed_art_for_test(
+        &IniFile::from_str("[VehicleTypes]\n0=DTH\n[DTH]\nStrength=100\n"),
+        &art_ini,
+    )
+    .expect("death frame rules");
+    rules.install_art_data(ArtRegistry::from_ini(&art_ini));
+    let set = rules.animation_sequence("DTH").expect("SHP unit layout");
+    let frame = |death, moving| {
+        crate::sim::animation::resolve_shp_vehicle_body_frame(set, 0, 4, -1, death, moving, false)
+    };
+    assert_eq!(frame(3, false), Some(41));
+    assert_eq!(frame(9, false), Some(42), "held on the last death frame");
+    assert_eq!(frame(3, true), frame(-1, true), "a moving body walks");
+
+    let directory = StoredFrameTestDirectory::new();
+    let frames: Vec<_> = (0..42).map(|frame| ([2, 2], (frame + 1) as u8)).collect();
+    std::fs::write(directory.0.join("DTH.SHP"), raw_shp(&frames)).expect("write DTH.SHP");
+    let assets = AssetManager::from_loose_root_for_test(&directory.0);
+    let (world, interner) = one_object_world("DTH", EntityCategory::Unit);
+    let mut needed = HashSet::new();
+    insert_new_object_keys(
+        &mut needed,
+        &HashSet::from([("DTH".to_string(), HouseColorIndex(2))]),
+        &world,
+        Some(&interner),
+        &assets,
+        "tem",
+        "TEMPERATE",
+        Some(&rules),
+        Some(rules.art()),
+    );
+    let has = |frame| {
+        needed
+            .iter()
+            .any(|key| key.type_id == "DTH" && key.frame == frame)
+    };
+    assert!(
+        has(40) && has(41) && !has(42),
+        "the death images DTH.SHP holds"
+    );
 }
 
 /// BuildingType45F230's final image pass, after the base ObjectType load.
@@ -2198,6 +2270,10 @@ fn deployed_anim_palette_and_atlas_coverage_share_the_frozen_house() {
     let cell = spawn(&mut sim);
     let wreck = spawn(&mut sim);
     assert!(atlas_covers_anim_remaps(Some(&atlas), &sim, &colors));
+    // The tick's atlas check has seen the anims before their palettes.
+    let mut check = crate::render::entity_atlas_growth::EntityAtlasCheck::default();
+    check.note(sim.take_looks());
+    check.checked(&sim, &colors);
     assert!(
         sim.anims_mut_for_test()
             .set_anim_house_remap(deployed, house)
@@ -2210,8 +2286,9 @@ fn deployed_anim_palette_and_atlas_coverage_share_the_frozen_house() {
         sim.anims_mut_for_test()
             .set_anim_remap(wreck, AnimRemap::ExtraBuildingScheme { house, palette })
     );
+    check.note(sim.take_looks());
     assert!(
-        !atlas_covers_anim_remaps(Some(&atlas), &sim, &colors),
+        check.finds_miss(&sim, Some(&rules), Some(&atlas), None, &colors),
         "producer palette assignment must request a refresh without an entity change"
     );
     assert!(!atlas_covers_anim_remaps(None, &sim, &colors));
@@ -2340,7 +2417,7 @@ fn object_and_remap_coverage_are_separate_and_follow_the_world() {
 fn a_collected_pair_is_covered_even_when_nothing_of_it_is_drawable() {
     // A type whose frame 0 is empty or whose SHP is missing has no atlas entry
     // at all. Coverage by collected pairs keeps it from forcing a refresh on
-    // every spawn, death or Limbo, as a frame-0 entry probe would.
+    // every check, as a frame-0 entry probe would.
     let (world, interner) = one_object_world("NOSHAPE", EntityCategory::Structure);
     let colors = HouseColorMap::from([("Americans".to_string(), HouseColorIndex(1))]);
     let mut atlas = SpriteAtlas::new(Vec::new(), HashMap::new(), ShpPalettes::default());
@@ -3621,8 +3698,8 @@ fn building_type_bounds_publish_with_color_growth_type_growth_and_abort() {
     assert_eq!(extended.building_type_bounds.len(), 2);
 }
 
-/// The coverage check runs on every spawn and death, so objects of one type
-/// and owner give one pair between them; another owner's keeps its own.
+/// Objects of one type and owner give one coverage pair between them;
+/// another owner's keeps its own.
 #[test]
 fn object_pairs_give_each_type_and_owner_once() {
     let colors = HouseColorMap::from([
@@ -3784,4 +3861,79 @@ fn spy_atlas_growth_tracks_each_active_disguise_and_its_house_color() {
         covered(&atlas, &world),
         "inactive disguises must not request growth"
     );
+}
+
+/// The atlas check reads what a tick changed, not the world: another object of
+/// a covered type and a death ask for no full check, a new owner's colour
+/// does, and so do new colours.
+#[test]
+fn the_atlas_check_asks_for_the_full_check_only_for_an_uncovered_look() {
+    use crate::render::entity_atlas_growth::EntityAtlasCheck;
+    use crate::rules::ini_parser::IniFile;
+    use crate::sim::{house_state::HouseState, world::Simulation};
+    let rules = RuleSet::from_ini(&IniFile::from_str(
+        "[InfantryTypes]\n0=E1\n[E1]\nStrength=100\n",
+    ))
+    .unwrap();
+    let mut sim = Simulation::with_seed(3);
+    let [_, russians] = ["Americans", "Russians"].map(|name| {
+        let house = sim.intern(name);
+        sim.register_house(HouseState::new(house, 0, None, false, 0, 10));
+        house
+    });
+    let spawn = |sim: &mut Simulation, x| {
+        sim.spawn_object_at_height("E1", "Americans", x, 10, 0, 0, &rules)
+            .unwrap()
+    };
+    let rifleman = spawn(&mut sim, 10);
+    let colors = HouseColorMap::from([
+        ("Americans".to_owned(), HouseColorIndex(2)),
+        ("Russians".to_owned(), HouseColorIndex(5)),
+    ]);
+    let mut atlas = SpriteAtlas::from_test_entries(Default::default());
+    atlas
+        .covered_objects
+        .entry("E1".to_owned())
+        .or_default()
+        .insert(HouseColorIndex(2));
+    let finds_miss = |check: &EntityAtlasCheck, sim: &Simulation, colors: &HouseColorMap| {
+        check.finds_miss(sim, Some(&rules), Some(&atlas), None, colors)
+    };
+    let mut check = EntityAtlasCheck::default();
+    check.note(sim.take_looks());
+    assert!(
+        finds_miss(&check, &sim, &colors),
+        "a new world is checked whole"
+    );
+    check.checked(&sim, &colors);
+
+    let second = spawn(&mut sim, 11);
+    assert!(sim.entities_mut_for_test().remove(second).is_some());
+    check.note(sim.take_looks());
+    assert!(!finds_miss(&check, &sim, &colors));
+    check.checked(&sim, &colors);
+    let mut relation = colors.clone();
+    relation.insert("Russians".to_owned(), HouseColorIndex(2));
+    assert!(
+        finds_miss(&check, &sim, &relation),
+        "new colours are checked whole"
+    );
+
+    sim.change_owner(rifleman, russians);
+    check.note(sim.take_looks());
+    assert!(finds_miss(&check, &sim, &colors));
+}
+
+/// A type's SHP frame count is found whatever the case of the name asked,
+/// also for a name longer than the stack key.
+#[test]
+fn an_object_shp_frame_count_is_found_by_any_case_of_its_name() {
+    let long = "x".repeat(80);
+    let mut atlas = SpriteAtlas::from_test_entries(Default::default());
+    atlas.set_object_shp_frame_count_for_test("GaPowr", 8);
+    atlas.set_object_shp_frame_count_for_test(&long, 3);
+    assert_eq!(atlas.object_shp_frame_count("gapowr"), Some(8));
+    assert_eq!(atlas.object_shp_frame_count("GAPOWR"), Some(8));
+    assert_eq!(atlas.object_shp_frame_count(&long), Some(3));
+    assert_eq!(atlas.object_shp_frame_count("GAPILE"), None);
 }

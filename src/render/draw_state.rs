@@ -4,7 +4,6 @@
 //! before choosing an SHP or voxel rasterizer. Keep that decision in
 //! one CPU descriptor so the two atlas paths cannot disagree.
 
-use crate::render::snapshot::SnapshotObject;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ObserverDrawContext {
     /// The observer's house considers the object's real owner allied.
@@ -71,11 +70,6 @@ pub const FX_SHADOW: u32 = 1 << 6;
 /// Voxel body waterline clip. `sinking_row` carries Techno+3CA's retained
 /// world row; ordinary alpha remains in its own lane.
 pub(crate) const FX_SINKING_CLIP: u32 = 1 << 7;
-/// DSurface4C0750's dashed stores, kept or skipped per pixel by the live
-/// tactical A (`fs_surface_store` in batch_shader.wgsl): store where it is
-/// nonzero, or where it is zero (the second rally pass).
-pub(crate) const FX_SURFACE_A_NONZERO: u32 = 1 << 8;
-pub(crate) const FX_SURFACE_A_ZERO: u32 = 1 << 9;
 
 /// Resolved native visual character; the simulation owns the query and clock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -280,7 +274,7 @@ impl DrawState {
     }
 
     /// Adapt simulation-owned producers without inventing missing native fields.
-    pub fn for_entity(
+    pub(crate) fn for_entity(
         entity: &impl crate::render::snapshot::SnapshotObject,
         current_frame: u32,
         remap_row: u32,

@@ -31,35 +31,22 @@ use crate::sim::animation;
 use smol_str::StrExt;
 
 /// Frame offset between a turret heading bucket and the SHP turret frame an
-/// SHP Unit draws for it.
-///
-/// `UnitClass`'s SHP body keeps its turret ring in the same file: thirty-two
-/// frames, one per 11.25 degrees, appended after the body blocks
-/// (`SHP_TURRET_FACING_FRAMES`). MO's Cyclops Walker (`CYCL`, `Voxel=no`,
-/// `Turret=yes`) authors that ring four frames counter-clockwise of the
-/// heading bucket each frame is drawn for.
-///
-/// Calibrated against a live firing screenshot: its muzzle flash sits at screen
-/// angle 168 degrees, which the camera basis maps to turret heading 202.5
-/// degrees, i.e. bucket 18. With this bias the drawn frame is
-/// 176 + 18 + 4 = 198, and frame 198's measured barrel direction (169.3
-/// degrees from the ring's fixed mount) is the closest of all 32 to the flash.
-/// A two-frame bias drew frame 196 instead (157.6 degrees) and still left the
-/// barrel visibly counter-clockwise of the flash in game. That earlier estimate
-/// came from a per-frame screen-angle progression sampled at a 10x render-page
-/// scale; `asset.exe` actually writes the SHP canvas at 8x, so a moving sample
-/// window produced a spurious two-frame peak at frames 189-190. Retail ships
-/// no SHP Unit with a turret, so CYCL is the only sample.
+/// SHP Unit draws for it: UnitClass SHP draw `0x0073CCF4` adds 4 to the
+/// 32-step turret heading and masks it to the ring (`0x0073CCFE`).
 const SHP_TURRET_FRAME_BIAS: u16 = 4;
 
-/// The body-SHP frame a `Turret=yes` SHP Unit draws for one turret heading.
+/// The body-SHP frame a `Turret=yes` SHP Unit draws for one turret heading
+/// (`0x0073CCB2..0x0073CD03`): `((step + 4) & 31) + WalkFrames * 8`, with the
+/// turret facing (`+0x3A0`) rounded to 32 steps as the voxel turret does.
 fn shp_turret_frame(
     turret: crate::rules::animation_sequence::ShpVehicleTurret,
     heading: u16,
 ) -> u16 {
     let facings = turret.facings.max(1);
     let step = u16::from(canonical_turret_facing(heading)) >> 3;
-    turret.start_frame.saturating_add((step + SHP_TURRET_FRAME_BIAS) % facings)
+    turret
+        .start_frame
+        .saturating_add((step + SHP_TURRET_FRAME_BIAS) % facings)
 }
 
 /// Borrowed live inputs for the SHP body emitter. The application and offscreen
@@ -202,6 +189,17 @@ pub(crate) fn shp_visitor<'a>(
     let cells = sim
         .resolved_terrain()
         .map(crate::map::resolved_terrain::NativeCellQuery::isolated);
+    // A building type's bounds, asked by name once per draw: every building
+    // on the map reads them for its cull.
+    // A house's colour, asked by name once per draw and not per object.
+    let mut owner_colours: crate::util::lookup_hash::LookupMap<
+        crate::sim::intern::InternedId,
+        HouseColorIndex,
+    > = Default::default();
+    let mut type_bounds_seen: crate::util::lookup_hash::LookupMap<
+        crate::sim::intern::InternedId,
+        Option<[i32; 4]>,
+    > = Default::default();
     move |ground_objects: &mut Vec<PlannedObjectInstance>,
           entity: &crate::app::presentation::frame::ObjectRecord| {
         let stable_id = entity.stable_id();
@@ -232,9 +230,13 @@ pub(crate) fn shp_visitor<'a>(
         };
         let type_bounds = (entity.category() == EntityCategory::Structure)
             .then(|| {
-                atlas.and_then(|atlas| {
-                    atlas.building_type_bounds(sim.interner().resolve(entity.type_ref()))
-                })
+                *type_bounds_seen
+                    .entry(entity.type_ref())
+                    .or_insert_with(|| {
+                        atlas.and_then(|atlas| {
+                            atlas.building_type_bounds(sim.interner().resolve(entity.type_ref()))
+                        })
+                    })
             })
             .flatten();
         let visible = if let Some([left, top, width, height]) = type_bounds {
@@ -306,11 +308,16 @@ pub(crate) fn shp_visitor<'a>(
             return;
         }
         let pos = &entity.position;
-        let hc: HouseColorIndex = input
-            .house_colors
-            .get(remap_owner)
-            .copied()
-            .unwrap_or(crate::rules::house_colors::NO_REMAP);
+        let remap_owner_id = active_disguise
+            .and_then(|state| state.house())
+            .unwrap_or(entity.owner());
+        let hc: HouseColorIndex = *owner_colours.entry(remap_owner_id).or_insert_with(|| {
+            input
+                .house_colors
+                .get(remap_owner)
+                .copied()
+                .unwrap_or(crate::rules::house_colors::NO_REMAP)
+        });
         let Some(draw_decision) = tactical_entity_admission(
             super::helpers::TacticalEntityPurpose::Drawing,
             entity,
@@ -385,14 +392,16 @@ pub(crate) fn shp_visitor<'a>(
         let draws_buildup =
             image.is_some_and(|image| image != crate::sim::building_art::BuildingImage::Body);
         let unopened_buildup = draws_buildup && !is_building_up && !is_building_down;
-        // Its ART section, found once for the gate, door, light, Z and
-        // turret below. A building with no rules record reads its own
-        // section for light and Z (`structure_entry`), as with no `Image=`.
-        let art_entry = object_type.and_then(|object| {
+        // A building's ART section, found once for the gate, door, light, Z
+        // and turret below; every reader is a building's, so infantry skip
+        // the search. A building with no rules record reads its own section
+        // for light and Z (`structure_entry`), as with no `Image=`.
+        let is_structure = entity.category() == EntityCategory::Structure;
+        let art_entry = object_type.filter(|_| is_structure).and_then(|object| {
             art_reg.and_then(|registry| registry.resolve_metadata_entry(type_str, &object.image))
         });
         let structure_entry = match object_type {
-            _ if entity.category() != EntityCategory::Structure => None,
+            _ if !is_structure => None,
             Some(_) => art_entry,
             None => {
                 art_reg.and_then(|registry| registry.resolve_metadata_entry(type_str, type_str))
@@ -602,11 +611,15 @@ pub(crate) fn shp_visitor<'a>(
             physical_cell
         };
         let tint = shp_body_tint(input.lighting, light_cell, entity.category(), extra_light);
-        let selected_palette_light = crate::app::presentation::lighting::body_palette_light(
-            input.lighting,
-            light_cell,
-            extra_light,
-        );
+        // Asked only where it is used: a building's body takes its own
+        // light below, so only a voxel turret reads this one.
+        let selected_palette_light = || {
+            crate::app::presentation::lighting::body_palette_light(
+                input.lighting,
+                light_cell,
+                extra_light,
+            )
+        };
         let palette_light = if entity.category() == EntityCategory::Structure {
             let [x, y] = entity.place.center_xy;
             let coords_cell = (
@@ -621,7 +634,7 @@ pub(crate) fn shp_visitor<'a>(
                 gate_open_frame.is_some(),
             )
         } else {
-            selected_palette_light
+            selected_palette_light()
         };
         // The shared DrawSHP curtain intensity and the class caller's colour
         // word have separate owners. Infantry tests the Location cell;
@@ -827,12 +840,14 @@ pub(crate) fn shp_visitor<'a>(
             {
                 pieces.push(shadow);
             }
-            // A `Turret=yes` SHP Unit carries its turret in the same SHP: the
-            // thirty-two heading frames after the body blocks. Each frame is
-            // authored over the body canvas, so the turret shares the body's
-            // draw point, Z and policy and paints after it; no `TurretOffset`
-            // applies to an SHP turret. Retail ships no such unit, MO's
-            // Cyclops Walker (`CYCL`) does.
+            // A `Turret=yes` SHP Unit (`+0xCA1`, gate `0x0073C725`) draws its
+            // turret from the same SHP after the body (`0x0073CD08`), at the
+            // body's draw point; no `TurretOffset` applies. Residual: the
+            // native turret branch draws body and turret with flags
+            // 0x2800/0x2820 and no -16 Z (unlike the no-turret branch used
+            // here), lifts the point 14 px when `+0x424` is set (`0x0073C753`)
+            // and draws a voxel barrel (`type+0xC0`) around the turret; none
+            // is ported. Retail ships no such unit; MO's `CYCL` does.
             if entity.category() == EntityCategory::Unit
                 && let Some(turret) = rules
                     .and_then(|rules| {
@@ -843,11 +858,6 @@ pub(crate) fn shp_visitor<'a>(
                     })
                     .and_then(|set| set.shp_vehicle_turret())
             {
-                // The turret heading's top five bits index the 32-frame table
-                // (`SHP_TURRET_FACING_FRAMES`), the same quantisation a
-                // building's SHP turret anim uses, plus the ring's authored
-                // bias. The heading is a compass bearing: a higher frame index
-                // turns the barrel clockwise.
                 let turret_key = ShpSpriteKey {
                     frame: shp_turret_frame(turret, render_pose.turret),
                     ..body_key.clone()
@@ -857,10 +867,7 @@ pub(crate) fn shp_visitor<'a>(
                         target: ObjectTexture::ShpPage(turret_entry.page as usize),
                         render_z: parent.policy.render_z,
                         instance: SpriteInstance {
-                            position: [
-                                sx + turret_entry.offset_x,
-                                sy + turret_entry.offset_y,
-                            ],
+                            position: [sx + turret_entry.offset_x, sy + turret_entry.offset_y],
                             size: turret_entry.pixel_size,
                             uv_origin: turret_entry.uv_origin,
                             uv_size: turret_entry.uv_size,
@@ -961,7 +968,7 @@ pub(crate) fn shp_visitor<'a>(
                     crate::app::presentation::lighting::techno_effect_light(
                         entity,
                         tint,
-                        selected_palette_light,
+                        selected_palette_light(),
                         sim,
                         rules,
                         crate::app::presentation::lighting::TechnoDraw::Voxel,
@@ -1391,10 +1398,11 @@ fn factory_unload_art<'a>(
     if entity.mission.effective().known() != Some(crate::sim::mission::MissionType::Unload) {
         return None;
     }
+    // `contact0` is radio slot 0's object.
     let roof = entity
-        .radio_contacts
-        .slot(0)
-        .and(entity.place.contact0.as_ref())
+        .place
+        .contact0
+        .as_ref()
         .and_then(|product| sim.interner().object_type(product.type_ref, rules))
         .is_some_and(|object| object.jumpjet || object.balloon_hover);
     let door = &art.factory_door;
@@ -1606,13 +1614,37 @@ fn emit_building_bib(
 /// a slot offset can put an animation on screen while its parent is outside.
 /// The existing slot palette/frame/light owner is shared by every building.
 ///
-/// `camera` and `projection_viewport` are the Display traversal's; only the
-/// slots its encounter can consume ([`super::overlays::slot_anim_admissible`])
-/// are prepared, and a building with none is skipped before its own work.
+/// `admission` is the Display traversal's; only the
+/// slots its encounter can consume ([`admitted_slot_anims`]) are prepared,
+/// and a building with none is skipped before its own work.
+/// How far, in pixels, a building's slot Anim or saved picture may reach from
+/// its cell anchor and still be culled with it: past the largest building art
+/// and Anim offsets by a wide margin (about 25 cells across).
+pub(super) const BUILDING_SLOT_WINDOW_SLACK: f32 = 768.0;
+
+/// The cells of the buildings whose slot Anims the slot admission
+/// (`helpers::projection_admitted`: 360 px across, 180 px down past the
+/// view) can pass, widened by [`BUILDING_SLOT_WINDOW_SLACK`].
+fn building_slot_window(
+    terrain: Option<&crate::map::resolved_terrain::ResolvedTerrainGrid>,
+    admission: super::helpers::TacticalAdmission,
+) -> crate::render::cell_window::CellWindow {
+    let slack = BUILDING_SLOT_WINDOW_SLACK;
+    let ([left, top], [width, height]) = (admission.corner, admission.size);
+    crate::render::cell_window::CellWindow::covering(
+        crate::render::cell_window::AnchorBounds {
+            left: left - 360.0 - slack,
+            top: top - 180.0 - slack,
+            right: left + width + 360.0 + slack,
+            bottom: top + height + 180.0 + slack,
+        },
+        terrain.map_or_else(Default::default, |terrain| terrain.level_span()),
+    )
+}
+
 pub(crate) fn build_building_anim_instances(
     state: &AppState,
-    camera: [f32; 2],
-    projection_viewport: [f32; 2],
+    admission: super::helpers::TacticalAdmission,
     objects: &mut Vec<PlannedObjectInstance>,
     order: &NativeDisplayOrder,
 ) {
@@ -1651,20 +1683,23 @@ pub(crate) fn build_building_anim_instances(
         state.render_width() as f32 / zoom,
         state.render_height() as f32 / zoom,
     ];
-    let slot_admitted =
-        |anim| super::overlays::slot_anim_admissible(sim, frame, anim, camera, projection_viewport);
-    for building in frame
-        .objects()
-        .filter(|object| object.category() == EntityCategory::Structure)
-    {
-        if slot_anims_hidden_by_sale(building)
-            || !building
-                .building_art
-                .anim_slots()
-                .iter()
-                .flatten()
-                .any(|&anim| slot_admitted(anim))
-        {
+    let admitted_slots = |building| admitted_slot_anims(sim, frame, building, admission);
+    // A slot Anim stands on or beside its building, so a building far off
+    // the view has none to admit: its cell passes it by before any slot is
+    // projected. The window is the slot admission's box
+    // (`helpers::projection_admitted`) widened by the slack.
+    let slot_window = building_slot_window(sim.resolved_terrain(), admission);
+    let mut anim_types = super::overlays::AnimTypeArts::new(rules, atlas);
+    for building in frame.structures() {
+        if !slot_window.contains(building.position.rx(), building.position.ry()) {
+            debug_assert!(
+                admitted_slots(building).iter().all(Option::is_none),
+                "the slot window left out a building with a slot Anim in view"
+            );
+            continue;
+        }
+        let slot_anims = admitted_slots(building);
+        if slot_anims.iter().all(Option::is_none) {
             continue;
         }
         let owner = sim.interner().resolve(building.owner());
@@ -1720,7 +1755,8 @@ pub(crate) fn build_building_anim_instances(
             frame,
             local_owner_id,
             building,
-            &slot_admitted,
+            &slot_anims,
+            &mut anim_types,
             &|id| anim_colour_word(state, sim, frame, cells.as_ref(), &shrouded, id),
             axis.origin_y,
             axis.world_height,
@@ -1758,6 +1794,35 @@ fn slot_anims_hidden_by_sale(building: &crate::app::presentation::frame::ObjectR
     building.building_down() && building.in_construction_bstate()
 }
 
+/// Building `building`'s slot Anims whose Display encounter can reach a
+/// prepared parent ([`super::overlays::admitted_slot_anim`]), by slot; none
+/// while a sale hides them.
+fn admitted_slot_anims<'a>(
+    sim: &'a crate::sim::world::Simulation,
+    frame: &crate::app::presentation::frame::PresentationFrame,
+    building: &crate::app::presentation::frame::ObjectRecord,
+    admission: super::helpers::TacticalAdmission,
+) -> [Option<&'a crate::sim::anim_class::AnimObject>; 21] {
+    if slot_anims_hidden_by_sale(building) {
+        return [None; 21];
+    }
+    building.building_art.anim_slots().map(|slot| {
+        slot.and_then(|anim| super::overlays::admitted_slot_anim(sim, frame, anim, admission))
+    })
+}
+
+/// Every one of `building`'s slot Anims, admitted or not.
+#[cfg(test)]
+fn every_slot_anim<'a>(
+    sim: &'a crate::sim::world::Simulation,
+    building: &crate::app::presentation::frame::ObjectRecord,
+) -> [Option<&'a crate::sim::anim_class::AnimObject>; 21] {
+    building
+        .building_art
+        .anim_slots()
+        .map(|slot| slot.and_then(|anim| sim.anim(anim)))
+}
+
 fn emit_building_anims(
     objects: &mut Vec<PlannedObjectInstance>,
     order: &NativeDisplayOrder,
@@ -1774,7 +1839,8 @@ fn emit_building_anims(
     presented: &crate::app::presentation::frame::PresentationFrame,
     local_owner_id: Option<crate::sim::intern::InternedId>,
     building: &crate::app::presentation::frame::ObjectRecord,
-    slot_admitted: &dyn Fn(u64) -> bool,
+    slot_anims: &[Option<&crate::sim::anim_class::AnimObject>; 21],
+    anim_types: &mut super::overlays::AnimTypeArts<'_>,
     anim_word: &dyn Fn(u64) -> u16,
     origin_y: f32,
     world_height: f32,
@@ -1799,13 +1865,10 @@ fn emit_building_anims(
         .map(|anim| anim.native_slot)
         .chain(std::iter::once(9))
     {
-        let Some(anim_id) = building.building_art.anim_slots()[usize::from(slot)] else {
-            continue;
-        };
-        if !slot_admitted(anim_id) {
-            continue;
-        }
-        let Some(instance) = sim.anim(anim_id) else {
+        let slot = usize::from(slot);
+        let (Some(anim_id), Some(instance)) =
+            (building.building_art.anim_slots()[slot], slot_anims[slot])
+        else {
             continue;
         };
         let Some(parent) = order.object_draw(anim_id, SpriteEncoding::Plain) else {
@@ -1817,7 +1880,8 @@ fn emit_building_anims(
             continue;
         }
         let anim_name = sim.interner().resolve(instance.type_id());
-        let Some(runtime_config) = art_reg.anim_runtime_config(anim_name) else {
+        let art = anim_types.of(instance.type_id(), anim_name);
+        let Some(runtime_config) = art.config else {
             continue;
         };
         if !runtime_config.art_body_read && runtime_config.raw_shp_frame_count.is_none() {
@@ -1834,13 +1898,7 @@ fn emit_building_anims(
             Some(runtime_config),
             instance.draw_flags(),
             instance.runtime().current_frame,
-            i32::from(
-                super::overlays::presentation_anim_frame_count(
-                    &atlas.active_anim_frame_counts,
-                    anim_name,
-                )
-                .unwrap_or(0),
-            ),
+            i32::from(art.frame_count.unwrap_or(0)),
             detail_level,
             draw_runtime,
         ) else {
@@ -2167,11 +2225,11 @@ pub(crate) fn resolve_object_shp_frame(
     state: &AppState,
     type_id: &str,
     entity: &crate::app::presentation::frame::ObjectRecord,
-    binary_frame: u32,
     cells: Option<&crate::map::resolved_terrain::NativeCellQuery<'_>>,
 ) -> Option<u16> {
-    let facing =
-        crate::app::presentation::render_pose::record_body_draw_facing(entity, binary_frame);
+    // The pose's body is `render_pose::body_draw_facing` at the frame's
+    // committed binary frame.
+    let facing = entity.pose.body;
     resolve_object_shp_frame_with_facing(
         state.match_state.sim_runtime.presentation(),
         state.rules(),
@@ -2196,15 +2254,22 @@ fn resolve_object_shp_frame_with_facing(
     // Pass raw facing (not canonical) to resolve_shp_frame so the
     // facing-to-index division works correctly for any facing count
     // (6, 8, 10, etc.). The absolute frame index encodes the direction.
+    let interner = runtime.map(|runtime| runtime.simulation.interner());
     let type_id = if entity.category() == EntityCategory::Unit {
-        runtime.map_or(type_id, |runtime| {
-            runtime.simulation.interner().resolve(entity.type_ref())
-        })
+        interner.map_or(type_id, |interner| interner.resolve(entity.type_ref()))
     } else {
         type_id
     };
-    let sequence_set = rules
-        .and_then(|rules| rules.animation_sequence_in_category(entity.category().into(), type_id));
+    // The drawn type is mostly the object's own, found by its id; a
+    // disguise or art substitute is found by name.
+    let category = entity.category().into();
+    let own_type = interner.filter(|interner| interner.resolve(entity.type_ref()) == type_id);
+    let sequence_set = rules.and_then(|rules| match own_type {
+        Some(interner) => {
+            interner.animation_sequence_in_category(entity.type_ref(), category, rules)
+        }
+        None => rules.animation_sequence_in_category(category, type_id),
+    });
     if entity.category() == EntityCategory::Unit
         && entity.animation.as_ref().is_none_or(|anim_state| {
             matches!(
@@ -2222,6 +2287,7 @@ fn resolve_object_shp_frame_with_facing(
             facing,
             entity.body_frame_counter.get(),
             entity.unit_firing_counter.get(),
+            entity.unit_death_counter.get(),
             // The draw asks the locomotor's Is_Moving (vt+0x10 at `0x0073C696`).
             entity.place.moving == Some(true),
             entity
@@ -2284,11 +2350,8 @@ fn resolve_object_shp_frame_with_facing(
 
 #[cfg(test)]
 mod tests {
-    use crate::app::presentation::frame::ObjectRecord;
-
-    /// The SHP turret ring is authored four frames counter-clockwise of each
-    /// heading bucket, so a heading draws the frame four steps clockwise of
-    /// its bucket and wraps inside the ring.
+    /// `0x0073CCF4` draws the frame four steps past the heading's bucket and
+    /// wraps inside the ring.
     #[test]
     fn an_shp_unit_turret_draws_four_frames_clockwise_of_its_bucket() {
         use crate::rules::animation_sequence::ShpVehicleTurret;
@@ -2298,20 +2361,37 @@ mod tests {
             facings: SHP_TURRET_FACING_FRAMES,
         };
         assert_eq!(super::shp_turret_frame(turret, 0), 180, "heading 0");
-        assert_eq!(super::shp_turret_frame(turret, 128 * 256), 196, "heading 180");
+        assert_eq!(
+            super::shp_turret_frame(turret, 128 * 256),
+            196,
+            "heading 180"
+        );
         assert_eq!(
             super::shp_turret_frame(turret, 248 * 256),
             179,
             "the last bucket wraps to the ring's fourth frame"
         );
-        // The firing screenshot's heading 202.5 degrees must draw frame 198,
-        // whose barrel direction is the closest of the ring to the muzzle flash.
-        assert_eq!(
-            super::shp_turret_frame(turret, (202.5 * 65536.0 / 360.0) as u16),
-            198,
-            "the heading the live muzzle flash measured"
-        );
     }
+
+    /// A building is passed by only when its cell is past the slot
+    /// admission's box and the slack: one whose anchor sits 1,050 px left
+    /// of the view may still hold a slot Anim the admission passes.
+    #[test]
+    fn a_building_near_the_view_stays_in_the_slot_window() {
+        let window = super::building_slot_window(
+            None,
+            crate::app::presentation::instances::TacticalAdmission {
+                corner: [0.0, 0.0],
+                size: [600.0, 400.0],
+            },
+        );
+        // Anchor x = 30 * (10 - 44) - 30 = -1,050.
+        assert!(window.contains(10, 44));
+        // Anchor x = -3,330.
+        assert!(!window.contains(10, 120));
+    }
+
+    use crate::app::presentation::frame::ObjectRecord;
 
     #[test]
     fn infantry_draw_selects_the_visual_types_bank_despite_a_building_name_collision() {

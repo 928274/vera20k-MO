@@ -406,9 +406,7 @@ impl App {
                 crate::app::mods::begin(&config.paths, mod_switch, capture_dimensions.is_some())
             })
             .unwrap_or_default();
-        if let Some(dir) = mods.dir() {
-            crate::map::source::set_mod_dir(dir.to_owned());
-        }
+        crate::map::source::set_mod_dir(mods.dir().map(std::path::Path::to_owned));
         let (window_width, window_height, window_visible) =
             startup_window_projection(profile_screen, capture_dimensions);
         let window_visible = window_visible && !hidden_spawn_window;
@@ -974,11 +972,14 @@ impl App {
                     music_player,
                     sfx_player,
                     launcher_audio_available,
-                    theme_startup_suppressed: false,
+                    theme_startup_suppressed: startup_options.theme_and_eva_quiet,
                     last_theme_diag: None,
                     master_groups: Default::default(),
                     restore_muted: false,
                 };
+                if let Some(sfx) = startup_audio_runtime.sfx_player.as_mut() {
+                    sfx.set_eva_quiet(startup_options.theme_and_eva_quiet);
+                }
                 if let Some(assets) = startup_asset_manager.as_ref() {
                     startup_audio_runtime.initialize_theme(assets);
                 }
@@ -1098,6 +1099,7 @@ impl App {
                     radar_animation_source: None,
                     radar_content_insets: None,
                     has_radar: false,
+                    loaded_radar_housing: None,
                     selection_overlay: None,
                     #[cfg(feature = "phobos")]
                     digital_display_enabled: phobos_client.digital_display_enabled,
@@ -1144,11 +1146,14 @@ impl App {
                     surface_palette: Default::default(),
                     sprite_atlas: None,
                     atlas_growth: Default::default(),
+                    atlas_check: Default::default(),
+                    atlas_refresh_owed: false,
                     overlay_atlas: None,
                     bridge_atlas: None,
                     sidebar_cameo_atlas: None,
                     sidebar_chrome: None,
                     outcome_banner_side_art: None,
+                    ares_status_texts: None,
                     end_game_banner: None,
                     software_cursor: startup_software_cursor,
                 },
@@ -1369,7 +1374,6 @@ impl App {
                     && let Some(session) =
                         quickplay_launch_session(quickplay, &state.frontend.skirmish_modes)
                 {
-                    #[cfg(feature = "ares")]
                     crate::app::frontend::skirmish_session::prepare_external_skirmish_countries(
                         &mut state.process_assets,
                         &session,

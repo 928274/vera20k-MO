@@ -87,16 +87,13 @@ fn draw_type<'a>(
     entity: &ObjectRecord,
     unloading_body: bool,
 ) -> Option<&'a ObjectType> {
-    let view = runtime.view();
-    let actual = runtime
-        .resources
-        .rules
-        .object(view.interner().resolve(entity.type_ref()));
+    let (interner, rules) = (runtime.view().interner(), &runtime.resources.rules);
+    let actual = interner.object_type(entity.type_ref(), rules);
     if unloading_body && actual.is_some_and(|o| o.harvester) {
         entity
             .display_type_override
             .image()
-            .and_then(|id| runtime.resources.rules.object(view.interner().resolve(id)))
+            .and_then(|id| interner.object_type(id, rules))
             .or(actual)
     } else {
         actual
@@ -312,7 +309,11 @@ fn unit_z_adjust_in(
     // ObjectClass cell getter 0x41BEA0 truncates signed coordinates toward zero.
     let coord = [(xy[0] / 256) as i16, (xy[1] / 256) as i16];
     let special = if entity.category() == EntityCategory::Unit {
-        let contact = entity.tether.partner().and(entity.place.contact0.as_ref());
+        let contact = entity
+            .place
+            .contact0
+            .as_ref()
+            .filter(|_| entity.tether.has_partner());
         if contact.is_some_and(|other| {
             other.category == EntityCategory::Structure && other.mission.effective().raw() == 16
         }) {

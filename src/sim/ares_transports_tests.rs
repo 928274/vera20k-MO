@@ -145,6 +145,7 @@ fn kinds(sim: &Simulation, ids: &[u64]) -> Vec<String> {
 /// infantry.
 #[test]
 fn initial_payload_fills_a_transport_once_and_garrisons_infantry_only() {
+    let _ares = crate::rules::ares_switch::read_ares_way(true);
     let rules = rules();
     let mut sim = arena(&rules);
     let transport = spawn(&mut sim, &rules, "TRNS", "Americans", 10, 10);
@@ -334,6 +335,7 @@ fn a_limbo_constructed_open_topped_hull_admits_its_riders_open_topped() {
 /// head of its cargo first.
 #[test]
 fn armory_capture_and_sale_each_kick_out_one_trainee() {
+    let _ares = crate::rules::ares_switch::read_ares_way(true);
     let rules = rules();
     let mut sim = arena(&rules);
     let armory = spawn(&mut sim, &rules, "ARMORY", "Americans", 16, 10);

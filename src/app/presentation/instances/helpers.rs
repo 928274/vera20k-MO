@@ -322,10 +322,11 @@ fn compose_tactical_screen_entity_encounter_order(
     // Band-box preflight has a separate native bulk Building registration
     // path. Ordinary picking/rendering never scans the unregistered store.
     if bulk_register_live_buildings {
-        candidates.extend(frame.objects().filter_map(|entity| {
-            (entity.category() == EntityCategory::Structure
-                && sim.display_layers().layer_of(entity.stable_id()).is_none())
-            .then_some(entity.stable_id())
+        candidates.extend(frame.structures().filter_map(|entity| {
+            sim.display_layers()
+                .layer_of(entity.stable_id())
+                .is_none()
+                .then_some(entity.stable_id())
         }));
     }
     candidates
@@ -357,7 +358,7 @@ fn compose_tactical_screen_entity_encounter_order(
                     return false;
                 }
                 // `entity_pick::PresentedWorld::screen_position`.
-                let (x, y) = entity.place.screen_position;
+                let [x, y] = entity.pose.screen;
                 let y = y - f32::from(entity.ion_blast_lift_pixels());
                 x >= min_x && x <= max_x && y >= min_y && y <= max_y
             })
@@ -535,19 +536,6 @@ pub(crate) const ANIM_DRAW_DEPTH_BIAS_PX: i32 = -2;
 /// per-cell terrain z path, which is a separate mechanism. Neutral is 0.
 pub(crate) fn apply_shape_z_adjust(depth: f32, z_adjust_px: i32, world_height: f32) -> f32 {
     (depth + z_adjust_px as f32 / world_height.max(1.0)).clamp(0.001, 0.999)
-}
-
-/// The authoritative anchor, sub-cell offsets and height lift included.
-///
-/// Thin wrapper over [`crate::render::locomotor_visual::screen_position`],
-/// which is the single owner of the answer. Callers must NOT apply a height
-/// offset of their own on top — doing that in two places is what used to lift
-/// aircraft twice.
-#[cfg(test)]
-pub(crate) fn entity_screen_position(
-    entity: &crate::app::presentation::frame::ObjectRecord,
-) -> (f32, f32) {
-    crate::render::locomotor_visual::screen_position(entity)
 }
 
 /// Is `owner`'s object at `pos` shown to the local player? The one rule
@@ -766,18 +754,58 @@ pub(crate) fn cell_visibility_for_local_owner(
     }
 }
 
+/// The battlefield every Display member is admitted in, in world pixels: its
+/// corner, Tactical's ViewOrigin (+0xB0/+0xB4), and its size, the tactical
+/// rect 0xB0CE28's width and height. Set_View_Dimensions4A89B8 /
+/// Scenario687620 copy that rect through6D5F60; the sidebar and bottom strip
+/// are outside it, so a layout that sets the battlefield in from the frame's
+/// corner moves this corner in from the camera.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TacticalAdmission {
+    pub(crate) corner: [f32; 2],
+    pub(crate) size: [f32; 2],
+}
+
+impl TacticalAdmission {
+    /// The battlefield `origin` in from the corner of a frame whose corner is
+    /// the world point `camera`, and `size` across, all in world pixels.
+    pub(crate) fn at(camera: [f32; 2], origin: [f32; 2], size: [f32; 2]) -> Self {
+        Self {
+            corner: [camera[0] + origin[0], camera[1] + origin[1]],
+            size,
+        }
+    }
+
+    /// The battlefield at `tactical` (`[x, y, width, height]` in frame
+    /// pixels) of a frame whose corner is the world point `camera`, at `zoom`
+    /// (`camera::tactical_origin_world`).
+    pub(crate) fn of(camera: [f32; 2], tactical: [u32; 4], zoom: f32) -> Self {
+        let [x, y, width, height] = tactical.map(|v| v as f32 / zoom);
+        Self::at(camera, [x, y], [width, height])
+    }
+
+    /// This draw's battlefield (`camera::tactical_viewport_px`).
+    pub(crate) fn of_state(state: &AppState) -> Self {
+        let input = &state.match_state.input;
+        let (x, y, width, height) = crate::app::input::camera::tactical_viewport_px(state);
+        Self::of(
+            [input.camera_x, input.camera_y],
+            [x, y, width, height],
+            input.zoom_level,
+        )
+    }
+}
+
 /// Object5F4B10 -> CoordsToClient2 6D2140 admits this inclusive padding before
-/// invoking a body draw. Both coordinates and tactical dimensions are in world
-/// pixels. Set_View_Dimensions4A89B8 / Scenario687620 copy the tactical rectangle
-/// through6D5F60; the sidebar and bottom strip are outside that rectangle.
-/// Native Unit boundaries and retained sinking history: naval_sinking_clip.py.
+/// invoking a body draw: `point`, in world pixels, measured from `view`'s
+/// corner. Native Unit boundaries and retained sinking history:
+/// naval_sinking_clip.py.
 pub(in crate::app::presentation) fn projection_admitted(
     point: [f32; 2],
-    camera: [f32; 2],
-    viewport: [f32; 2],
+    view: TacticalAdmission,
 ) -> bool {
-    let [x, y] = [point[0] - camera[0], point[1] - camera[1]];
-    x >= -360.0 && x <= viewport[0] + 360.0 && y >= -180.0 && y <= viewport[1] + 180.0
+    let [x, y] = [point[0] - view.corner[0], point[1] - view.corner[1]];
+    x >= -360.0 && x <= view.size[0] + 360.0 && y >= -180.0 && y <= view.size[1] + 180.0
 }
 
 /// Viewport frustum cull check: is the entity's bounding box visible on screen?
@@ -793,6 +821,96 @@ pub(crate) fn in_view(
     m: f32,
 ) -> bool {
     x + w >= cam_x - m && x <= cam_x + sw + m && y + h >= cam_y - m && y <= cam_y + sh + m
+}
+
+/// The box a Display record's span must reach before the object loop hands
+/// the record to the unit and SHP visitors: every view they admit from (the
+/// battlefield the unit visitor takes, which the centring size from the
+/// camera covers; the render size; the building clip), widened by the widest
+/// margin either uses ([`projection_admitted`]'s 360 px) and by
+/// [`super::shp::BUILDING_SLOT_WINDOW_SLACK`] for building art and aircraft
+/// shadows. A record outside it plans nothing in either.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PassByWindow {
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+}
+
+impl PassByWindow {
+    const MARGIN: f32 = 360.0 + super::shp::BUILDING_SLOT_WINDOW_SLACK;
+
+    /// The window around `views`, each `[left, top, right, bottom]` in
+    /// world pixels.
+    pub(crate) fn around(views: impl IntoIterator<Item = [f32; 4]>) -> Self {
+        let [left, top, right, bottom] = views.into_iter().fold(
+            [
+                f32::INFINITY,
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+                f32::NEG_INFINITY,
+            ],
+            |[left, top, right, bottom], view| {
+                [
+                    left.min(view[0]),
+                    top.min(view[1]),
+                    right.max(view[2]),
+                    bottom.max(view[3]),
+                ]
+            },
+        );
+        Self {
+            left: left - Self::MARGIN,
+            top: top - Self::MARGIN,
+            right: right + Self::MARGIN,
+            bottom: bottom + Self::MARGIN,
+        }
+    }
+
+    /// The window of this draw: `building_view` is the SHP visitor's
+    /// building clip, when it runs.
+    pub(crate) fn of(
+        state: &AppState,
+        building_view: Option<crate::app::presentation::target_lines::TacticalViewport>,
+    ) -> Self {
+        let input = &state.match_state.input;
+        let camera = [input.camera_x, input.camera_y];
+        let zoom = input.zoom_level;
+        let (centring_width, centring_height) =
+            crate::app::input::camera::tactical_centring_size(state);
+        let from_camera = |width: u32, height: u32| {
+            [
+                camera[0],
+                camera[1],
+                camera[0] + width as f32 / zoom,
+                camera[1] + height as f32 / zoom,
+            ]
+        };
+        let buildings = building_view.map(|view| {
+            let [x, y] = view.camera.map(|v| v as f32);
+            [x, y, x + view.clip[2] as f32, y + view.clip[3] as f32]
+        });
+        Self::around(
+            [
+                from_camera(centring_width, centring_height),
+                from_camera(state.render_width(), state.render_height()),
+            ]
+            .into_iter()
+            .chain(buildings),
+        )
+    }
+
+    /// Whether `span` reaches the window.
+    pub(crate) fn reaches(
+        &self,
+        span: crate::app::presentation::display_members::ScreenSpan,
+    ) -> bool {
+        span.x >= self.left
+            && span.x <= self.right
+            && span.bottom >= self.top
+            && span.top <= self.bottom
+    }
 }
 
 #[cfg(test)]
@@ -1536,6 +1654,26 @@ mod tests {
         explored.mark_visible_for_owner(viewer, 3, 3);
         assert!(!conceal(&explored, &enemy_entity, "Soviet", false));
         assert!(!conceal(&explored, &enemy_entity, "Soviet", true));
+    }
+
+    /// The pass-by window is the union of the views widened by its margin:
+    /// a span on its edge reaches it and one a pixel past does not, and a
+    /// column reaches it by either end, as an aircraft above the view does
+    /// by its shadow.
+    #[test]
+    fn a_span_on_the_widened_views_edge_reaches_it_and_one_past_does_not() {
+        use crate::app::presentation::display_members::ScreenSpan;
+        let window = PassByWindow::around([[100., 50., 900., 650.], [100., 50., 1000., 600.]]);
+        let margin = PassByWindow::MARGIN;
+        let reaches = |x: f32, top: f32, bottom: f32| window.reaches(ScreenSpan { x, top, bottom });
+        assert!(reaches(1000. + margin, 300., 300.));
+        assert!(!reaches(1001. + margin, 300., 300.));
+        assert!(reaches(100. - margin, 300., 300.));
+        assert!(!reaches(99. - margin, 300., 300.));
+        assert!(reaches(500., -2000. - margin, 50. - margin));
+        assert!(!reaches(500., -2000. - margin, 49. - margin));
+        assert!(reaches(500., 650. + margin, 2000. + margin));
+        assert!(!reaches(500., 651. + margin, 2000. + margin));
     }
 }
 

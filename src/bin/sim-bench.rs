@@ -998,6 +998,9 @@ fn main() -> Result<(), String> {
             );
         }
     }
+    // Whether the game's data turned Ares on (`RuleSet::ares`).
+    let ares = runtime.resources.rules.ares();
+    println!("ares={}", if ares { "on" } else { "off" });
     frames?;
     csv_written?;
     frame_hashes_written?;
