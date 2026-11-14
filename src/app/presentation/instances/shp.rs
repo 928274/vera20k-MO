@@ -35,17 +35,22 @@ use smol_str::StrExt;
 ///
 /// `UnitClass`'s SHP body keeps its turret ring in the same file: thirty-two
 /// frames, one per 11.25 degrees, appended after the body blocks
-/// (`SHP_TURRET_FACING_FRAMES`). Frame 176 of MO's Cyclops Walker (`CYCL`,
-/// `Voxel=no`, `Turret=yes`) is authored two frames counter-clockwise of the
-/// heading bucket 0 stands for. Measuring the barrel tip of all 32 frames: the
-/// screen-angle change per frame peaks at frames 189-190 rather than at the
-/// heading-135 bucket 188, and the barrels of the unobstructed frames (188 to
-/// 199) sit about 20 degrees counter-clockwise of their bucket's heading, which
-/// is what the drawn turret shows against the muzzle flash in game. Both are
-/// two 11.25 degree steps. Retail ships no SHP Unit with a turret, so CYCL is
-/// the only sample; the bias turns the drawn barrel clockwise onto the heading
-/// the flash uses.
-const SHP_TURRET_FRAME_BIAS: u16 = 2;
+/// (`SHP_TURRET_FACING_FRAMES`). MO's Cyclops Walker (`CYCL`, `Voxel=no`,
+/// `Turret=yes`) authors that ring four frames counter-clockwise of the
+/// heading bucket each frame is drawn for.
+///
+/// Calibrated against a live firing screenshot: its muzzle flash sits at screen
+/// angle 168 degrees, which the camera basis maps to turret heading 202.5
+/// degrees, i.e. bucket 18. With this bias the drawn frame is
+/// 176 + 18 + 4 = 198, and frame 198's measured barrel direction (169.3
+/// degrees from the ring's fixed mount) is the closest of all 32 to the flash.
+/// A two-frame bias drew frame 196 instead (157.6 degrees) and still left the
+/// barrel visibly counter-clockwise of the flash in game. That earlier estimate
+/// came from a per-frame screen-angle progression sampled at a 10x render-page
+/// scale; `asset.exe` actually writes the SHP canvas at 8x, so a moving sample
+/// window produced a spurious two-frame peak at frames 189-190. Retail ships
+/// no SHP Unit with a turret, so CYCL is the only sample.
+const SHP_TURRET_FRAME_BIAS: u16 = 4;
 
 /// The body-SHP frame a `Turret=yes` SHP Unit draws for one turret heading.
 fn shp_turret_frame(
@@ -2281,23 +2286,30 @@ fn resolve_object_shp_frame_with_facing(
 mod tests {
     use crate::app::presentation::frame::ObjectRecord;
 
-    /// The SHP turret ring is authored two frames counter-clockwise of each
-    /// heading bucket, so a heading draws the frame two steps clockwise of its
-    /// bucket and wraps inside the ring.
+    /// The SHP turret ring is authored four frames counter-clockwise of each
+    /// heading bucket, so a heading draws the frame four steps clockwise of
+    /// its bucket and wraps inside the ring.
     #[test]
-    fn an_shp_unit_turret_draws_two_frames_clockwise_of_its_bucket() {
+    fn an_shp_unit_turret_draws_four_frames_clockwise_of_its_bucket() {
         use crate::rules::animation_sequence::ShpVehicleTurret;
         use crate::rules::art_data::SHP_TURRET_FACING_FRAMES;
         let turret = ShpVehicleTurret {
             start_frame: 176,
             facings: SHP_TURRET_FACING_FRAMES,
         };
-        assert_eq!(super::shp_turret_frame(turret, 0), 178, "heading 0");
-        assert_eq!(super::shp_turret_frame(turret, 128 * 256), 194, "heading 180");
+        assert_eq!(super::shp_turret_frame(turret, 0), 180, "heading 0");
+        assert_eq!(super::shp_turret_frame(turret, 128 * 256), 196, "heading 180");
         assert_eq!(
             super::shp_turret_frame(turret, 248 * 256),
-            177,
-            "the last bucket wraps to the ring's second frame"
+            179,
+            "the last bucket wraps to the ring's fourth frame"
+        );
+        // The firing screenshot's heading 202.5 degrees must draw frame 198,
+        // whose barrel direction is the closest of the ring to the muzzle flash.
+        assert_eq!(
+            super::shp_turret_frame(turret, (202.5 * 65536.0 / 360.0) as u16),
+            198,
+            "the heading the live muzzle flash measured"
         );
     }
 
