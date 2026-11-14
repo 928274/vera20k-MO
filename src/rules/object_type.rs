@@ -4297,6 +4297,7 @@ impl ObjectType {
             Some(FactoryType::InfantryType | FactoryType::UnitType)
         ) || self.unit_repair
             || self.cloning
+            || self.cloning_facility
             || self.ares_cloning_facility()
     }
 

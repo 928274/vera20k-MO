@@ -679,6 +679,7 @@ impl AppAudioRuntime {
             sfx_player: Some(sfx_player),
             launcher_audio_available: true,
             theme_startup_suppressed: false,
+            last_theme_diag: None,
             master_groups: Default::default(),
             restore_muted: false,
         })

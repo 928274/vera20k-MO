@@ -3407,7 +3407,7 @@ mod tests {
         entity.set_category_for_test(EntityCategory::Unit);
         entity.locomotor = Some(LocomotorState::for_test_kind(LocomotorKind::Drive));
         let mut record = ObjectRecord::of_test(&entity);
-        record.place.slope_render_phase = Some(SlopeRenderPhase::Transition {
+        record.pose.slope = Some(SlopeRenderPhase::Transition {
             from_slope: 0,
             to_slope: 3,
             phase_num: 1,
