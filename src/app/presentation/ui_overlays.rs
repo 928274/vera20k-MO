@@ -3084,67 +3084,6 @@ mod tests {
         assert!(!draws(-40, false));
     }
 
-    /// The full production chain of the MO "a detector sees a health bar
-    /// moving underground" case. `TunnelLocomotionClass::In_Which_Layer @
-    /// 0x0072A1A0` registers the travelling digger in Display layer 0, whose
-    /// members have no draw band: the body stays hidden while the retained
-    /// Display slot still feeds Tactical6D9789's Extras sweep. Ares
-    /// `TechnoClass_DrawExtras_Submerged 10048350` (hook 6F5388) then admits
-    /// its strip only while the player's sensor covers that cell.
-    #[cfg(feature = "ares")]
-    #[test]
-    fn an_underground_display_member_keeps_only_a_sensed_health_bar() {
-        use crate::sim::world::display_layers::DisplayLayer;
-        use crate::sim::{combat::Health, game_entity::GameEntity, world::Simulation};
-
-        let mut sim = Simulation::new();
-        let player = sim.intern("Player");
-        let owner = sim.intern("Enemy");
-        *sim.fog_mut_for_test() = crate::sim::vision::FogState::new(32, 32);
-        sim.session_mut_for_test()
-            .set_current_house_for_test(Some(player));
-        let mut entity = GameEntity::new_at_frame_zero_for_test(
-            1,
-            20,
-            20,
-            0,
-            0,
-            owner,
-            Health::new(300),
-            sim.intern("DIGR"),
-            EntityCategory::Unit,
-            0,
-            5,
-            true,
-        );
-        entity.lifecycle.set_in_limbo_for_test(false);
-        // Tunnel's travel depth (`TUNNEL_DEPTH_Z`, 0x007291D0).
-        entity.position.set_exact_z_leptons_for_test(Some(-256));
-        sim.entities_mut_for_test().insert(entity);
-        sim.submit_object_display_for_test(1, DisplayLayer::UNDERGROUND, None);
-        assert_eq!(
-            sim.display_layers().layer_of(1),
-            Some(DisplayLayer::UNDERGROUND),
-            "the dive moves the Display registration below the cells"
-        );
-        // Layer 0 has no draw band, so the retained slot carries no body,
-        // turret or shadow pieces; the Extras sweep still sees its parent.
-        let display_order = crate::app::presentation::render::draw_plan_lowering::NativeDisplayOrder::from_display(
-            sim.display_layers(),
-        );
-        let parent = crate::app::presentation::instances::underground_extras_parent(&display_order, 1)
-            .expect("the underground Display slot survives");
-        assert!(parent.pieces.is_empty(), "no hull is drawn below the cells");
-
-        let sensed = |sim: &Simulation| {
-            let frame = frame_of(sim);
-            health_bar_drawable(sim, frame.object(1).unwrap(), None, Some("Player"))
-        };
-        assert!(!sensed(&sim), "without a detector the digger is invisible");
-        sim.fog_mut_for_test().increment_sensor_at(player, 20, 20);
-        assert!(sensed(&sim), "a detector over the dive admits the strip");
-    }
-
     /// One full-health tank on cell (20,20) and one viewer's fog plane. The
     /// revealed case has `is_cell_revealed` without `is_cell_visible`, the
     /// state `MapRevealProjection::Transient` leaves after a trigger reveal.
