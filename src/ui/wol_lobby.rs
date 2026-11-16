@@ -925,7 +925,7 @@ impl WolLobbyState {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_ui))]
 mod tests {
     use super::*;
 
@@ -1109,6 +1109,7 @@ mod tests {
             limit_icon: None,
             ping: -1,
             tag: None,
+            watch: false,
         };
         let mut lobby = WolLobbyState::new(false, false);
         lobby.replace_games(vec![row("a"), row("b")]);

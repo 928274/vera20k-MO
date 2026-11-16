@@ -113,6 +113,8 @@ pub(crate) struct MatchPresentationState {
     pub(crate) superweapon_range_pulse: crate::app::presentation::radial_indicators::RangePulse,
     /// Native process-lived FPS counter and detail hysteresis, never sim state.
     pub(crate) detail: std::cell::RefCell<super::detail::DetailState>,
+    /// The water and ore sparkles' per-cell PixelFX and clock.
+    pub(crate) pixel_fx: std::cell::RefCell<crate::render::pixel_fx_sparkles::PixelFxCells>,
     /// The client's AnimClass `+0x19D` for Supers' ChronoPlacement anims
     /// (`match_runtime::super_selection`): hidden anims, by id.
     pub(crate) hidden_super_anims: std::collections::BTreeSet<crate::sim::anim_class::AnimId>,
@@ -208,7 +210,7 @@ pub(crate) struct MatchPresentationState {
     /// Animated power bar — segment-by-segment transition matching original PowerClass.
     pub(crate) power_bar_anim: crate::ui::sidebar::PowerBarAnimState,
     /// Persistent flash + mode state for in-game sidebar gadgets. Ticked from
-    /// `sidebar_gadgets::update_sidebar_gadget_state` once per sim tick;
+    /// `sidebar_gadgets::update_sidebar_gadget_state` on every pass;
     /// read each frame by the sidebar view builder to pick SHP frame indices.
     pub(crate) sidebar_gadget_state: crate::ui::sidebar::gadget_flash::SidebarGadgetState,
     /// In-game gadget substrate (study §6.1): retained sidebar button list +
@@ -376,7 +378,7 @@ pub(crate) fn relation_house_colors(
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_app_presentation))]
 mod relation_colour_tests {
     use super::*;
     use crate::rules::house_colors::HouseColorIndex;

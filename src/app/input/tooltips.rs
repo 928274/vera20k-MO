@@ -284,6 +284,12 @@ fn tactical_world_tip_text_for_viewer(
         Some(view.interner()),
         Some(terrain),
     );
+    // RESIDUAL (dormant: retail Tiberiums set no UIName): a non-Techno pick,
+    // a tree, sends Display::GetTooltipText 0x004AE4F0 to CellClass::GetUIName
+    // 0x00484FF0 (call 0x004AE68A), the clicked cell's Tiberium UIName.
+    // AbstractTypeClass::ReadINI 0x00410A60 leaves it the empty string without
+    // a UIName key, so no tip shows either way. A mod's Tiberium UIName would
+    // show over a tree on ore; VERA shows none and does not read that key.
     let Some(entity) = picked.and_then(|id| view.entities().get(id)) else {
         return String::new();
     };
@@ -559,6 +565,8 @@ fn sidebar_button_tip_text(
 /// StripClass::GetCameoTooltip 6A92E0, which returns a super weapon's bare
 /// name. Its `TXT_MONEY_FORMAT_1` branch and DrawCameoText 6AC480 need
 /// ShowCameoNames (+0x53A4), which only the constructor 6A4E60 writes (0).
+/// Its `EntryCount < 75` guard has no counterpart here; no strip reaches 75
+/// entries with retail rules.
 fn cameo_tip_text(money_format: Option<&str>, name: &str, cost: Option<i64>) -> String {
     let formatted = match (money_format, cost) {
         (Some(fmt), Some(cost)) => format_csf(fmt, &[CsfArg::Str(name), CsfArg::Int(cost)]),
@@ -986,7 +994,7 @@ pub(crate) fn size_tip_box(
     (layout, [box_w, box_h])
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_app_input_d_z))]
 mod tests {
     use super::*;
     use crate::render::bit_font::tests::make_test_font;

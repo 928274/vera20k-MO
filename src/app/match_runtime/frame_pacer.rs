@@ -159,9 +159,10 @@ pub(crate) struct LocalFramePacer {
     /// replay log are unchanged.
     debug_speed: u8,
     /// The pass `App::service_match_runtime`'s catch-up loop is running: when
-    /// the service started and how many passes it has finished. `None`
-    /// outside the loop and when the service may not catch up.
-    service_pass: Option<(Instant, usize)>,
+    /// the service started, how many passes it has finished and whether it
+    /// has a catching-up watcher's budget. `None` outside the loop and when
+    /// the service may not catch up.
+    service_pass: Option<(Instant, usize, bool)>,
     /// The last frame's tick time: one ticked inline, and one ticked on the
     /// simulation thread, whose time includes the copies its published frame
     /// forces.
@@ -275,9 +276,9 @@ impl OnlinePacer {
     }
 
     /// The relay seals a turn's frames at once, sent when its last frame is
-    /// due (relay README, ordering).
+    /// due (relay README, ordering); a watcher's come in larger runs.
     fn turn(&self) -> u32 {
-        crate::net::live_commands::turn_frames(self.receipt.frames_per_second)
+        self.receipt.turn_frames.max(1)
     }
 
     /// A turn's frames arrive together, so playout runs a turn's span behind
@@ -554,10 +555,6 @@ impl ScenarioElapsedClock {
     }
 
     /// Sample the retail raw accumulator without changing clock state.
-    #[cfg(any(
-        test,
-        all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")
-    ))]
     fn elapsed_buckets(&self, now_ms: u64) -> u32 {
         self.accumulated_buckets
             .wrapping_add(if self.start_bucket != ELAPSED_CLOCK_STOPPED {
@@ -570,11 +567,8 @@ impl ScenarioElapsedClock {
     /// gamemd provenance: Score elapsed-time formatting; verified
     /// ScoreDialog__WndProc @ 0x005C9B10 reads ScenarioClass+0x614/+0x61C,
     /// treats the wrapped accumulator as signed, and divides it by 60.
-    /// The browser match report reads it after abort/outcome stopped the clock.
-    #[cfg(any(
-        test,
-        all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")
-    ))]
+    /// The browser match report reads it after abort/outcome stopped the
+    /// clock; the observer's credits counter reads it while it runs.
     pub(crate) fn elapsed_seconds(&self, now_ms: u64) -> i32 {
         (self.elapsed_buckets(now_ms) as i32) / SCORE_BUCKETS_PER_SECOND
     }
@@ -588,8 +582,20 @@ impl LocalFramePacer {
         frame == 0 || frame <= committed_frontier
     }
 
-    pub(crate) fn permits_catch_up(attempts: usize, elapsed: std::time::Duration) -> bool {
-        attempts < 8 && elapsed < std::time::Duration::from_millis(8)
+    /// The catch-up service's budget before the next picture: 8 frames or
+    /// 8 ms. VERA watching: a watcher catching up plays minutes of a match,
+    /// so it runs 50 ms of them a picture, about 20 pictures a second
+    /// (docs/Networking.md "Watching").
+    pub(crate) fn permits_catch_up(
+        attempts: usize,
+        elapsed: std::time::Duration,
+        watcher: bool,
+    ) -> bool {
+        if watcher {
+            elapsed < std::time::Duration::from_millis(50)
+        } else {
+            attempts < 8 && elapsed < std::time::Duration::from_millis(8)
+        }
     }
 
     pub(crate) const fn new() -> Self {
@@ -609,9 +615,10 @@ impl LocalFramePacer {
     }
 
     /// Note the pass the catch-up service is about to run, its
-    /// `finished`-th, in a service that began at `started`.
-    pub(crate) fn begin_service_pass(&mut self, started: Instant, finished: usize) {
-        self.service_pass = Some((started, finished));
+    /// `finished`-th, in a service that began at `started`, with a catching-up
+    /// watcher's budget when `watcher`.
+    pub(crate) fn begin_service_pass(&mut self, started: Instant, finished: usize, watcher: bool) {
+        self.service_pass = Some((started, finished, watcher));
     }
 
     pub(crate) fn end_service(&mut self) {
@@ -673,12 +680,14 @@ impl LocalFramePacer {
 
     /// Whether the catch-up budget stays open after a frame admitted now.
     fn catch_up_continues(&self, now: Instant) -> bool {
-        self.service_pass.is_some_and(|(started, finished)| {
-            Self::permits_catch_up(
-                finished + 1,
-                now.saturating_duration_since(started) + self.expected_frame_cost(),
-            )
-        })
+        self.service_pass
+            .is_some_and(|(started, finished, watcher)| {
+                Self::permits_catch_up(
+                    finished + 1,
+                    now.saturating_duration_since(started) + self.expected_frame_cost(),
+                    watcher,
+                )
+            })
     }
 
     /// What the next frame's tick is expected to take on this thread: the
@@ -867,6 +876,12 @@ impl LocalFramePacer {
         self.render_deferred = false;
     }
 
+    /// The recent battlefield draw time ([`Self::record_presented`]), zero
+    /// before the first one.
+    pub(crate) fn draw_cost(&self) -> Duration {
+        self.draw_cost.unwrap_or_default()
+    }
+
     /// Read the same interval used by `should_admit`, for diagnostics.
     pub(crate) fn budget_ms(&self, game_speed: u8, network_fps: Option<(u16, u32)>) -> Option<f32> {
         pacing_timer(game_speed, network_fps).map(PacingTimer::length_ms)
@@ -1049,7 +1064,7 @@ pub(crate) fn wall_clock_bucket() -> u32 {
     frame_bucket(wall_clock_ms())
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_app_match))]
 mod tests {
     use super::*;
 
@@ -1059,6 +1074,7 @@ mod tests {
             received_at: at,
             frames_per_second: 45,
             clock_epoch: 0,
+            turn_frames: crate::net::live_commands::turn_frames(45),
         }
     }
 
@@ -1450,16 +1466,34 @@ mod tests {
         );
         assert!(LocalFramePacer::permits_catch_up(
             7,
-            std::time::Duration::from_millis(7)
+            std::time::Duration::from_millis(7),
+            false
         ));
         assert!(!LocalFramePacer::permits_catch_up(
             8,
-            std::time::Duration::ZERO
+            std::time::Duration::ZERO,
+            false
         ));
         assert!(!LocalFramePacer::permits_catch_up(
             1,
-            std::time::Duration::from_millis(8)
+            std::time::Duration::from_millis(8),
+            false
         ));
+    }
+
+    /// VERA watching: a catching-up watcher's service goes on past 8 frames
+    /// and 8 ms, to 50 ms, so a big battle's minutes are not played at one
+    /// frame a picture (docs/Networking.md "Watching").
+    #[test]
+    fn a_catching_up_watcher_runs_long_passes() {
+        let mut pacer = LocalFramePacer::new();
+        let started = Instant::now();
+        let later = started + std::time::Duration::from_millis(20);
+        pacer.begin_service_pass(started, 8, true);
+        assert!(pacer.catch_up_continues(later));
+        assert!(!pacer.catch_up_continues(started + std::time::Duration::from_millis(50)));
+        pacer.begin_service_pass(started, 8, false);
+        assert!(!pacer.catch_up_continues(started));
     }
 
     #[test]
@@ -1493,7 +1527,7 @@ mod tests {
             let now = 1_000 + pass * 1000 / hz;
             let mut attempts = 0;
             while pacer.should_admit(now, game_speed, network_fps, false)
-                && LocalFramePacer::permits_catch_up(attempts, std::time::Duration::ZERO)
+                && LocalFramePacer::permits_catch_up(attempts, std::time::Duration::ZERO, false)
             {
                 let start = pacer.admitted_frame_start_ms(now, game_speed, network_fps);
                 pacer.record_admitted_frame(start);
@@ -1608,12 +1642,12 @@ mod tests {
         // alone ends the service, after eight passes or eight milliseconds.
         let mut pacer = LocalFramePacer::new();
         assert!(!pacer.another_pass_follows(started, 0, 0, None));
-        pacer.begin_service_pass(started, 0);
+        pacer.begin_service_pass(started, 0, false);
         assert!(pacer.another_pass_follows(started, 0, 0, None));
-        pacer.begin_service_pass(started, 7);
+        pacer.begin_service_pass(started, 7, false);
         assert!(!pacer.another_pass_follows(started, 0, 0, None));
         // A frame takes the smaller of its last inline and lent times.
-        pacer.begin_service_pass(started, 0);
+        pacer.begin_service_pass(started, 0, false);
         pacer.record_frame_cost(Duration::from_millis(9), true);
         assert!(!pacer.another_pass_follows(started, 0, 0, None));
         pacer.record_frame_cost(Duration::from_millis(5), false);
@@ -1625,7 +1659,7 @@ mod tests {
 
         // A timed speed's frame admitted on time has nothing due behind it.
         let mut paced = LocalFramePacer::new();
-        paced.begin_service_pass(started, 0);
+        paced.begin_service_pass(started, 0, false);
         paced.record_admitted_frame(32);
         assert!(!paced.another_pass_follows(started, 32, 1, None));
         assert!(paced.another_pass_follows(started, 32 + FRAME_BUCKET_MS, 1, None));
@@ -1638,14 +1672,14 @@ mod tests {
     fn an_online_frame_the_relay_sealed_has_another_pass_behind_it() {
         let started = Instant::now();
         let mut pacer = LocalFramePacer::new();
-        pacer.begin_service_pass(started, 0);
+        pacer.begin_service_pass(started, 0, false);
         let receipt = push_receipt(started, 40);
         assert!(pacer.another_online_pass_follows(started, 11, 40, Some((receipt, false))));
         assert!(!pacer.another_online_pass_follows(started, 41, 40, Some((receipt, false))));
         // Without the online clock (a pause), the frontier alone decides.
         assert!(pacer.another_online_pass_follows(started, 11, 40, None));
         assert!(!pacer.another_online_pass_follows(started, 41, 40, None));
-        pacer.begin_service_pass(started, 7);
+        pacer.begin_service_pass(started, 7, false);
         assert!(!pacer.another_online_pass_follows(started, 11, 40, Some((receipt, false))));
     }
 

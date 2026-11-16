@@ -168,7 +168,7 @@ impl DamageConsequences {
 
         world.finish_terrain_navigation_changes(rules, &terrain_navigation_changed_cells);
 
-        world.admit_death_debris(std::mem::take(&mut effects.voxel_debris));
+        world.admit_death_debris(std::mem::take(&mut effects.voxel_debris), rules);
         // Explicit callback-disabled fixtures retain their effect packets;
         // production death producers already admitted each birth inline.
         // Remaining effects are `AnimClass` instances, not legacy world effects: only the real
@@ -299,7 +299,7 @@ pub(crate) fn admit_muzzle_anim(world: &mut Simulation, rules: &RuleSet, event: 
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_sim_world_c_o))]
 mod muzzle_anim_tests {
     use super::*;
     use crate::rules::art_data::ArtRegistry;

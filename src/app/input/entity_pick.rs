@@ -77,6 +77,13 @@ pub(crate) trait PickSource: Copy {
     fn owner_is_human_player(&self, _owner: InternedId) -> Option<bool> {
         None
     }
+    /// [`crate::sim::world::Simulation::house_controls_selection`], the
+    /// owner test of the T key's predicates (`0x00732580`, `0x00732770`,
+    /// `0x006DA770`). A bare EntityStore answers `None`; its fixtures keep
+    /// exact local-owner identity.
+    fn owner_controls_selection(&self, _owner: InternedId) -> Option<bool> {
+        None
+    }
 }
 impl PickSource for &EntityStore {
     fn entities(&self) -> &EntityStore {
@@ -106,6 +113,9 @@ impl PickSource for &crate::sim::world::Simulation {
     }
     fn owner_is_human_player(&self, owner: InternedId) -> Option<bool> {
         Some(self.house_is_human_player(owner))
+    }
+    fn owner_controls_selection(&self, owner: InternedId) -> Option<bool> {
+        Some(self.house_controls_selection(owner))
     }
 }
 impl PickWorld for &crate::sim::world::Simulation {
@@ -159,6 +169,9 @@ impl PickSource for PresentedWorld<'_> {
     }
     fn owner_is_human_player(&self, owner: InternedId) -> Option<bool> {
         Some(self.sim.house_is_human_player(owner))
+    }
+    fn owner_controls_selection(&self, owner: InternedId) -> Option<bool> {
+        Some(self.sim.house_controls_selection(owner))
     }
 }
 impl PickWorld for PresentedWorld<'_> {
@@ -535,16 +548,8 @@ pub(crate) fn compute_click_selection_snapshot_with_playfield(
     // those keep the ordinary add/toggle rather than being forced down the
     // replace path. gamemd equivalent UNCHECKED because the state cannot arise —
     // both production call sites always pass a resolved owner and interner.
-    let owner_is_local = |entity: &crate::sim::game_entity::GameEntity| -> bool {
-        match (local_owner, interner) {
-            (Some(owner), Some(names)) => names.resolve(entity.owner()).eq_ignore_ascii_case(owner),
-            _ => true,
-        }
-    };
-    let selection_is_local = current_selection
-        .first()
-        .and_then(|id| entities.get(*id))
-        .is_some_and(owner_is_local);
+    let selection_is_local =
+        first_selected_is_players(source, current_selection, local_owner, interner);
 
     if !additive || current_selection.is_empty() || !selection_is_local {
         return Some(SelectionMutation {
@@ -566,6 +571,27 @@ pub(crate) fn compute_click_selection_snapshot_with_playfield(
     }
 }
 
+/// BandBox_LeftUp's toggle arm (action 8) runs only while the first selected
+/// object's House passes IsHumanPlayer (`0x004ABD35..0x004ABD57`,
+/// `0x0050B6F0`); otherwise the click becomes action 7, which unselects all
+/// (`0x004ABE4A`) before it selects, with or without T held (`0x004ABE67`).
+fn first_selected_is_players(
+    source: impl PickSource,
+    current_selection: &[u64],
+    local_owner: Option<&str>,
+    interner: Option<&crate::sim::intern::StringInterner>,
+) -> bool {
+    current_selection
+        .first()
+        .and_then(|id| source.entities().get(*id))
+        .is_some_and(|entity| match (local_owner, interner) {
+            (Some(owner), Some(names)) => source
+                .owner_is_human_player(entity.owner())
+                .unwrap_or_else(|| names.resolve(entity.owner()).eq_ignore_ascii_case(owner)),
+            _ => true,
+        })
+}
+
 /// Did the band box catch anything at all?
 ///
 /// gamemd asks this before it clears the selection, and the question is far
@@ -580,32 +606,28 @@ pub(crate) fn compute_click_selection_snapshot_with_playfield(
 /// filter: an object without map presence is never in the drawn-object list, so
 /// a passenger inside a transport cannot make a rectangle "non-empty".
 ///
-/// The list is **partly** visibility-filtered, and the asymmetry is native:
-/// mobile objects append themselves from inside their own draw routine, so an
-/// object the shroud hides is never registered, while buildings are appended in
-/// bulk from the whole building array with no visibility test at all. A building
-/// under unexplored shroud therefore does make a rectangle non-empty, and an
-/// enemy unit under it does not.
+/// The list is not shroud-filtered. Mobile objects append themselves from
+/// inside their own draw routine (`UnitClass::DrawIt` registers at
+/// `0x0073CF6B`), which the object loop `0x006D8DB0` reaches with no shroud
+/// test, the shroud only masking their pixels; buildings are appended in bulk
+/// from the whole building array. A rectangle over black shroud therefore
+/// catches an enemy beneath it and replaces the selection. The loop's FogOfWar
+/// test, `MapClass::IsFogged @ 0x005865E0`, always answers no, so FogOfWar
+/// changes nothing here.
 ///
-/// The registration helper has exactly four call sites, and every one of them is
-/// the same virtual — the per-class "draw extras" override — reached once from
-/// the vehicle version, twice from the infantry version (its two draw paths) and
-/// once from the aircraft version. Nothing outside a draw routine registers an
-/// object, so the shroud filter above is complete: there is no second, unfiltered
-/// path by which a hidden enemy could enter the list.
+/// The registration helper (`0x006D9EF0`) is called only from draw routines:
+/// `UnitClass::DrawIt`, `InfantryClass::DrawIt` (its two draw paths),
+/// `AircraftClass::Draw_It` and the VeinholeMonster's draw (`0x0074D558`,
+/// Tiberian Sun content). Nothing outside a draw routine registers an object.
 pub(crate) fn band_rect_contains_drawn_object(
     source: impl PickSource,
     encounter_order: &[u64],
-    fog: Option<(&FogState, &crate::map::houses::HouseAllianceMap)>,
-    local_owner: Option<&str>,
     min_x: f32,
     min_y: f32,
     max_x: f32,
     max_y: f32,
-    interner: Option<&crate::sim::intern::StringInterner>,
 ) -> bool {
     let entities = source.entities();
-    let local_owner_id = local_owner.and_then(|o| interner.and_then(|i| i.get(o)));
     encounter_order.iter().any(|id| {
         let Some(entity) = entities.get(*id) else {
             return false;
@@ -625,9 +647,7 @@ pub(crate) fn band_rect_contains_drawn_object(
             // FoggedObject still draws in both fog modes.
             return !source.invisible_in_game_building(entity);
         }
-        let owner_str = interner.map_or("", |i| i.resolve(entity.owner()));
         !source.conceals(entity)
-            && is_drawn_for_local_owner(fog, local_owner, owner_str, entity, local_owner_id)
     })
 }
 
@@ -760,17 +780,7 @@ pub(crate) fn compute_box_selection_snapshot_with_playfield(
     interner: Option<&crate::sim::intern::StringInterner>,
     require_playfield_membership: bool,
 ) -> Option<SelectionMutation> {
-    if !band_rect_contains_drawn_object(
-        source,
-        preflight_order,
-        fog,
-        local_owner,
-        min_x,
-        min_y,
-        max_x,
-        max_y,
-        interner,
-    ) {
+    if !band_rect_contains_drawn_object(source, preflight_order, min_x, min_y, max_x, max_y) {
         return None;
     }
     let candidates = entities_in_rect(
@@ -811,7 +821,7 @@ pub(crate) fn compute_box_selection_snapshot_with_playfield(
 }
 
 pub(crate) fn compute_type_select_tap_with_playfield(
-    entities: &EntityStore,
+    source: impl PickSource,
     screen_order: &[u64],
     map_order: &[u64],
     current_selection: &[u64],
@@ -822,13 +832,14 @@ pub(crate) fn compute_type_select_tap_with_playfield(
     across_map: bool,
     require_playfield_membership: bool,
 ) -> TypeSelectTapResult {
+    let entities = source.entities();
     let mut mutation = SelectionMutation::default();
     let mut selected = current_selection.to_vec();
     if selected.len() == 1 {
-        let nonlocal = entities.get(selected[0]).is_some_and(|entity| {
-            let owner = interner.map_or("", |i| i.resolve(entity.owner()));
-            local_owner.is_some_and(|local| !owner.eq_ignore_ascii_case(local))
-        });
+        // `Tactical::Unselect_If_Not_Owned @ 0x006DA770`.
+        let nonlocal = entities
+            .get(selected[0])
+            .is_some_and(|entity| !type_select_owner_admits(source, local_owner, entity, interner));
         if nonlocal {
             mutation.deselect.push(selected[0]);
             selected.clear();
@@ -886,7 +897,7 @@ pub(crate) fn compute_type_select_tap_with_playfield(
 
     if !across_map {
         let visible = type_select_candidates(
-            entities,
+            source,
             screen_order,
             &seeds,
             fog,
@@ -913,7 +924,7 @@ pub(crate) fn compute_type_select_tap_with_playfield(
     }
 
     let map_candidates = type_select_candidates(
-        entities,
+        source,
         map_order,
         &seeds,
         None,
@@ -977,7 +988,7 @@ fn push_type_select_seed(
 }
 
 fn type_select_candidates(
-    entities: &EntityStore,
+    source: impl PickSource,
     source_order: &[u64],
     seeds: &[TypeSelectionSeed],
     fog: Option<(&FogState, &crate::map::houses::HouseAllianceMap)>,
@@ -987,6 +998,7 @@ fn type_select_candidates(
     screen_only: bool,
     require_playfield_membership: bool,
 ) -> Vec<u64> {
+    let entities = source.entities();
     let local_owner_id = local_owner.and_then(|owner| interner.and_then(|i| i.get(owner)));
     source_order
         .iter()
@@ -995,7 +1007,7 @@ fn type_select_candidates(
             let owner = interner.map_or("", |i| i.resolve(entity.owner()));
             let type_id = interner.map_or("", |i| i.resolve(entity.type_ref()));
             if !entity.lifecycle.object_alive()
-                || local_owner.is_some_and(|local| !owner.eq_ignore_ascii_case(local))
+                || !type_select_owner_admits(source, local_owner, entity, interner)
                 || !seeds.iter().any(|&seed| {
                     type_selection_matches(
                         seed,
@@ -1022,6 +1034,27 @@ fn type_select_candidates(
         .collect()
 }
 
+/// The owner arm of the T key's predicates, asked of the object's House
+/// ([`PickSource::owner_controls_selection`]). A world without a local player
+/// keeps every owner, as the headless fixtures always have; a source without
+/// a house table falls back to exact local-owner identity.
+fn type_select_owner_admits(
+    source: impl PickSource,
+    local_owner: Option<&str>,
+    entity: &crate::sim::game_entity::GameEntity,
+    interner: Option<&crate::sim::intern::StringInterner>,
+) -> bool {
+    local_owner.is_none_or(|local| {
+        source
+            .owner_controls_selection(entity.owner())
+            .unwrap_or_else(|| {
+                interner
+                    .map_or("", |i| i.resolve(entity.owner()))
+                    .eq_ignore_ascii_case(local)
+            })
+    })
+}
+
 fn type_select_final_admissions(
     entities: &EntityStore,
     candidates: &[u64],
@@ -1042,7 +1075,7 @@ fn type_select_final_admissions(
 }
 
 pub(crate) fn compute_type_select_click_mutation_with_playfield(
-    entities: &EntityStore,
+    source: impl PickSource,
     scope_order: &[u64],
     current_selection: &[u64],
     clicked_id: u64,
@@ -1052,14 +1085,17 @@ pub(crate) fn compute_type_select_click_mutation_with_playfield(
     interner: Option<&crate::sim::intern::StringInterner>,
     require_playfield_membership: bool,
 ) -> SelectionMutation {
-    let Some(clicked) = entities.get(clicked_id) else {
+    let Some(clicked) = source.entities().get(clicked_id) else {
         return SelectionMutation::default();
     };
     let clicked_type = (clicked.type_ref(), clicked.category());
+    let additive = additive
+        && (current_selection.is_empty()
+            || first_selected_is_players(source, current_selection, local_owner, interner));
     if additive && current_selection.contains(&clicked_id) {
         return SelectionMutation {
             deselect: matching_type_group(
-                entities,
+                source,
                 scope_order,
                 clicked_type,
                 local_owner,
@@ -1077,7 +1113,7 @@ pub(crate) fn compute_type_select_click_mutation_with_playfield(
     SelectionMutation {
         clear: !additive,
         select: matching_type_group(
-            entities,
+            source,
             scope_order,
             clicked_type,
             local_owner,
@@ -1133,7 +1169,7 @@ pub(crate) fn compute_type_select_box_mutation_with_playfield(
     let mut select = Vec::new();
     for type_ref in represented_types {
         select.extend(matching_type_group(
-            entities,
+            source,
             scope_order,
             type_ref,
             local_owner,
@@ -1152,7 +1188,7 @@ pub(crate) fn compute_type_select_box_mutation_with_playfield(
 }
 
 fn matching_type_group(
-    entities: &EntityStore,
+    source: impl PickSource,
     source_order: &[u64],
     type_ref: TypeSelectionSeed,
     local_owner: Option<&str>,
@@ -1164,8 +1200,7 @@ fn matching_type_group(
     source_order
         .iter()
         .filter_map(|id| {
-            let entity = entities.get(*id)?;
-            let owner = interner.map_or("", |i| i.resolve(entity.owner()));
+            let entity = source.entities().get(*id)?;
             let type_id = interner.map_or("", |i| i.resolve(entity.type_ref()));
             if !entity.lifecycle.object_alive()
                 || entity.lifecycle.in_limbo()
@@ -1175,7 +1210,7 @@ fn matching_type_group(
                     rules,
                     interner,
                 )
-                || local_owner.is_some_and(|local| !owner.eq_ignore_ascii_case(local))
+                || !type_select_owner_admits(source, local_owner, entity, interner)
                 || (selecting
                     && !static_selection_gate(entity, type_id, rules, require_playfield_membership))
             {
@@ -1568,27 +1603,27 @@ fn is_local_band_candidate(
     }) && static_selection_gate(entity, entity_type, rules, require_playfield_membership)
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_app_input_d_z))]
 #[path = "entity_pick_reveal_tests.rs"]
 mod reveal_tests;
 
-#[cfg(test)]
+#[cfg(all(test, tests_app_input_d_z))]
 #[path = "entity_pick_building_type_select_tests.rs"]
 mod building_type_select_tests;
 
-#[cfg(test)]
+#[cfg(all(test, tests_app_input_d_z))]
 #[path = "entity_pick_group_as_tests.rs"]
 mod group_as_tests;
 
-#[cfg(test)]
+#[cfg(all(test, tests_app_input_d_z))]
 #[path = "entity_pick_invisible_tests.rs"]
 mod invisible_tests;
 
-#[cfg(test)]
+#[cfg(all(test, tests_app_input_d_z))]
 #[path = "entity_pick_band_owner_tests.rs"]
 mod band_owner_tests;
 
-#[cfg(test)]
+#[cfg(all(test, tests_app_input_d_z))]
 mod tests {
     use super::*;
 
@@ -1988,13 +2023,10 @@ mod tests {
                     band_rect_contains_drawn_object(
                         source,
                         &[1],
-                        Some((sim.fog(), sim.house_alliances().as_map())),
-                        Some("viewer"),
                         bx - 1.,
                         by - 1.,
                         bx + 1.,
-                        by + 1.,
-                        Some(sim.interner()),
+                        by + 1.
                     ),
                     "{case} {translucent_viewer:?}"
                 );
@@ -2008,7 +2040,9 @@ mod tests {
     /// VERA's translucent fog with FogOfWar takes an enemy out of the draw
     /// plan, so no point pick, band preflight or type-select box finds it;
     /// the retail fog keeps it pickable, as native does
-    /// (`0x006924A4..0x006924FA`).
+    /// (`0x006924A4..0x006924FA`). A hostile gap hides an enemy from the point
+    /// pick only: AddSelectable (`0x006D9EF0`) tests no shroud, so the band
+    /// box and the type-select box still catch it.
     #[test]
     fn translucent_fog_hides_from_the_pickers_what_it_hides_from_the_draw_plan() {
         use crate::app::presentation::instances::{
@@ -2021,6 +2055,11 @@ mod tests {
         let ally = sim.intern("British");
         let enemy = sim.intern("Russians");
         let typ = sim.intern("MTNK");
+        // The viewer's House, whose objects the T key's owner test admits.
+        sim.houses_mut_for_test()
+            .register(crate::sim::house_state::HouseState::new(
+                viewer, 0, None, true, 0, 10,
+            ));
         sim.session_mut_for_test()
             .game_options_mut_for_test()
             .fog_of_war = true;
@@ -2069,7 +2108,7 @@ mod tests {
             &sim,
             RuleSet::empty_for_test(),
         );
-        for (id, _, owner, retail, translucent) in cases {
+        for (id, _, _, retail, translucent) in cases {
             let entity = sim.entities().get(id).unwrap();
             assert_eq!(
                 !translucent_fog_conceals(&sim, viewer, &entity.position, entity.owner()),
@@ -2078,20 +2117,17 @@ mod tests {
             let screen_selected = tactical_entity_admission(
                 TacticalEntityPurpose::ScreenSelection,
                 frame.object(id).unwrap(),
-                sim.interner().resolve(owner),
-                Some("Americans"),
                 Some(viewer),
                 sim.fog(),
-                sim.house_alliances().as_map(),
                 false,
                 0,
                 0,
                 Default::default(),
             )
             .is_some();
-            assert_eq!(screen_selected, retail, "{id}");
-            let screen_order: &[u64] = if screen_selected { &[id] } else { &[] };
+            assert!(screen_selected, "{id}");
             for (translucent_viewer, shown) in [(None, retail), (Some(viewer), translucent)] {
+                let caught = translucent_viewer.is_none() || translucent;
                 let source = PresentedWorld {
                     sim: &sim,
                     rules: None,
@@ -2102,22 +2138,13 @@ mod tests {
                 let picked = hover_target_at_point(source, x, y, "Americans", false)
                     .map(|hover| hover.stable_id);
                 assert_eq!(picked, shown.then_some(id), "{case}");
-                let band = band_rect_contains_drawn_object(
-                    source,
-                    &[id],
-                    Some((sim.fog(), sim.house_alliances().as_map())),
-                    Some("Americans"),
-                    x - 1.,
-                    y - 1.,
-                    x + 1.,
-                    y + 1.,
-                    Some(sim.interner()),
-                );
-                assert_eq!(band, shown, "{case}");
+                let band =
+                    band_rect_contains_drawn_object(source, &[id], x - 1., y - 1., x + 1., y + 1.);
+                assert_eq!(band, caught, "{case}");
                 // An MTNK in the box selects the viewer's own MTNKs.
                 let typed = compute_type_select_box_mutation_with_playfield(
                     source,
-                    screen_order,
+                    &[id],
                     &all,
                     &[],
                     None,
@@ -2131,7 +2158,11 @@ mod tests {
                     Some(sim.interner()),
                     false,
                 );
-                assert_eq!(typed.select, if shown { vec![1] } else { vec![] }, "{case}");
+                assert_eq!(
+                    typed.select,
+                    if caught { vec![1] } else { vec![] },
+                    "{case}"
+                );
             }
         }
     }

@@ -31,7 +31,7 @@ use crate::sim::intern::InternedId;
 use crate::sim::mission::{MissionId, MissionType};
 use crate::sim::world::{SimSoundEvent, Simulation};
 
-#[cfg(test)]
+#[cfg(all(test, tests_sim_production))]
 #[path = "thief_capture_tests.rs"]
 mod thief_capture_tests;
 
@@ -688,7 +688,7 @@ fn stock_check_build_limit(
     owner: InternedId,
     obj: &ObjectType,
 ) -> bool {
-    check_build_limit_inner(sim, rules, owner, obj, false)
+    stock_check_build_limit_inner(sim, rules, owner, obj, false)
 }
 
 /// The build-limit answer used where a queued PRODUCE is decided: the sidebar
@@ -710,28 +710,27 @@ pub(crate) fn check_build_limit_for_queue(
     // Ares' hook `0x0050B370` (`10024F80`) replaces CheckBuildLimit for every
     // caller and counts the held object once less itself, so the duplicate the
     // Phobos building queue would double-count never reaches its sum: the ares
-    // answer already is the queue answer.
-    #[cfg(feature = "ares")]
-    return check_build_limit(sim, rules, owner, obj);
-    #[cfg(not(feature = "ares"))]
-    {
-        #[cfg(feature = "phobos")]
-        let deduct_held =
-            obj.category == ObjectCategory::Building && rules.general.building_production_queue;
-        #[cfg(not(feature = "phobos"))]
-        let deduct_held = false;
-        check_build_limit_inner(sim, rules, owner, obj, deduct_held)
+    // answer already is the queue answer. Upstream picks the Ares form from the
+    // loaded rules at runtime, not from a compile-time feature.
+    if rules.ares_form() {
+        return check_build_limit(sim, rules, owner, obj);
     }
+    #[cfg(feature = "phobos")]
+    let deduct_held =
+        obj.category == ObjectCategory::Building && rules.general.building_production_queue;
+    #[cfg(not(feature = "phobos"))]
+    let deduct_held = false;
+    stock_check_build_limit_inner(sim, rules, owner, obj, deduct_held)
 }
 
-fn check_build_limit_inner(
+fn stock_check_build_limit_inner(
     sim: &Simulation,
     rules: &RuleSet,
     owner: InternedId,
     obj: &ObjectType,
     deduct_held: bool,
 ) -> bool {
-    let strip = build_limit_strip(obj);
+    let strip = primary_factory_category(obj);
     if obj.category == ObjectCategory::Aircraft && obj.airport_bound {
         return airport_docks_full(sim, rules, owner, strip);
     }
@@ -767,7 +766,7 @@ fn check_build_limit_inner(
     // while an identical pair of merely waiting copies was accepted. Ares'
     // CanBuild handles the same overlap with its held-object exception; do it
     // here so the sidebar and QueueProduction agree with that answer.
-    let held_in_factory = type_id.is_some_and(|type_id| {
+    let held_in_factory = deduct_held && type_id.is_some_and(|type_id| {
         sim.production
             .factories()
             .iter_insertion_ordered()
@@ -780,7 +779,7 @@ fn check_build_limit_inner(
                     })
             })
     });
-    if deduct_held && held_in_factory {
+    if held_in_factory {
         owned = owned.wrapping_sub(1);
     }
     owned
@@ -807,7 +806,7 @@ fn ares_check_build_limit(
     owner: InternedId,
     obj: &ObjectType,
 ) -> bool {
-    let strip = build_limit_strip(obj);
+    let strip = primary_factory_category(obj);
     if obj.category == ObjectCategory::Aircraft
         && obj.airport_bound
         && airport_docks_full(sim, rules, owner, strip)
@@ -831,10 +830,12 @@ fn ares_check_build_limit(
         )
 }
 
-/// The strip whose House factory CheckBuildLimit counts: both structure
-/// strips count the Buildings factory (`0x0050B3B9`; Ares' GetPrimaryFactory
-/// `0x00500510` with BuildCat DontCare answers the same one).
-fn build_limit_strip(obj: &ObjectType) -> super::ProductionCategory {
+/// The House factory that GetPrimaryFactory `0x00500510` answers for `obj`'s
+/// kind with BuildCat DontCare: the Buildings factory for every structure.
+/// CheckBuildLimit counts it (`0x0050B3B9`; Ares' hook asks the same one),
+/// and StripClass::Draw's count badge asks it what it holds (BuildCat 0 at
+/// `0x006A9C52`, call at `0x006A9C67`).
+pub fn primary_factory_category(obj: &ObjectType) -> super::ProductionCategory {
     match obj.category {
         ObjectCategory::Building => super::ProductionCategory::Building,
         _ => super::production_tech::production_category_for_object(obj),
@@ -1315,14 +1316,14 @@ fn get_ownable(obj: &ObjectType, rules: &RuleSet, game_mode_nonzero: bool) -> u3
     obj.owner_mask(rules)
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_sim_production))]
 #[path = "can_build_tests.rs"]
 mod tests;
 
-#[cfg(test)]
+#[cfg(all(test, tests_sim_production))]
 #[path = "can_build_produced_history_tests.rs"]
 mod produced_history_tests;
 
-#[cfg(test)]
+#[cfg(all(test, tests_sim_production))]
 #[path = "can_build_factory_owners_tests.rs"]
 mod factory_owners_tests;

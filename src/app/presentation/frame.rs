@@ -35,6 +35,9 @@ pub(crate) struct Capture<'a> {
     /// The local player drawing reads the frame for, by name and id.
     pub(crate) observer: Option<&'a str>,
     pub(crate) observer_id: Option<InternedId>,
+    /// The object types the local sidebar asks
+    /// ([`crate::app::sidebar_projection::SidebarTypes`]).
+    pub(crate) sidebar_types: &'a crate::app::sidebar_projection::SidebarTypes,
     /// The capture's isolated query of the live map: a miss stamps its own
     /// dummy, not the simulation's.
     pub(crate) cells: Option<crate::map::resolved_terrain::NativeCellQuery<'a>>,
@@ -203,7 +206,9 @@ pub(crate) struct LocomotorView {
     rocket: Option<RocketDraw>,
     /// A Tunnel locomotor's `Is_To_Have_Shadow`.
     tunnel_has_shadow: Option<bool>,
-    /// MO: the Tunnel runtime's dig state, for `Draw_Matrix` and `Z_Adjust`.
+    /// The dig-timer state `Draw_Matrix` and `Z_Adjust` read. Both take their
+    /// phase from the current binary frame, so the draw snapshot must retain
+    /// the timer itself rather than a pre-baked angle or depth.
     tunnel_runtime: Option<crate::sim::movement::tunnel_movement::TunnelRuntime>,
     /// A Drive locomotor's track destination and head.
     drive_track: Option<[Option<crate::sim::components::DriveCoord>; 2]>,
@@ -267,7 +272,8 @@ impl LocomotorView {
         self.tunnel_has_shadow
     }
 
-    /// MO: the Tunnel dig state the draw reads for `Draw_Matrix` and `Z_Adjust`.
+    /// The Tunnel dig state `Draw_Matrix` and `Z_Adjust` read; `None` for
+    /// every other locomotor.
     pub(crate) fn tunnel_runtime(
         &self,
     ) -> Option<&crate::sim::movement::tunnel_movement::TunnelRuntime> {
@@ -1180,6 +1186,9 @@ pub(crate) struct PresentationFrame {
     /// Every anim's absolute coordinate (`Simulation::anim_absolute_coord`),
     /// which an attached anim takes from its owner object.
     anim_coords: crate::util::lookup_hash::LookupMap<u64, crate::sim::anim_class::AnimWorldCoord>,
+    /// Object+88's held canopy identities, copied from GameEntity at capture.
+    /// The frame rebuilds this sparse lookup each time; ordinary objects add no entry.
+    parachute_animations: crate::util::lookup_hash::LookupMap<u64, u64>,
     /// What the scene's other drawers read of the world's objects
     /// (`frame_scene`).
     pub(crate) scene: crate::app::presentation::frame_scene::SceneFrame,
@@ -1189,8 +1198,12 @@ pub(crate) struct PresentationFrame {
 
 impl PresentationFrame {
     /// The records of `runtime`'s objects, as its local player (the
-    /// scenario's current house) sees them.
-    pub(crate) fn capture(runtime: &SimRuntime) -> Self {
+    /// scenario's current house) sees them, with the sidebar's answers for
+    /// `sidebar_types`.
+    pub(crate) fn capture(
+        runtime: &SimRuntime,
+        sidebar_types: &crate::app::sidebar_projection::SidebarTypes,
+    ) -> Self {
         let sim = &runtime.simulation;
         let observer_id = sim.session().current_house();
         let observer = observer_id.map(|id| sim.interner().resolve(id));
@@ -1200,6 +1213,7 @@ impl PresentationFrame {
             binary_frame: sim.session().binary_frame(),
             observer,
             observer_id,
+            sidebar_types,
             cells: sim
                 .resolved_terrain()
                 .map(crate::map::resolved_terrain::NativeCellQuery::isolated),
@@ -1227,6 +1241,15 @@ impl PresentationFrame {
         );
         let scene = scene.expect("captured beside the records");
         let anim_coords = sim.anim_absolute_coords().collect();
+        let parachute_animations = sim
+            .entities()
+            .values()
+            .filter_map(|entity| {
+                entity
+                    .parachute_animation()
+                    .map(|animation| (entity.stable_id(), animation))
+            })
+            .collect();
         let psychic_detection = at.psychic.is_some();
         let mut ids = Vec::with_capacity(objects.len());
         let mut spans = Vec::with_capacity(objects.len());
@@ -1253,6 +1276,7 @@ impl PresentationFrame {
             display_members: Default::default(),
             display_order: Default::default(),
             anim_coords,
+            parachute_animations,
             scene,
             psychic_detection,
         }
@@ -1306,6 +1330,11 @@ impl PresentationFrame {
     /// `Simulation::anim_absolute_coord` of anim `id`.
     pub(crate) fn anim_coord(&self, id: u64) -> Option<crate::sim::anim_class::AnimWorldCoord> {
         self.anim_coords.get(&id).copied()
+    }
+
+    /// `GameEntity::parachute_animation` of object `id` at capture.
+    pub(crate) fn parachute_animation(&self, id: u64) -> Option<u64> {
+        self.parachute_animations.get(&id).copied()
     }
 
     /// Whether `object` stands for its own sound handles
@@ -1376,11 +1405,13 @@ impl PresentationFrame {
             let filler = interner.len();
             interner.intern(&format!("TEST-FILLER-{filler}"));
         }
+        let types =
+            crate::app::sidebar_projection::SidebarTypes::every_rules_type(&simulation, rules);
         let runtime = SimRuntime {
             simulation,
             resources: std::sync::Arc::new(crate::sim::runtime::SimResources::new(rules.clone())),
         };
-        Self::capture(&runtime)
+        Self::capture(&runtime, &types)
     }
 }
 
@@ -1434,6 +1465,6 @@ impl ObjectRecord {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_app_presentation))]
 #[path = "frame_tests.rs"]
 mod tests;

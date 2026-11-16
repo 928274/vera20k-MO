@@ -12,14 +12,14 @@
 mod render;
 pub(crate) use render::transfer_progress_draws;
 
-#[cfg(test)]
+#[cfg(all(test, tests_app))]
 mod tests;
 
-#[cfg(test)]
+#[cfg(all(test, tests_app))]
 #[path = "pump/country_loading_tests.rs"]
 mod country_loading_tests;
 
-#[cfg(test)]
+#[cfg(all(test, tests_app))]
 #[path = "pump/loading_theme_tests.rs"]
 mod loading_theme_tests;
 
@@ -416,13 +416,16 @@ impl LoadingRequest {
     /// Run the request's authoritative initial-map entry. The retained random
     /// preview is intentionally not an argument: active retail's `.SED` reader
     /// regenerates gameplay after Start, while the preview remains a loading-
-    /// composition fallback only.
+    /// composition fallback only. VERA: after a network room's checks of the
+    /// map file, the map takes the mod's map additions
+    /// (`MapLoadInitial::with_mod_additions`).
     fn load_initial_with_assets(
         &self,
         ra2_dir: std::path::PathBuf,
         asset_manager: &mut AssetManager,
         native_rules: Option<&mut crate::rules::process_owner::NativeRulesProcessOwner>,
         resident: Option<&mut crate::sim::world::Simulation>,
+        map_additions: Option<&crate::app::mod_additions::MapAdditions>,
         progress: &mut dyn LoadingProgressSink,
     ) -> anyhow::Result<MapLoadInitial> {
         let mut loaded = init::load_map_initial_with_assets(
@@ -466,7 +469,10 @@ impl LoadingRequest {
                 );
             }
         }
-        Ok(loaded)
+        match map_additions {
+            Some(additions) => loaded.with_mod_additions(additions),
+            None => Ok(loaded),
+        }
     }
 
     fn skirmish_launch_session(&self) -> Option<&SkirmishLaunchSession> {
@@ -539,6 +545,7 @@ impl LoadingRequest {
         ra2_dir: PathBuf,
         assets: &mut AssetManager,
         native_rules: Option<&mut crate::rules::process_owner::NativeRulesProcessOwner>,
+        map_additions: Option<&crate::app::mod_additions::MapAdditions>,
         mapgen_retention: &mut crate::app::shell_random_map::RandomMapGenerationRetention,
         mut resident: Option<&mut crate::sim::world::Simulation>,
         progress: &mut dyn LoadingProgressSink,
@@ -548,6 +555,7 @@ impl LoadingRequest {
             assets,
             native_rules,
             resident.as_deref_mut(),
+            map_additions,
             progress,
         )?;
         initial.retain_process_state(mapgen_retention, resident);
@@ -566,6 +574,7 @@ impl LoadingRequest {
             ra2_dir,
             assets,
             native_rules,
+            None,
             &mut Default::default(),
             None,
             progress,
@@ -1369,6 +1378,33 @@ fn prepare_session_for_loading(
     }
 }
 
+/// VERA: a network match plays the rules its room took from its host
+/// (`HostRules`), which the room's agreement already compared, and so does
+/// a replay that recorded them; every other game, offline replays included,
+/// plays the player's own Options switches.
+fn play_startup_personal_rules(
+    process_assets: &mut crate::app::process_assets::ProcessAssets,
+    startup: &LoadingStartup,
+) {
+    let room = match startup {
+        LoadingStartup::Network(startup) => &startup.launch_session().options.host_rules,
+        // A network match recorded the room's, none included.
+        LoadingStartup::Replay {
+            session, game_mode, ..
+        } if game_mode.is_network() => &session.options.host_rules,
+        _ => return process_assets.use_own_personal_rules(),
+    };
+    match room.personal_rules() {
+        Ok(rules) => process_assets.use_personal_rules(rules),
+        // A network room refused these before its start; a replay plays on
+        // without them and its check reports the difference.
+        Err(error) => {
+            log::error!("The room's rules do not read: {error}");
+            process_assets.use_personal_rules(Default::default());
+        }
+    }
+}
+
 pub(crate) fn begin_loading(state: &mut AppState, request: LoadingRequest) {
     state
         .frontend
@@ -1377,6 +1413,7 @@ pub(crate) fn begin_loading(state: &mut AppState, request: LoadingRequest) {
     let wall_ms = crate::app::match_runtime::frame_pacer::wall_clock_ms();
     crate::app::radar_movie::retire(state, wall_ms);
     crate::app::chrono_screen::retire(state, wall_ms);
+    play_startup_personal_rules(&mut state.process_assets, request.startup());
     // The shell writes GameMode before the loading screen (`0x0052E10F`
     // Skirmish, `0x0052E175` campaign); the session owner is live from here.
     prepare_session_for_loading(&mut state.match_state.session, request.startup());
@@ -2544,30 +2581,45 @@ fn prepare_loading_session(
                     return Err(err);
                 }
             }
-            let prepared = if !before_first_frame && let Some(native) = native.as_mut() {
-                let mut sink = GatedProgressSink {
-                    progress: &mut native.progress,
-                    cadence: native.progress_cadence,
-                    progress_row: &mut native.progress_row,
-                    network,
-                };
-                request.prepare(
-                    ra2_dir,
-                    assets,
-                    process_assets.native_rules_mut_with_tile_cache().0,
-                    mapgen_retention,
-                    resident.as_deref_mut(),
-                    &mut sink,
-                )
+            // VERA: the mod's map additions, read once a start, for the
+            // matches they reach.
+            let additions = if crate::app::mod_additions::reach(request.startup()) {
+                process_assets.map_additions(assets)
             } else {
-                request.prepare(
-                    ra2_dir,
-                    assets,
-                    process_assets.native_rules_mut_with_tile_cache().0,
-                    mapgen_retention,
-                    resident.as_deref_mut(),
-                    &mut NoopProgressSink,
-                )
+                Ok(None)
+            };
+            let prepared = match additions {
+                Err(err) => Err(anyhow::anyhow!(err)),
+                Ok(additions) => {
+                    let additions = additions.as_deref();
+                    if !before_first_frame && let Some(native) = native.as_mut() {
+                        let mut sink = GatedProgressSink {
+                            progress: &mut native.progress,
+                            cadence: native.progress_cadence,
+                            progress_row: &mut native.progress_row,
+                            network,
+                        };
+                        request.prepare(
+                            ra2_dir,
+                            assets,
+                            process_assets.native_rules_mut_with_tile_cache().0,
+                            additions,
+                            mapgen_retention,
+                            resident.as_deref_mut(),
+                            &mut sink,
+                        )
+                    } else {
+                        request.prepare(
+                            ra2_dir,
+                            assets,
+                            process_assets.native_rules_mut_with_tile_cache().0,
+                            additions,
+                            mapgen_retention,
+                            resident.as_deref_mut(),
+                            &mut NoopProgressSink,
+                        )
+                    }
+                }
             };
             match prepared {
                 Ok(mut prepared) => {

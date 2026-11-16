@@ -392,10 +392,10 @@ impl Simulation {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_sim_t_z))]
 #[path = "unit_simple_deploy_tests.rs"]
 mod tests;
 
-#[cfg(test)]
+#[cfg(all(test, tests_sim_t_z))]
 #[path = "unit_simple_deploy_retail_tests.rs"]
 mod retail_tests;

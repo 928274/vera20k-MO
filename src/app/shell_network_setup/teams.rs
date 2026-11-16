@@ -41,10 +41,76 @@ pub(super) fn set_auto_balance(state: &mut AppState, on: bool) -> anyhow::Result
 
 /// A lobby that cannot take the host's options refuses them while they carry
 /// a field it does not know: the room goes on without the newest one it
-/// carries, the join queue before Balance automatically before Teams, and
-/// publishes again. Returns the line telling the host so, or `None` when
-/// none was set.
+/// carries, Watching (while the lobby has not said whether it lists matches
+/// to watch) before Superweapon Limit before the rest of the room's rules
+/// before the join queue before Balance automatically before Teams, and
+/// publishes again. Returns the line telling the host so, or `None` when none
+/// was set.
+///
+/// A random map for more than eight players, which a lobby from before them
+/// refuses, comes after Watching: the room keeps its options, and the host
+/// picks another map.
 pub(crate) fn lobby_refused_option(state: &mut AppState) -> Option<&'static str> {
+    // A lobby from before watching: nobody watches the room's games.
+    let lobby_watches = crate::app::shell_wol::lobby_watches(state);
+    if state
+        .frontend
+        .network_setup_protocol
+        .as_mut()
+        .is_some_and(|room| room.stop_watching(lobby_watches))
+    {
+        return Some("VERA:WatchingNotTaken");
+    }
+    let random_map = state
+        .match_state
+        .session
+        .network_setup()
+        .and_then(|launch| launch.selected_map_file.as_deref())
+        .is_some_and(|file| file.eq_ignore_ascii_case("RandMap.Sed"));
+    if random_map
+        && state
+            .frontend
+            .multiplayer_shell_runtime
+            .start_staging()
+            .count
+            > crate::map::preview::NATIVE_START_STAGING_SLOTS as i32
+    {
+        return Some("VERA:BigRandomMapNotTaken");
+    }
+    if let Some(mut options) = state
+        .match_state
+        .session
+        .network_setup()
+        .map(|launch| launch.options.clone())
+        .filter(|options| options.host_rules.superweapon_limit != 0)
+    {
+        // A lobby from before the limit: the room keeps its other rules.
+        options.host_rules.superweapon_limit = 0;
+        state
+            .match_state
+            .session
+            .set_network_options(options)
+            .ok()?;
+        actions::queue(state, NetworkSetupRequest::PublishOptions);
+        return Some("VERA:SuperweaponLimitNotTaken");
+    }
+    if let Some(mut options) = state
+        .match_state
+        .session
+        .network_setup()
+        .map(|launch| launch.options.clone())
+        .filter(|options| !options.host_rules.is_empty())
+    {
+        // Every player then plays the original rules there.
+        options.host_rules = Default::default();
+        state
+            .match_state
+            .session
+            .set_network_options(options)
+            .ok()?;
+        actions::queue(state, NetworkSetupRequest::PublishOptions);
+        return Some("VERA:HostRulesNotTaken");
+    }
     if !state.match_state.session.network_queue().is_empty() {
         // The room stops queueing, and its spectators keep watching.
         state.match_state.session.stop_network_queue().ok()?;
@@ -454,7 +520,7 @@ fn hue_gap(a: i32, b: i32) -> i32 {
     gap.min(2 * HUES - gap)
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_app))]
 mod tests {
     use super::*;
     use crate::rules::skirmish_colors::FIRST_EXTRA_PRIORITY;

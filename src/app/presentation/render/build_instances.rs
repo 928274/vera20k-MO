@@ -702,13 +702,22 @@ fn build_pixel_fx_sparkle_instances(state: &AppState, sw: f32, sh: f32) -> Vec<S
     // `[Options] DetailLevel` field (`OptionsClass + 0x18`). The in-game state
     // is the live projection of that retained profile value, so config.toml is
     // not a second interactive authority for the same retail option.
-    let enable_extra_animations = pixel_fx_enabled_for_detail_level(
-        state
-            .match_state
-            .match_presentation
-            .in_game_options
-            .detail_level,
-    );
+    // `DrawPixelFXSparkles @ 0x006D7840` first asks `Game__GetMinFrameRate
+    // @ 0x0055AF60` (`0x006D7847`, the latch Anim and LaserDraw share) and
+    // draws nothing while the published rate is below it (`0x006D784C`).
+    let frame_rate_holds = {
+        let mut detail = state.match_state.match_presentation.detail.borrow_mut();
+        let minimum = detail.minimum_frame_rate();
+        minimum <= detail.frame_rate()
+    };
+    let enable_extra_animations = frame_rate_holds
+        && pixel_fx_enabled_for_detail_level(
+            state
+                .match_state
+                .match_presentation
+                .in_game_options
+                .detail_level,
+        );
 
     let local_owner_name = crate::app::input::commands::preferred_local_owner_name(state);
     let local_owner_id = match (state.match_state.sandbox_full_visibility, &local_owner_name) {
@@ -717,7 +726,7 @@ fn build_pixel_fx_sparkle_instances(state: &AppState, sw: f32, sh: f32) -> Vec<S
     };
 
     let input = SparkleInput {
-        clock_ms: sim.session().total_sim_ms(),
+        wall_ms: crate::app::match_runtime::frame_pacer::wall_clock_ms() as u32,
         enable_extra_animations,
         local_owner_id,
         sandbox_full_visibility: state.match_state.sandbox_full_visibility,
@@ -734,7 +743,10 @@ fn build_pixel_fx_sparkle_instances(state: &AppState, sw: f32, sh: f32) -> Vec<S
         white_uv_origin: [0.0, 0.0],
         white_uv_size: [1.0, 1.0],
     };
-    build_sparkle_instances(&input)
+    build_sparkle_instances(
+        &input,
+        &mut state.match_state.match_presentation.pixel_fx.borrow_mut(),
+    )
 }
 
 /// Build static smudge decal instances for the current frame.
@@ -1018,10 +1030,10 @@ pub(super) fn build_ui_instances(
             state.match_state.sim_runtime.frame(),
         )
     {
+        // Health 0 skips only the CaptureManager links (`0x006D47A4` jumps
+        // to the airstrike check at `0x006D47FB`).
         for entity in frame.line_sources() {
-            if entity.health.current() != 0
-                && let Some(designation) = entity.place.airstrike_designation
-            {
+            if let Some(designation) = entity.place.airstrike_designation {
                 let _ = runtime;
                 let style = crate::app::presentation::airstrike_lines::FlareStyle {
                     #[cfg(feature = "phobos")]
@@ -1159,18 +1171,23 @@ struct PlacementPreviewInstances {
     ghost: Vec<SpriteInstance>,
 }
 
-/// Active PLACE cells. Tactical6D5030 suppresses the building ghost outside
-/// the map editor; Cell47EC90 supplies frame0 or slope+2. Keep one ordered
-/// stream rather than regrouping overlapping cells by admitted color.
+/// The current and pending PLACE cells. Tactical6D5030 suppresses the
+/// building ghost outside the map editor; Cell47EC90 supplies frame0, slope+2
+/// or the pending frame1. Keep one ordered stream rather than regrouping
+/// overlapping cells by admitted color.
 fn build_placement_preview(state: &AppState) -> PlacementPreviewInstances {
     let mut out = PlacementPreviewInstances {
         cells: Vec::new(),
         #[cfg(feature = "phobos")]
         ghost: Vec::new(),
     };
-    let Some(preview) = &state.match_state.input.building_placement_preview else {
-        return out;
-    };
+    let current = state.match_state.input.building_placement_preview.as_ref();
+    let cursor_in = crate::app::input::camera::cursor_over_battlefield(state);
+    let draws = crate::render::selection_overlay::placement_cell_draws(
+        current,
+        state.match_state.input.pending_building_placement_preview(),
+        cursor_in,
+    );
     let shape = state
         .match_state
         .match_presentation
@@ -1194,10 +1211,12 @@ fn build_placement_preview(state: &AppState) -> PlacementPreviewInstances {
     #[cfg(not(feature = "phobos"))]
     let alpha = 1.0;
     if let Some(shape) = shape {
-        out.cells = shape.build_building_preview(preview, alpha);
+        out.cells = shape.build_building_preview(&draws, alpha);
     }
+    // The ghost (`0x6D528A`) follows the current grid, inside the same
+    // tactical-rect gate.
     #[cfg(feature = "phobos")]
-    {
+    if let Some(preview) = current.filter(|_| cursor_in) {
         out.ghost = build_placement_ghost(state, preview);
     }
     out
@@ -1362,6 +1381,12 @@ pub(super) fn build_sidebar_instances(state: &mut AppState) -> SidebarInstances 
             state.match_state.input.camera_y,
         ],
     ));
+    // The observer's strip draws over the strip's tiles from the same atlas.
+    if let Some(v) = view.as_ref() {
+        chrome.extend(
+            crate::app::presentation::sidebar_build::build_observer_strip_instances(state, v),
+        );
+    }
     // The bottom bar draws into a surface of its own.
     let mut command_bar = view
         .as_ref()
@@ -1460,6 +1485,7 @@ pub(super) fn build_sidebar_instances(state: &mut AppState) -> SidebarInstances 
                 crate::app::presentation::sidebar_render::current_sidebar_chrome(state)
                     .and_then(|atlas| atlas.top_strip_thin)
                     .map_or(layout_spec.sidebar_width, |plate| plate.pixel_size[0]),
+                &crate::app::frontend::shell_pass::resolve_csf(state, "TXT_TIME_FORMAT_HOURS"),
                 crate::app::presentation::sidebar_text::credits_tint(theme),
                 [
                     state.match_state.input.camera_x,
@@ -1583,7 +1609,7 @@ fn build_radar_anim_instance(state: &AppState) -> Vec<SpriteInstance> {
     }]
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_app_presentation_render))]
 mod tests {
     use super::*;
 

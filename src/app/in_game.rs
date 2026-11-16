@@ -340,7 +340,8 @@ impl App {
 
         let current = state.match_state.match_presentation.in_game_menu;
         if current == InGameMenuState::Menu
-            && crate::app::input::pause_menu::close_options_list(state)
+            && (crate::app::input::pause_menu::close_options_list(state)
+                || crate::app::input::pause_menu::back_from_options(state))
         {
             return;
         }
@@ -928,7 +929,7 @@ impl App {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_app))]
 mod tests {
     /// Every in-scenario modal route, including BBB's Keyboard (state 4,
     /// `0x004E1FE0` control 0x52C) and Sound (state 6, control 0x52D)

@@ -372,7 +372,13 @@ impl App {
                 .as_deref()
                 .unwrap_or_default()
         );
-        let request = request.admit_loaded_modes(&state.frontend.skirmish_modes)?;
+        let mut request = request.admit_loaded_modes(&state.frontend.skirmish_modes)?;
+        if let SpawnGame::Network(network) = &mut request.game {
+            // VERA: a launcher's room has no host to share rules: each
+            // player plays their own, which its ExpectedRulesDigest compares.
+            network.session.options.host_rules =
+                crate::skirmish_launch::HostRules::from_own(state.process_assets.personal_rules());
+        }
         if let SpawnGame::Network(network) = &request.game {
             match &network.transport {
                 // Browsers cannot open the UDP sockets direct play needs.
@@ -826,8 +832,10 @@ impl App {
     /// network match also records the players who won it.
     pub(crate) fn record_match_result(state: &mut AppState, result: ExternalMatchResult) {
         use crate::app::match_runtime::session::SessionMode;
+        // A watcher has no result: the followed player's is not its own.
         if (!state.frontend.external_launch && state.match_state.session_mode() != SessionMode::Wol)
             || state.frontend.match_result.is_some()
+            || crate::app::match_runtime::watching::active(state)
         {
             return;
         }
@@ -874,7 +882,7 @@ impl App {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_app))]
 mod tests {
     use super::*;
     use crate::app::frontend::cncnet_spawn::{SpawnGame, SpawnRequest};

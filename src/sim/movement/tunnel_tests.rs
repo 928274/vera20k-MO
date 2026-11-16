@@ -313,55 +313,31 @@ fn ares_null_destination_ends_the_dig() {
     assert_eq!(tunnel_state(&sim), Some(TunnelState::DugOut));
 }
 
-/// `Z_Adjust` (`0x00729E50`) is the draw Z that puts the submerged half of a
-/// digging body behind the terrain's Z-buffer rows. The dig timer ramps the
-/// depth in, holds it while the owner is below the cells, and ramps it back
-/// out; a settled owner adds nothing.
+/// `Z_Adjust` (`0x00729E50`): `_ftol` truncates DiggingIn's ramp, a body
+/// facing byte in 71..139 takes the full depth at once, the held states add
+/// the floor term to 45, and the base states return zero whatever it is.
 #[test]
-fn z_adjust_sinks_the_digging_body_behind_the_surface() {
+fn z_adjust_truncates_its_ramp_and_adds_the_floor_rows() {
     use crate::sim::movement::tunnel_movement::{TUNNEL_DIG_Z_ADJUST_ROWS, TunnelRuntime};
-
-    for state in [
-        TunnelState::Idle,
-        TunnelState::PreDigIn,
-        TunnelState::DugOut,
-    ] {
-        let runtime = TunnelRuntime::for_test_dig(state, 0, 10);
-        assert_eq!(runtime.draw_z_adjust(5), 0, "{state:?} adds no depth");
-    }
-
     let digging_in = TunnelRuntime::for_test_dig(TunnelState::DiggingIn, 0, 10);
-    assert_eq!(digging_in.draw_z_adjust(0), 0, "the first frame is level");
-    let half = digging_in.draw_z_adjust(4);
-    assert!((half - 18).abs() <= 1, "40% of 45 rows is 18, got {half}");
+    assert_eq!(digging_in.draw_z_adjust(3, 0, 0), 13, "45 * 0.3 truncates");
+    assert_eq!(digging_in.draw_z_adjust(3, 70 << 8, 0), 13, "byte 70 ramps");
     assert_eq!(
-        digging_in.draw_z_adjust(10),
+        digging_in.draw_z_adjust(3, 71 << 8, 0),
         TUNNEL_DIG_Z_ADJUST_ROWS,
-        "a finished dig is fully behind the surface"
+        "byte 71 takes the full depth"
     );
-
-    for state in [
-        TunnelState::DugIn,
-        TunnelState::Digging,
-        TunnelState::PreDigOut,
-    ] {
-        let runtime = TunnelRuntime::for_test_dig(state, 0, 10);
-        assert_eq!(
-            runtime.draw_z_adjust(5),
-            TUNNEL_DIG_Z_ADJUST_ROWS,
-            "{state:?} holds the full depth"
-        );
-    }
-
+    let dug_in = TunnelRuntime::for_test_dig(TunnelState::DugIn, 0, 10);
+    assert_eq!(
+        dug_in.draw_z_adjust(5, 0, 36),
+        TUNNEL_DIG_Z_ADJUST_ROWS + 36
+    );
     let digging_out = TunnelRuntime::for_test_dig(TunnelState::DiggingOut, 0, 10);
     assert_eq!(
-        digging_out.draw_z_adjust(0),
-        TUNNEL_DIG_Z_ADJUST_ROWS,
-        "surfacing starts fully submerged"
+        digging_out.draw_z_adjust(10, 0, 7),
+        7,
+        "surfaced: the floor term"
     );
-    assert_eq!(
-        digging_out.draw_z_adjust(10),
-        0,
-        "surfacing ends on the ground plane"
-    );
+    let idle = TunnelRuntime::for_test_dig(TunnelState::Idle, 0, 10);
+    assert_eq!(idle.draw_z_adjust(5, 0, 36), 0);
 }

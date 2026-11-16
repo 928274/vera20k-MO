@@ -199,7 +199,6 @@ impl TacticalCaptureSession {
                     options.clone(),
                     None,
                     false,
-                    true,
                 );
                 modal.begin_generate();
                 state.frontend.skirmish_shell_state.random_map_setup_modal = Some(modal);
@@ -1787,7 +1786,7 @@ fn validate_houses_and_slots(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_app))]
 mod tests {
     use super::derive_rate;
 

@@ -141,7 +141,6 @@ fn raw_ini_walks_have_pinned_production_callers() {
             "registry_ids",
             &[
                 ("rules/ini_parser.rs", 1), // the definition
-                ("rules/overlay_types.rs", 1),
                 // Includes parse_registry copying already resolved stored IDs.
                 ("rules/ruleset.rs", 3),
                 ("rules/smudge_type.rs", 1),
@@ -433,7 +432,7 @@ fn engine_per_client_reads_have_pinned_callers() {
                 ("sim/world/gap_generator.rs", 1),
                 ("sim/world/house_defeat.rs", 9),
                 ("sim/world/jumpjet_cruise.rs", 1),
-                ("sim/world/lifecycle.rs", 6),
+                ("sim/world/lifecycle.rs", 7),
                 ("sim/world/mod.rs", 7),
                 ("sim/world/object_turn.rs", 1),
                 ("sim/world/planning.rs", 2),
@@ -524,7 +523,7 @@ fn engine_per_client_reads_have_pinned_callers() {
                 ("sim/game_entity.rs", 3),
                 ("sim/miner/ore_scan.rs", 1),
                 ("sim/world/camera_home.rs", 1),
-                ("sim/world/lifecycle.rs", 8),
+                ("sim/world/lifecycle.rs", 9),
                 ("sim/world/object_entry.rs", 1),
             ],
         ),
@@ -537,7 +536,7 @@ fn engine_per_client_reads_have_pinned_callers() {
                 ("sim/power_system.rs", 2),
                 ("sim/production/production_tech.rs", 1),
                 ("sim/trigger_runtime.rs", 1),
-                ("sim/world/lifecycle.rs", 11),
+                ("sim/world/lifecycle.rs", 12),
                 ("sim/world/mod.rs", 1),
                 ("sim/world/shroud_refresh.rs", 1),
                 ("sim/world/world_commands.rs", 1),
@@ -1891,8 +1890,8 @@ fn mutable_handouts_and_setters_are_owner_operations() {
         (
             "rules/personal_rules.rs",
             "set_terrain_deformation",
-            "VERA's own switch with no native member: the Options page's Terrain Deformation \
-             box, which the app passes in for the rules the next scenario reads",
+            "VERA's own switch with no native member: the skirmish Game Options' Terrain \
+             Deformation box, which the app passes in for the rules the next scenario reads",
         ),
         (
             "rules/superweapon_type.rs",

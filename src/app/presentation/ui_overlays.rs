@@ -263,6 +263,10 @@ const UNIT_PIP_STEP_X: f32 = 2.0;
 /// the object is selected, or the object carries the cursor's hover flag and is
 /// *not* selected. The hover flag is set from the cursor's resolved action
 /// target, so a shrouded enemy — which is never an action target — is excluded.
+///
+/// RESIDUAL: the hover byte (Techno+0x431) is saved with the object, so after
+/// a load native shows the bar of the object hovered at save time until the
+/// next hover update; VERA keeps hover out of the save and starts with none.
 pub(crate) fn health_hover_target(hover: Option<HoverObject>) -> Option<u64> {
     let hover = hover?.techno()?;
     match hover.kind {
@@ -357,19 +361,18 @@ pub(crate) fn health_bar_drawable(
     local_owner: Option<&str>,
 ) -> bool {
     let player = local_owner.and_then(|owner| sim.interner().get(owner));
-    health_bar_drawable_for(sim, entity, hovered_id, local_owner, player)
+    health_bar_drawable_for(sim, entity, hovered_id, player)
 }
 
-/// [`health_bar_drawable`] for `local_owner` and its interned id `player`.
+/// [`health_bar_drawable`] for the local player's interned id `player`.
 fn health_bar_drawable_for(
     sim: &crate::sim::world::Simulation,
     entity: &ObjectRecord,
     hovered_id: Option<u64>,
-    local_owner: Option<&str>,
     player: Option<crate::sim::intern::InternedId>,
 ) -> bool {
     let (_, draw_pips) = health_strip_visibility(sim, entity, hovered_id, player, false);
-    draw_pips && admitted_techno_observer(sim, entity, local_owner, player).is_some()
+    draw_pips && admitted_techno_observer(sim, entity, player).is_some()
 }
 
 /// DrawExtras' health dispatch: [`status_visibility`], except that a hovered,
@@ -463,24 +466,20 @@ pub(crate) fn foot_select_bracket(sx: f32, sy: f32, infantry: bool) -> [f32; 4] 
 
 /// Retained Display membership and the shared tactical draw admission.
 /// Return the already derived observer facts for native Extras queries.
-/// `local_owner_id` is `local_owner`'s interned id.
+/// `local_owner_id` is the frame's local player.
 fn admitted_techno_observer(
     sim: &crate::sim::world::Simulation,
     entity: &ObjectRecord,
-    local_owner: Option<&str>,
     local_owner_id: Option<crate::sim::intern::InternedId>,
 ) -> Option<crate::render::draw_state::ObserverDrawContext> {
     sim.display_layers().layer_of(entity.stable_id())?;
-    // `observer_draw_context` for the frame's local player, `local_owner`.
+    // `observer_draw_context` for the frame's local player.
     let observer = entity.seen.observer;
     crate::app::presentation::instances::tactical_entity_admission(
         crate::app::presentation::instances::TacticalEntityPurpose::Drawing,
         entity,
-        sim.interner().resolve(entity.owner()),
-        local_owner,
         local_owner_id,
         sim.fog(),
-        sim.house_alliances().as_map(),
         false,
         sim.session().binary_frame(),
         0,
@@ -511,13 +510,7 @@ fn entity_status_pips_drawable(
     let Some(current_house_id) = current_house_id else {
         return false;
     };
-    if !health_bar_drawable_for(
-        sim,
-        entity,
-        hovered_entity_id,
-        Some(sim.interner().resolve(current_house_id)),
-        Some(current_house_id),
-    ) {
+    if !health_bar_drawable_for(sim, entity, hovered_entity_id, Some(current_house_id)) {
         return false;
     }
     let building_type = (entity.category() == EntityCategory::Structure)
@@ -580,6 +573,9 @@ pub(crate) fn control_group_status_labels(
         if entity.sinking.is_active()
             || entity.passenger_role.is_inside_transport()
             || !entity_status_pips_drawable(sim, entity, hovered_entity_id, current_house_id, rules)
+            // RESIDUAL: VERA-only cell test; DrawPipScale draws the digit
+            // from +0x214 at 0x0070A6FD without one. It always passes for
+            // the player's own buildings.
             || (entity.category() == EntityCategory::Structure
                 && !status_entity_visible_plain(
                     current_house_id,
@@ -1782,7 +1778,7 @@ pub(crate) fn techno_extras_for_parent(
             strip.power_off = prefix(shape, frame, if repairing { 18.0 } else { 0.0 });
         }
     }
-    let Some(observer) = admitted_techno_observer(sim, entity, local_owner, local_owner_id) else {
+    let Some(observer) = admitted_techno_observer(sim, entity, local_owner_id) else {
         return strip;
     };
     #[cfg(not(feature = "phobos"))]
@@ -1913,6 +1909,9 @@ pub(crate) fn techno_extras_for_parent(
         let geometry = BuildingBarGeometry::new(rules, object);
         let (ax, ay) = geometry.edge;
         let num_pips = geometry.num_pips;
+        // RESIDUAL (dormant, no retail building): with no bar pips native
+        // 0x006F677D..0x006F682C still calls DrawPipScale (vt+0x450); VERA
+        // returns without the scale pips.
         if num_pips <= 0 {
             return strip;
         }
@@ -2371,6 +2370,10 @@ fn scale_pip_rows(
             return pips;
         };
         if total > slots {
+            // RESIDUAL (dormant, no retail type): an overfull row returns from
+            // DrawPipScale at 0x00709E48..0x00709E62, so the self-heal pip,
+            // DrawExtraInfo and group digit after 0x0070A4EC are skipped too;
+            // VERA drops only this row.
             pips.truncate(row_start);
             return pips;
         }
@@ -2416,6 +2419,9 @@ fn scale_pip_rows(
         //fill; depleted Ammo emits no empty outline. Draw flags600/noA/Z
         //are owned by the existing per-parent scale replay.
         //Nonzero PipWrap70A421..4E6 remains a separate dormant configuration.
+        // RESIDUAL (dormant, no retail building has PipScale=Ammo): 0x0070A3E3
+        // draws frame 13 from PIPS2 for buildings too; VERA's building row
+        // draws it from PIPS.
         if object.pip_wrap() != 0 {
             return pips;
         }
@@ -2641,11 +2647,11 @@ fn status_entity_visible_plain(
         && !fog.is_cell_gap_covered(local_owner, pos.rx(), pos.ry())
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_app_presentation))]
 #[path = "mind_control_pip_tests.rs"]
 mod mind_control_pip_tests;
 
-#[cfg(test)]
+#[cfg(all(test, tests_app_presentation))]
 mod tests {
     /// Ares TechnoClass_DrawExtras_PowerOff (10049FE0, hook 0x6F526C): the
     /// owner sees its repairing building's wrench, an enemy only with

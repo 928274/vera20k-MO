@@ -26,6 +26,9 @@ pub use in_game_shell::InGameShellArt;
 #[path = "sidebar_chrome_layout_art.rs"]
 mod layout_art;
 pub use layout_art::LayoutArt;
+#[path = "sidebar_chrome_observer.rs"]
+mod observer_art;
+pub use observer_art::ObserverArt;
 
 #[cfg(test)]
 pub(crate) fn packed_command_bar_fixture(
@@ -65,9 +68,8 @@ const UNKNOWN_MID_PANEL_ID: i32 = 0xB0259C24u32 as i32;
 const ALLIED_SIDE_ARCHIVE_ORDER: &[&str] = &["sidec01md.mix", "sidec01.mix", "sidenc01.mix"];
 const SIDE_TWO_ARCHIVE_ORDER: &[&str] = &["sidec02md.mix", "sidec02.mix", "sidenc02.mix"];
 // SidebarClass::LoadSHPs 6A5840 loads SIDE1..3, ADDON, GCLOCK2 and the button
-// shapes (FreeSHPs 6A5BF0 frees them). Its observer flag shapes feed only
-// StripClass::Draw's observer strip (6AA0DA), which ordinary skirmish never
-// shows: only network setups make an observer.
+// shapes (FreeSHPs 6A5BF0 frees them). Its observer backgrounds and flags are
+// not side art; `observer_art` finds them.
 const GENERIC_SIDEBAR_SHP_NAMES: &[&str] = &[
     "side1.shp",
     "side2.shp",
@@ -309,6 +311,8 @@ pub struct SidebarChromeAtlas {
     pub in_game_shell: InGameShellArt<SidebarChromeEntry>,
     /// The pictures of the buttons the layout file adds (`Art=`).
     pub layout_art: LayoutArt<SidebarChromeEntry>,
+    /// The observer strip's backgrounds and flags.
+    pub observer_art: ObserverArt<SidebarChromeEntry>,
     pub top_strip_left: Option<SidebarChromeEntry>,
     pub top_strip_sidebar: Option<SidebarChromeEntry>,
     pub top_strip_thin: Option<SidebarChromeEntry>,
@@ -470,6 +474,29 @@ impl SidebarChromeSet {
             atlas.set_smooth_scale(gpu, batch, scale);
         }
     }
+}
+
+/// A file as Full_Init finds it once `InitSideMixFiles` (`0x00534FA0`, from
+/// `0x0068781F`) has mounted the side's MIX group at the tail of the search
+/// list: the ordinary search first, then the group. Side 2 reads side 1's
+/// group (`0x00534FB1`). Stock VERA keeps every side's group off the ordinary
+/// search and reads it by side, so a file only the group carries, such as
+/// PBEACON.SHP, is found here.
+pub(crate) fn side_mix_file<'a>(
+    asset_manager: &'a AssetManager,
+    side_index: i32,
+    ares: bool,
+    name: &str,
+) -> Option<&'a [u8]> {
+    if let Some(bytes) = asset_manager.get_ref(name) {
+        return Some(bytes);
+    }
+    let route = if ares {
+        SidebarSideRoute::for_registered_group(asset_manager)
+    } else {
+        SidebarSideRoute::for_theme(asset_manager, sidebar_theme_for_side(side_index, false))
+    };
+    route.resolve(name).map(|resolved| resolved.bytes)
 }
 
 /// Sidebar geometry6A5090 is side-zero versus nonzero. The Yuri label keeps
@@ -834,6 +861,7 @@ fn build_theme_atlas(
     let command_bar_art = command_bar::load(side_route, &generic_palette);
     let in_game_shell_art = in_game_shell::load(side_route, &generic_palette);
     let layout_art_rendered = layout_art::load(side_route, &generic_palette);
+    let observer_art_rendered = observer_art::load(asset_manager, mix, mix_name, ares);
     log::debug!(
         "{theme:?} generic sidebar palette resolved from {}",
         generic_palette_source.archive_name
@@ -857,6 +885,10 @@ fn build_theme_atlas(
     // Pre-render all radar.shp frames for the opening/closing animation.
     let (radar_frames, radar_frame_size, radar_content_insets) =
         render_all_radar_frames(asset_manager, mix, radar_name, &theme_palette, ares);
+    // Residual: with no side1 shape gamemd loads SIDEGDI1..3.SHP in place of
+    // all three (0x006ABD47..0x006ABD7E; a missing side2 or side3 alone has no
+    // fallback). No retail archive holds them, so only a mod that ships them
+    // but not side1.shp would see them; VERA skips the theme.
     let side1 = render_side_entry(side_route, "side1.shp", &generic_palette, 0)?;
     let side2 = render_side_entry(side_route, "side2.shp", &generic_palette, 0)?;
     let side3 = render_side_entry(side_route, "side3.shp", &generic_palette, 0)?;
@@ -1008,6 +1040,7 @@ fn build_theme_atlas(
     all_entries.extend(command_bar_art.entries());
     all_entries.extend(in_game_shell_art.entries());
     all_entries.extend(layout_art_rendered.entries());
+    all_entries.extend(observer_art_rendered.entries());
     if let Some(ref top) = top_strip_left {
         all_entries.push(top);
     }
@@ -1081,6 +1114,11 @@ fn build_theme_atlas(
         uv
     });
     let layout_art = layout_art_rendered.map(|entry| {
+        let uv = blit_entry(&mut rgba, atlas_width, atlas_height, y, entry);
+        y += entry.height + CHROME_PADDING;
+        uv
+    });
+    let observer_art = observer_art_rendered.map(|entry| {
         let uv = blit_entry(&mut rgba, atlas_width, atlas_height, y, entry);
         y += entry.height + CHROME_PADDING;
         uv
@@ -1256,6 +1294,7 @@ fn build_theme_atlas(
         .entries()
         .copied()
         .chain(layout_art.entries().copied())
+        .chain(observer_art.entries().copied())
         .chain(
             [
                 top_strip_left_uv,
@@ -1302,6 +1341,7 @@ fn build_theme_atlas(
         command_bar,
         in_game_shell,
         layout_art,
+        observer_art,
         top_strip_left: top_strip_left_uv,
         top_strip_sidebar: top_strip_sidebar_uv,
         top_strip_thin: top_strip_thin_uv,
@@ -1573,11 +1613,11 @@ fn blit_entry(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, tests_render_s_z))]
 #[path = "sidebar_chrome_tests.rs"]
 mod tests;
 
-#[cfg(test)]
+#[cfg(all(test, tests_render_s_z))]
 mod provenance_tests {
     use super::{SidebarTheme, select_sidebar_theme};
 
