@@ -1,8 +1,8 @@
 //! CSF string table parser — localized text for RA2/YR UI, EVA, and menus.
 //!
 //! Active Yuri's Revenge initializes only `ra2md.csf` from the retail language
-//! archive stack. Optional Ares builds compose its supplemental tables through
-//! [`CsfFile::load_active`]. Each entry maps a label name (e.g., `"NAME:MTNK"`) to a
+//! archive stack. A game that ships `ares.mix` composes its supplemental tables
+//! through [`CsfFile::load_active`]. Each entry maps a label name (e.g., `"NAME:MTNK"`) to a
 //! Unicode display string (e.g., `"Grizzly Battle Tank"`).
 //!
 //! ## Binary format
@@ -152,7 +152,7 @@ impl CsfFile {
     /// The process string table used by both the game and asset diagnostics.
     /// Stock YR loads the md table alone. Installed Ares6BD886->10060DF0
     /// appends its fixed candidates, for a game whose files take Ares' forms
-    /// (`ares`, `AssetManager::ares_form`); native controls:
+    /// (`ares`, `AssetManager::ships_ares`); native controls:
     /// tools/rules_oracle/ares_csf.
     pub fn load_active<'a>(
         ares: bool,
@@ -354,9 +354,9 @@ pub fn type_ui_name(ui_name: Option<&str>, csf: Option<&CsfFile>) -> String {
         // literal suffix without a CSF label. `UIName` is already read through
         // the native 0x20-byte buffer (`AbstractTypeClass::ReadINI`
         // `0x00410AFB`), so Ares' documented 31-character limit including the
-        // prefix applies at the reader. Compiled in with `ares`; stock YR
-        // keeps the unchanged CSF lookup and its MISSING:'...' diagnostic.
-        #[cfg(feature = "ares")]
+        // prefix applies at the reader. Upstream 4019cd2a0 removed the `ares`
+        // build feature and switches Ares on from a game's data at run time,
+        // so MO's literal read is compiled in every build.
         if let Some(literal) = key.strip_prefix("NOSTR:") {
             return literal.to_owned();
         }
@@ -677,18 +677,6 @@ mod tests {
         CsfFile::from_bytes(&data).expect("valid CSF header")
     }
 
-    #[cfg(not(feature = "ares"))]
-    #[test]
-    fn nostr_prefix_stays_a_csf_label_in_a_stock_build() {
-        let mut csf = empty_table();
-        csf.set_fallback("NOSTR:Sonar Pulse", "from table");
-        assert_eq!(
-            type_ui_name(Some("NOSTR:Sonar Pulse"), Some(&csf)),
-            "from table"
-        );
-    }
-
-    #[cfg(feature = "ares")]
     #[test]
     fn ares_nostr_prefix_bypasses_the_csf_table() {
         let mut csf = empty_table();

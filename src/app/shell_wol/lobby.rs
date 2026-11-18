@@ -30,7 +30,6 @@ use super::service::{self, WolServiceEvent, WolServiceRequest};
 use crate::app::frontend::{shell_layout, shell_transition};
 use crate::app::shell_network_setup as setup;
 use crate::app::{App, AppState};
-use crate::ui::chat_translation::ChatPlace;
 use crate::ui::lan_shell::{LanChatLine, LanEditKey};
 use crate::ui::main_menu_dialogs::options::LauncherCue;
 use crate::ui::room_limits::RoomLimitsPress;
@@ -1178,7 +1177,11 @@ fn room_reopened(state: &mut AppState, joined: WolJoined) {
             log::warn!("WOL reopened room keeps its mode: {error:#}");
         }
         // The players who came back take rows as joiners would, in the
-        // lobby's order, so the host's options name them all.
+        // lobby's order, so the host's options name them all; VERA's room
+        // does not tell them as joins.
+        if let Some(protocol) = state.frontend.network_setup_protocol.as_mut() {
+            protocol.quiet_joins();
+        }
         for name in listed
             .iter()
             .map(|member| member.name.clone())
@@ -1791,7 +1794,8 @@ fn joined_game_line(users: &[(String, bool)], room: &str) -> Option<String> {
 /// (`setup::service::auto_accept`).
 const HOST_ROOM_LINE: &str = "VERA:HostRoomHint";
 
-fn modern_lobby(state: &AppState) -> bool {
+/// VERA's own online lobby, not gamemd's.
+pub(crate) fn modern_lobby(state: &AppState) -> bool {
     lobby(state).is_some_and(|lobby| lobby.ui.is_modern())
 }
 
@@ -2473,9 +2477,6 @@ fn popup_action(state: &mut AppState, action: WolPopupAction) {
 
 /// `0x0078AC10`'s 0x540 Enter after `0x005EDD00`.
 fn send_chat(state: &mut AppState, text: Vec<u16>) {
-    if super::translation::command(state, &text) {
-        return;
-    }
     let commands = wol_chat::WolChatCommands {
         page: units(state, "TXT_PAGE_COMMAND"),
         reply: units(state, "TXT_REPLY_COMMAND"),
@@ -2719,12 +2720,6 @@ fn dispatch(state: &mut AppState, action: WolLobbyAction) {
         // 0x0078B829: 0x113 slides out over the empty backdrop before 0x2BC.
         WolLobbyAction::Options => {
             App::leave_shell_dialog(state, shell_transition::ShellExitThen::WolOptionsOpen);
-        }
-        WolLobbyAction::ChatTranslation => {
-            App::leave_shell_dialog(
-                state,
-                shell_transition::ShellExitThen::WolChatTranslationOpen,
-            );
         }
         WolLobbyAction::Page => super::page::open_page_dialog(state),
         // 0x0078BF7D: mode 5 with return mode 4; event 6 then ends the
@@ -3513,18 +3508,10 @@ pub(super) fn message_received(state: &mut AppState, message: ReceivedMessage) {
     let (line, color) = wol_chat::received_line(&sender(&from), &text, private, action);
     crate::app::shell_lan::append_chat_sent_at(state, LanChatLine { text: line, color }, sent_at);
     let (prefix, _) = wol_chat::received_line(&sender(&from), &[], private, action);
-    let place = if private {
-        ChatPlace::Private
-    } else if state.frontend.shell_route.network_setup() {
-        ChatPlace::Room
-    } else {
-        ChatPlace::Lobby
-    };
     super::translation::received(
         state,
         &text,
         super::translation::TranslatedLine::Wol { prefix, color },
-        place,
     );
     state.platform.window.request_redraw();
 }
@@ -4022,7 +4009,7 @@ fn popup_screen(state: &AppState) -> (i32, i32) {
     )
 }
 
-fn create_layout(state: &AppState) -> crate::ui::shell::modal::WolCreateGameLayout {
+pub(crate) fn create_layout(state: &AppState) -> crate::ui::shell::modal::WolCreateGameLayout {
     let (width, height) = popup_screen(state);
     crate::ui::shell::modal::wol_create_game_layout_on(
         width,
@@ -4753,7 +4740,7 @@ mod tests {
         lobby.set_lobbies(channels.clone());
         assert_eq!(lobby.lobbies.len(), 1);
         assert_eq!(lobby.lobbies[0].name, "Lob_41_2");
-        assert_eq!(lobby.ui.page_spec().stacked.len(), 5);
+        assert_eq!(lobby.ui.page_spec().stacked.len(), 4);
         let names = lobby_base_names(visit.modern_ui(), str::to_owned);
         assert_eq!(WolLobbyRow::joined_name(2, &names), "VERA20K Online");
         visit.set_legacy_ui(true);

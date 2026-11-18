@@ -8,9 +8,6 @@
 use crate::assets::asset_manager::AssetManager;
 use crate::rules::ini_parser::{IniFile, IniSection};
 
-/// VERA MOD-support adaptation: the YR playlist root is `thememd.ini`, MO's
-/// is `thememo.ini`. The selected INI profile owns that choice, so the same
-/// frozen root used for Rules/Art/AI also selects the theme catalog.
 const RA2_THEME_INI_NAME: &str = "theme.ini";
 
 /// One `[Themes]` entry (native 0x290-byte record, ctor inside `0x00720590`,
@@ -49,9 +46,9 @@ impl ThemeCatalog {
     /// ReadINI720590 + Scan7207F0, then the authorized RA2 gameplay append.
     /// Select independently so RA2 cannot replace YR lifecycle sections.
     pub fn select(assets: &AssetManager) -> Self {
-        let theme_name = assets.ini_roots().theme();
-        let mut entries = crate::rules::retail_sources::select_ini(assets, theme_name)
-            .map_or_else(|_| Vec::new(), |selected| catalog_from_ini(&selected.ini));
+        let mut entries =
+            crate::rules::retail_sources::select_ini(assets, assets.ini_roots().theme())
+                .map_or_else(|_| Vec::new(), |selected| catalog_from_ini(&selected.ini));
         scan_catalog_availability(&mut entries, assets);
         if let Ok(selected) = crate::rules::retail_sources::select_ini(assets, RA2_THEME_INI_NAME) {
             let mut ra2_entries = catalog_from_ini(&selected.ini);
@@ -162,12 +159,12 @@ fn scan_catalog_availability(entries: &mut [ThemeEntry], assets: &AssetManager) 
 /// without initializing an audio device or decoding whole songs.
 pub fn missing_install_music(assets: &AssetManager) -> Vec<String> {
     let mut missing = Vec::new();
-    let theme_name = assets.ini_roots().theme();
-    for name in [theme_name, RA2_THEME_INI_NAME] {
+    let theme_ini = assets.ini_roots().theme();
+    for name in [theme_ini, RA2_THEME_INI_NAME] {
         let selected = match crate::rules::retail_sources::select_ini(assets, name) {
             Ok(selected) => selected,
             Err(error) => {
-                if name == theme_name {
+                if name == theme_ini {
                     missing.push(format!("{name}: {error}"));
                 }
                 continue;

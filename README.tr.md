@@ -102,7 +102,7 @@ VERA20K varsayılan olarak orijinal oyun gibi oynanır. Ares gibi modlardan gele
 her yeni özellik, şu yollardan biriyle açılana kadar kapalı kalmalıdır:
 
 - **Bir VERA oyuncu seçeneği**: **Options** altında bulunur ve `VERA.INI` dosyasının `[VERA]` bölümüne kaydedilir.
-- **Bir derleme seçeneği**: örneğin desteklenen [Ares eklentileri](docs/ares.md) için `--features ares`.
+- **Bir derleme seçeneği**: örneğin desteklenen [Phobos eklentileri](docs/phobos.md) için `--features phobos`.
 - **Bir INI anahtarı**: bir mod ya da harita tarafından ayarlanır.
 
 Ses, grafik ve kontrol ayarları `VERA.INI` dosyasına kaydedilir. Oynanış kuralları lobi
@@ -137,6 +137,7 @@ Electronic Arts'a aittir. VERA20K, Electronic Arts ile bağlantılı değildir v
 tarafından desteklenmemektedir.
 
 This product includes software developed by the [Ares Contributors](LICENSES/Ares.txt).
+This product includes software developed by the [Phobos Developers](docs/phobos.md#original-project-and-authors).
 
 **VERA20K'yı paylaşmadan, satmadan veya fork'lamadan önce [yasal bildirimi](LEGAL.md) okuyun.**
 

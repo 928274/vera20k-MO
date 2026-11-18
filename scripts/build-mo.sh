@@ -6,8 +6,9 @@
 #   (branch workbuddy/main-a66a04e3, 578 commits behind `mo`) with plain
 #   `cargo build` and no feature flags. The result could not run the game:
 #     * "CnCNet map loading failed: selected AI root aimo.ini failed structural
-#       validation" — without `ares` there is no `+=` INI fallback, so MO's
-#       TaskForces fragments never resolve.
+#       validation" — the `+=` INI append syntax is now part of the Ares
+#       reading way (`ares_switch::ares_way`), which the game's data selects
+#       at run time; no build feature is involved any more.
 #     * the loading screen painted the pre-game colour as Orange instead of the
 #       chosen Blue — SkirmishColorMode::is_mo_color_table is
 #       #[cfg(feature = "phobos")], so without `phobos` MO's `[Colors]` layout is
@@ -15,7 +16,13 @@
 #       for id 6 (Blue).
 #
 # Source of truth: docs/MO-ADAPTATION.md, "构建与部署":
-#   cargo build --release --no-default-features --features ares,phobos --bin vera20k
+#   cargo build --release --no-default-features --features phobos --bin vera20k
+#
+# 2026-11-17: upstream 4019cd2a0 deleted the `ares` Cargo feature ("Play Ares
+#   in every build"). Ares now switches on from the game's data in every build;
+#   passing `--features ares` fails with "none of the selected packages contains
+#   this feature". The `Unknown Ares armor` marker below is still compiled in
+#   unconditionally, so the capability guard remains valid.
 set -uo pipefail
 
 SRC=/d/vera20k-mo                 # the real dev tree, branch `mo`
@@ -42,7 +49,7 @@ printf '[build-mo] tree=%s branch=%s head=%s\n' "$SRC" "$branch" "$(git rev-pars
 
 # --- build -------------------------------------------------------------------
 before=$(stat -c %Y target/release/vera20k.exe 2>/dev/null || echo 0)
-build_log=$(cargo build --release --no-default-features --features ares,phobos --bin vera20k 2>&1)
+build_log=$(cargo build --release --no-default-features --features phobos --bin vera20k 2>&1)
 printf '%s\n' "$build_log" | tail -40
 # A trailing `reg.exe` block from the sandbox surfaces as a non-zero status even
 # though cargo already finished; judge by the artifact instead of the status.
@@ -61,6 +68,8 @@ size=$(stat -c %s "$exe")
 # --- verify the mandatory capabilities are actually compiled in --------------
 ares=$(grep -a -c 'Unknown Ares armor' "$exe" || true)
 phobos=$(grep -a -c 'Phobos' "$exe" || true)
+# Ares code is in every build now; the marker proves the binary was built
+# from this tree, not that a feature was enabled.
 [ "$ares" -ge 1 ] || fail "ares is NOT compiled in (build the wrong binary?)"
 [ "$phobos" -ge 5 ] || fail "phobos looks absent ($phobos markers)"
 printf '[build-mo] artifact %s bytes, ares=%s phobos=%s\n' "$size" "$ares" "$phobos"

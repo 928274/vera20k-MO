@@ -102,7 +102,7 @@ Ghidra, затем переносят его поведение на Rust и п�
 расширения из модов вроде Ares, должна оставаться выключенной, пока её не включат одним из способов:
 
 - **Пользовательским параметром VERA** в **Options**, который сохраняется в секции `[VERA]` файла `VERA.INI`.
-- **Параметром сборки**, например `--features ares` для поддерживаемых [расширений Ares](docs/ares.md).
+- **Параметром сборки**, например `--features phobos` для поддерживаемых [расширений Phobos](docs/phobos.md).
 - **Ключом INI**, который задаёт мод или карта.
 
 Настройки звука, графики и управления сохраняются в `VERA.INI`. Правила игры задаются
@@ -136,6 +136,7 @@ Command & Conquer и Red Alert — товарные знаки Electronic Arts I
 VERA20K не связан с Electronic Arts и не одобрен компанией.
 
 This product includes software developed by the [Ares Contributors](LICENSES/Ares.txt).
+This product includes software developed by the [Phobos Developers](docs/phobos.md#original-project-and-authors).
 
 **Прочитай [юридическое уведомление](LEGAL.md), прежде чем распространять, продавать или форкать VERA20K.**
 

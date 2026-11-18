@@ -231,12 +231,14 @@ pub(super) fn build_world_instances(
     let own_order;
     let display_order = match state.match_state.sim_runtime.presentation() {
         Some(rt) => {
-            let display = rt.view().display_layers();
+            let world = rt.view().simulation();
             match state.match_state.sim_runtime.frame() {
-                Some(frame) => frame.display_order(display),
+                Some(frame) => frame.display_order(world),
                 None => {
-                    own_order =
-                        super::draw_plan_lowering::NativeDisplayOrder::from_display(display);
+                    own_order = super::draw_plan_lowering::NativeDisplayOrder::from_world(
+                        world,
+                        Some(&rt.resources.rules),
+                    );
                     &own_order
                 }
             }
@@ -904,8 +906,13 @@ pub(super) fn update_minimap(state: &mut AppState, local_owner: &Option<String>)
         }
     }
 
-    // VERA's HD radar draws at the sidebar's whole scale while it is on.
-    let hd_scale = state.hd_radar().then(|| state.sidebar_frame().draw_scale());
+    // VERA's HD radar draws at the sidebar's whole scale while it is on; a
+    // fractional surface has none (a 1.5x radar has no whole pixel grid).
+    let hd_scale = state
+        .hd_radar()
+        .then(|| state.sidebar_frame().draw_scale())
+        .filter(|scale| scale.fract() == 0.0)
+        .map(|scale| scale as u32);
     if let Some(minimap) = state.match_state.match_presentation.minimap.as_mut() {
         minimap.set_hd_scale(
             &state.renderer.gpu.device,

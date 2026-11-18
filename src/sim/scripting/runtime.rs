@@ -340,16 +340,81 @@ fn start_super_weapon_light(
     sim.session
         .lighting_mut()
         .start_nuke_flash_for(frame, frames);
-    #[cfg(feature = "ares")]
-    {
-        let light = rules
-            .super_weapon_metadata(super_weapon)
-            .map(|metadata| metadata.launch().lighting());
-        sim.session
-            .lighting_mut()
-            .select_ares(crate::sim::scenario_session::ScenarioLightingProfile::Nuke, light);
-    }
+    // MO's script-driven `ScreenNukeFlash` reads the superweapon's Ares
+    // `Light.*` overrides. Upstream 4019cd2a0 removed the `ares` build
+    // feature and selects the Ares way from a game's data at run time; this
+    // is a MO-only script command (there is no stock duplicate to double up
+    // with), so the read is compiled in every build again.
+    let light = rules
+        .super_weapon_metadata(super_weapon)
+        .map(|metadata| metadata.launch().lighting());
+    sim.session
+        .lighting_mut()
+        .select_ares(crate::sim::scenario_session::ScenarioLightingProfile::Nuke, light);
     sim.publish_global_lighting(
         crate::sim::light_sources::PaletteUpdate::from_scenario(sim.session.lighting()),
     );
+}
+
+#[cfg(test)]
+mod frame_dispatch_tests {
+    use super::*;
+    use crate::sim::scripting::BulletHit;
+    use crate::sim::world::TickLane;
+
+    fn queued_hit() -> BulletHit {
+        BulletHit {
+            owner: 1,
+            projectile: InternedId::default(),
+            impact: (1, 2, 3),
+        }
+    }
+
+    /// The 11-15 merge took the upstream side of a `master_frame.rs` conflict
+    /// and dropped the `dispatch_script_frame` call, so a `.rhai` binding was
+    /// installed but never evaluated. The dispatcher drains the one-frame
+    /// bullet channel before it looks at the registry, so a queued hit
+    /// disappearing across a real frame proves the frame loop reached it.
+    /// This needs no process-wide `OnceLock<ScriptRegistry>` state, which
+    /// parallel tests share.
+    #[test]
+    fn master_frame_reaches_script_dispatch_every_frame() {
+        let mut sim = Simulation::new();
+        let rules = RuleSet::empty_for_test();
+        for _ in 0..2 {
+            sim.script_bullet_hits.push(queued_hit());
+            assert_eq!(sim.script_bullet_hits.len(), 1);
+
+            sim.advance_master_frame(
+                &[],
+                &rules,
+                None,
+                33,
+                TickLane::Ordinary,
+                false,
+                FrameEffects::default(),
+            )
+            .expect("an idle frame completes");
+
+            assert!(
+                sim.script_bullet_hits.is_empty(),
+                "the frame loop never called dispatch_script_frame: .rhai \
+                 scripts would be installed but never evaluated"
+            );
+        }
+    }
+
+    /// The observable above must not depend on a script being installed: the
+    /// drain runs before the empty-registry early return, so an idle game
+    /// cannot grow the channel without bound.
+    #[test]
+    fn dispatch_drains_the_channel_before_the_empty_registry_check() {
+        let mut sim = Simulation::new();
+        let rules = RuleSet::empty_for_test();
+        sim.script_bullet_hits.push(queued_hit());
+
+        sim.dispatch_script_frame(&rules, None, FrameEffects::default());
+
+        assert!(sim.script_bullet_hits.is_empty());
+    }
 }

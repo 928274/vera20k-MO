@@ -1641,19 +1641,26 @@ impl MapLoadInitial {
     /// the one process owner for this inactive attempt. Authored loading does
     /// not reset or advance MapGen before installation (ReadScenario684620 ->
     /// Full_Init/Fill); failures can discard this snapshot without losing it.
-    /// The same inactive transfer retains current SpecialFlags and local values;
-    /// ClearScene clears global variables, but leaves ReadLocal's prior values.
+    /// The same inactive transfer retains current SpecialFlags and offline local
+    /// values. ClearScene6851F0 clears globals, but ReadLocal689B20 retains
+    /// unassigned locals. VERA starts fresh LAN/WOL worlds from map assignments
+    /// only: peers (including replays/rejoins) cannot share prior-match locals.
     pub(super) fn retain_process_state(
         &mut self,
         retention: &mut crate::app::shell_random_map::RandomMapGenerationRetention,
         mut resident: Option<&mut crate::sim::world::Simulation>,
+        session_mode: crate::sim::scenario_session::ScenarioGameMode,
     ) {
         self.retained_campaign_special_flags = resident
             .as_deref()
             .map(crate::sim::world::Simulation::retained_campaign_special_flags);
-        self.retained_local_variables = resident
-            .as_deref()
-            .map(crate::sim::world::Simulation::retain_local_variables_for_fresh_load);
+        self.retained_local_variables = if session_mode.is_network() {
+            None
+        } else {
+            resident
+                .as_deref()
+                .map(crate::sim::world::Simulation::retain_local_variables_for_fresh_load)
+        };
         if let Some(generated) = self.mapgen_rng_continuation.take() {
             retention.publish_mapgen_continuation(resident.as_deref_mut(), generated);
             self.mapgen_rng_continuation =
@@ -1769,6 +1776,86 @@ fn construction_trace_after_fill(
 mod fresh_transport_tests {
     use super::*;
 
+    fn map_with_locals(variables: &str) -> MapFile {
+        let mut map =
+            crate::map::rmg::emit::empty_map_file(&crate::map::rmg::RmgOptions::default(), 16, 16);
+        map.local_variables = crate::map::variable_names::parse_local_variables(
+            &IniFile::from_str(&format!("[VariableNames]\n{variables}")),
+        );
+        map
+    }
+
+    fn load_after_local_history(
+        mode: crate::sim::scenario_session::ScenarioGameMode,
+        variables: &str,
+        map: MapFile,
+        source: LoadedMapSource,
+    ) -> Simulation {
+        let mut resident = Simulation::new();
+        resident.initialize_trigger_definitions(
+            &map_with_locals(variables),
+            &Default::default(),
+            None,
+            None,
+            None,
+        );
+        let before = resident.state_hash();
+        let mut initial = MapLoadInitial::from_test_map_source(map, source);
+        initial.retain_process_state(&mut Default::default(), Some(&mut resident), mode);
+        assert_eq!(resident.state_hash(), before, "preparation is read-only");
+        let mut staged = Simulation::new();
+        if let Some(prior) = initial.retained_local_variables {
+            staged.inherit_local_variables_for_fresh_load(prior);
+        }
+        staged.initialize_trigger_definitions(
+            &initial.map_data,
+            &Default::default(),
+            None,
+            None,
+            None,
+        );
+        staged
+    }
+
+    #[test]
+    fn online_generated_start_agrees_after_different_local_histories() {
+        let load = |prior| {
+            load_after_local_history(
+                crate::sim::scenario_session::ScenarioGameMode::Wol,
+                prior,
+                map_with_locals(""),
+                LoadedMapSource::Generated {
+                    seed_name: "RandMap.Sed".into(),
+                    seed_source: None,
+                },
+            )
+        };
+        assert_eq!(load("7=Previous,1\n").state_hash(), load("").state_hash());
+    }
+
+    #[test]
+    fn lan_authored_start_uses_the_maps_local_assignments_only() {
+        let load = |prior| {
+            load_after_local_history(
+                crate::sim::scenario_session::ScenarioGameMode::Lan,
+                prior,
+                map_with_locals("7=Unassigned\n8=Cleared,0\n9=Set,1\n"),
+                LoadedMapSource::Loose {
+                    cache_lease: Default::default(),
+                    path: PathBuf::from("LOCAL.MAP"),
+                    payload_len: 1,
+                    source_sha256: crate::util::sha256::sha256_hex(b"local assignments"),
+                },
+            )
+        };
+        let after_history = load("7=Previous,1\n8=Previous,1\n");
+        let cold = load("");
+        assert_eq!(after_history.state_hash(), cold.state_hash());
+        assert!(!after_history.trigger_runtime().local_variable_is_set(7));
+        assert!(!after_history.trigger_runtime().local_variable_is_set(8));
+        assert!(after_history.trigger_runtime().local_variable_is_set(9));
+    }
+
     #[test]
     fn retained_start_metadata_uses_the_declared_map_capacity() {
         let mut source = String::from(
@@ -1791,64 +1878,22 @@ mod fresh_transport_tests {
 
     #[test]
     fn fresh_load_retains_local_values_without_mutating_the_outgoing_world() {
-        let map = |variables: &str| {
-            let mut map = crate::map::rmg::emit::empty_map_file(
-                &crate::map::rmg::RmgOptions::default(),
-                16,
-                16,
+        use crate::sim::scenario_session::ScenarioGameMode;
+        for mode in [ScenarioGameMode::Campaign, ScenarioGameMode::Skirmish] {
+            let staged = load_after_local_history(
+                mode,
+                "7=Prior,1\n8=ClearLater,1\n",
+                map_with_locals("7=Renamed\n8=Explicit,0\n"),
+                LoadedMapSource::Loose {
+                    cache_lease: Default::default(),
+                    path: PathBuf::from("LOCAL.MAP"),
+                    payload_len: 1,
+                    source_sha256: crate::util::sha256::sha256_hex(b"local retention control"),
+                },
             );
-            map.local_variables = crate::map::variable_names::parse_local_variables(
-                &IniFile::from_str(&format!("[VariableNames]\n{variables}")),
-            );
-            map
-        };
-        let mut resident = Simulation::new();
-        resident.initialize_trigger_definitions(
-            &map("7=Prior,1\n8=ClearLater,1\n"),
-            &Default::default(),
-            None,
-            None,
-            None,
-        );
-        let resident_hash = resident.state_hash();
-        let mut initial = MapLoadInitial::from_test_map_source(
-            map("7=Renamed\n8=Explicit,0\n"),
-            LoadedMapSource::Loose {
-                cache_lease: Default::default(),
-                path: PathBuf::from("LOCAL.MAP"),
-                payload_len: 1,
-                source_sha256: crate::util::sha256::sha256_hex(b"local retention control"),
-            },
-        );
-        initial.retain_process_state(&mut Default::default(), Some(&mut resident));
-        // A failed attempt may discard this initial state; the resident is
-        // unchanged until a successful load installs the replacement.
-        assert_eq!(resident.state_hash(), resident_hash);
-        let mut staged = Simulation::new();
-        staged.inherit_local_variables_for_fresh_load(
-            initial.retained_local_variables.take().unwrap(),
-        );
-        staged.initialize_trigger_definitions(
-            &initial.map_data,
-            &Default::default(),
-            None,
-            None,
-            None,
-        );
-        let mut cold = Simulation::new();
-        cold.initialize_trigger_definitions(
-            &initial.map_data,
-            &Default::default(),
-            None,
-            None,
-            None,
-        );
-        assert_ne!(
-            staged.state_hash(),
-            cold.state_hash(),
-            "retained local state is installed"
-        );
-        assert_eq!(resident.state_hash(), resident_hash);
+            assert!(staged.trigger_runtime().local_variable_is_set(7));
+            assert!(!staged.trigger_runtime().local_variable_is_set(8));
+        }
     }
 
     #[test]
@@ -2459,7 +2504,7 @@ pub(crate) fn load_csf(
     asset_manager: &AssetManager,
 ) -> anyhow::Result<crate::assets::csf_file::CsfFile> {
     let (mut csf, supplements) =
-        crate::assets::csf_file::CsfFile::load_active(asset_manager.ares_form(), |name| {
+        crate::assets::csf_file::CsfFile::load_active(asset_manager.ships_ares(), |name| {
             asset_manager.get_ref(name)
         })
         .map_err(
@@ -2556,12 +2601,18 @@ pub(crate) fn load_map_initial_with_assets(
         .map(str::to_string)
         .or(quickplay_seed);
     if let Some(seed_name) = seed_selection.as_deref() {
+        // Ares.dll is loaded when the game is read the Ares way: the process
+        // Rules owner's answer, the one the shell's dialog takes
+        // (`NativeRulesProcessOwner::reads_ares_way`).
+        let ares = native_rules
+            .as_deref()
+            .is_some_and(|owner| owner.reads_ares_way());
         let mut settings = crate::map::rmg::RmgSettings::load(asset_manager);
         let mut options = crate::map::rmg::RmgOptions::default();
         // A seed without VERA's UrbanAreas= key regenerates with the urban
-        // switch the process's first RMGMD.INI read gives (Ares.dll 1006ABF0).
-        #[cfg(feature = "ares")]
-        {
+        // switch the process's first RMGMD.INI read gives (Ares.dll 1006ABF0),
+        // when Ares.dll is loaded.
+        if ares {
             options.urban_areas = settings.generate_urban_areas;
         }
         // A received seed's name is already its cached path.
@@ -2573,7 +2624,7 @@ pub(crate) fn load_map_initial_with_assets(
                     crate::map::source::GeneratedSeedSource::from_consumed_bytes(seed_path, &bytes),
                 );
                 match crate::rules::ini_parser::IniFile::from_bytes(&bytes) {
-                    Ok(ini) => options.apply_sed(&ini),
+                    Ok(ini) => options.apply_sed(&ini, ares),
                     Err(err) => {
                         log::warn!(
                             "random map: {seed_name} is not valid INI ({err}); using defaults"
@@ -2666,33 +2717,35 @@ pub(crate) fn load_map_initial_with_assets(
                 |file| asset_manager.contains(file),
             );
         }
-        #[cfg(not(feature = "ares"))]
-        let _ = launch_seed;
-        #[cfg(not(feature = "ares"))]
-        let objects = crate::map::rmg::build::GenerationObjects::tech(&tech_types);
-        // Ares' foot picks draw Main (Ares.dll 1006AAD0). The launch load
-        // seeds Main with the match seed (ScenarioBootstrapRng::new) before
-        // it regenerates the seed. RESIDUAL: that owner is built after this
-        // generation and does not continue past these draws.
-        #[cfg(feature = "ares")]
-        let urban_catalog = crate::map::rmg::tech_catalog::resolve_ares_urban(
-            &settings,
-            processed,
-            owner.fixed_art(),
-        );
-        #[cfg(feature = "ares")]
-        let launch_main = std::cell::RefCell::new(crate::sim::rng::SimRng::new(u64::from(
-            launch_seed.unwrap_or_default(),
-        )));
-        #[cfg(feature = "ares")]
-        let main_draw = || launch_main.borrow_mut().next_u32();
-        #[cfg(feature = "ares")]
-        let objects = crate::map::rmg::build::GenerationObjects {
-            tech_types: &tech_types,
-            urban_areas: Some(crate::map::rmg::phases::urban_areas::UrbanInputs {
-                catalog: &urban_catalog,
-                main_draw: &main_draw,
-            }),
+        // Ares' foot picks draw Main (Ares.dll 1006AAD0) when Ares.dll is
+        // loaded. The launch load seeds Main with the match seed
+        // (ScenarioBootstrapRng::new) before it regenerates the seed.
+        // RESIDUAL: that owner is built after this generation and does not
+        // continue past these draws. The catalog and the stream outlive the
+        // generation objects that borrow them.
+        let urban_catalog;
+        let launch_main;
+        let main_draw;
+        let objects = if ares {
+            urban_catalog = crate::map::rmg::tech_catalog::resolve_ares_urban(
+                &settings,
+                processed,
+                owner.fixed_art(),
+            );
+            launch_main = std::cell::RefCell::new(crate::sim::rng::SimRng::new(u64::from(
+                launch_seed.unwrap_or_default(),
+            )));
+            main_draw = || launch_main.borrow_mut().next_u32();
+            crate::map::rmg::build::GenerationObjects {
+                tech_types: &tech_types,
+                urban_areas: Some(crate::map::rmg::phases::urban_areas::UrbanInputs {
+                    catalog: &urban_catalog,
+                    main_draw: &main_draw,
+                }),
+                ares,
+            }
+        } else {
+            crate::map::rmg::build::GenerationObjects::tech(&tech_types, ares)
         };
         let mut generated =
             crate::map::rmg::build::generate_map(&options, &settings, &resolved, &blocks, &objects);
@@ -4286,7 +4339,7 @@ mod full_init_rules_gate_tests {
             seed: 4242,
             ..Default::default()
         };
-        directory.write("early.sed", &options.to_sed_bytes());
+        directory.write("early.sed", &options.to_sed_bytes(false));
         let seed_path = directory.path().join("early.sed");
         let root =
             IniFile::from_str("[Countries]\n0=C]\n[Animations]\n0=BASE\n[Clear]\nWheel=25%\n");
@@ -4701,7 +4754,7 @@ mod random_map_retail_tests {
         let dir = std::env::temp_dir().join(format!("vera20k-rmg-retail-{tag}"));
         crate::util::file_system::create_dir_all(&dir).expect("scratch dir");
         let name = format!("{tag}.sed");
-        crate::util::file_system::write(dir.join(&name), options.to_sed_bytes())
+        crate::util::file_system::write(dir.join(&name), options.to_sed_bytes(false))
             .expect("write .SED");
         (dir, name)
     }
@@ -4870,7 +4923,7 @@ mod network_seed_source_tests {
     #[test]
     fn network_seed_cache_preserves_logical_name_and_consumed_identity() {
         let options = crate::map::rmg::RmgOptions::default();
-        let bytes = options.to_sed_bytes();
+        let bytes = options.to_sed_bytes(false);
         let source = crate::map::source::GeneratedSeedSource::from_consumed_bytes(
             std::env::temp_dir().join("seed-cache.sed"),
             &bytes,

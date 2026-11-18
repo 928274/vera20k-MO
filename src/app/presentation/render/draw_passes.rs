@@ -975,14 +975,15 @@ pub(super) fn dispatch_draw_passes(
     // Ares Tactical_Draw_FlyingStrings hooks 6D4684, right after the radial
     // indicators 6D467F and before BeaconManager 6D46B6, and draws the copied
     // signed credit labels (->10064430) with the shared GAME.FNT passthrough.
-    #[cfg(feature = "ares")]
-    draw_pooled_ui_passthrough(
-        &mut pass,
-        &state.renderer.batch_renderer,
-        pool,
-        Some(state.renderer.bit_font.atlas()),
-        "bounty_text",
-    );
+    if state.rules().is_some_and(|rules| rules.ares()) {
+        draw_pooled_ui_passthrough(
+            &mut pass,
+            &state.renderer.batch_renderer,
+            pool,
+            Some(state.renderer.bit_font.atlas()),
+            "bounty_text",
+        );
+    }
 
     // BeaconManager Draw 430AC0 (6D46B6) precedes BandBox. Its flags 600
     // bypass A and Z; each House row has its own Convert strip.
@@ -1603,6 +1604,36 @@ fn composite_world_with_drag_rect(
         pass.set_scissor_rect(tactical[0], tactical[1], tactical[2], tactical[3]);
         draw_pooled_ui_passthrough(&mut pass, batch, pool, drag, "drag");
     }
+}
+
+/// The wheel-zoomed world, resampled once from world pixels into the window
+/// after the Options zoom scaled the frame there (`app::frame`), instead of
+/// only through the frame. VERA-only: stock YR has no world zoom. Whatever the
+/// frame drew over the battlefield keeps showing at the frame's pixels
+/// (`WorldZoomPass::draw_window_copy`); the battlefield's window-pixel text and
+/// the cursor go over this (`window_ui`). It draws only when the frame's
+/// `set_view` kept a window copy (`render::mod`).
+pub(crate) fn draw_world_window_copy(
+    state: &AppState,
+    encoder: &mut wgpu::CommandEncoder,
+    view: &wgpu::TextureView,
+) {
+    let (Some(zoom), Some(world)) = (
+        state.tactical_zoom(),
+        state.renderer.world_zoom_pass.as_ref(),
+    ) else {
+        return;
+    };
+    let gpu = &state.renderer.gpu;
+    world.draw_window_copy(
+        &gpu.device,
+        &gpu.queue,
+        encoder,
+        view,
+        state.renderer.combat_light_renderer.composition_texture(),
+        zoom,
+        crate::app::input::camera::tactical_viewport_px(state),
+    );
 }
 
 /// VERA's ground marks: world-surface stores at neutral A, before wheel zoom.

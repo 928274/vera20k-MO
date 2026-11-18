@@ -324,7 +324,7 @@ pub(crate) fn drain_departures(state: &mut AppState) {
     }
 }
 
-/// The relay's rate changes in frames dispatched so far, one chat line each.
+/// The relay's rate changes in frames dispatched so far, one line each.
 /// The relay slows a match whose player's PC cannot keep up; native lockstep
 /// slows to its slowest player without a line.
 pub(crate) fn post_speed_changes(state: &mut AppState) {
@@ -338,17 +338,7 @@ pub(crate) fn post_speed_changes(state: &mut AppState) {
         let text = match change {
             MatchSpeedChange::SlowedBy(house) => {
                 state.match_state.network_quality.record_slowdown(house);
-                let Some(runtime) = state.match_state.sim_runtime.runtime() else {
-                    return;
-                };
-                let name = house_source(
-                    &state.match_state.session,
-                    &runtime.simulation,
-                    i32::from(house),
-                )
-                .map(|source| participant_name(&state.match_state.session, source))
-                .filter(|name| !name.is_empty());
-                match name {
+                match house_player_name(state, house) {
                     Some(name) => {
                         crate::i18n::tr_fill("VERA:PlayerSlowingGame", &[("name", &name)])
                     }
@@ -357,8 +347,105 @@ pub(crate) fn post_speed_changes(state: &mut AppState) {
             }
             MatchSpeedChange::Normal => crate::i18n::tr("VERA:GameSpeedNormal"),
         };
-        crate::app::input::messages::post_match_speed(state, &text);
+        crate::app::input::messages::post_relay_notice(state, &text);
     }
+}
+
+/// VERA: other players' shared pauses and resumes in frames dispatched so
+/// far, one line each naming who asked. A line without a name would say no
+/// more than the pause's own notice (`messages::show_status_notices`), so
+/// there is none.
+pub(crate) fn post_pause_changes(state: &mut AppState) {
+    let changes = state
+        .match_state
+        .live_network
+        .as_mut()
+        .map(|live| live.take_pause_changes())
+        .unwrap_or_default();
+    for change in changes {
+        let Some(name) = house_player_name(state, change.house) else {
+            continue;
+        };
+        let key = if change.paused {
+            "VERA:PlayerPausedGame"
+        } else {
+            "VERA:PlayerResumedGame"
+        };
+        let text = crate::i18n::tr_fill(key, &[("name", &name)]);
+        crate::app::input::messages::post_relay_notice(state, &text);
+    }
+}
+
+/// VERA: other players the relay stopped hearing for 10 seconds, or hears
+/// again, one line each. gamemd holds the match and names a silent player in
+/// its Wait_For_Players dialog (called from ProcessNetwork `0x0064800E`); the
+/// relay plays on without them, so the others read it.
+pub(crate) fn post_connection_changes(state: &mut AppState) {
+    let changes = state
+        .match_state
+        .live_network
+        .as_mut()
+        .map(|live| live.take_connection_changes())
+        .unwrap_or_default();
+    for change in changes {
+        let Some(name) = house_player_name(state, change.house) else {
+            continue;
+        };
+        let key = if change.responding {
+            "VERA:PlayerResponding"
+        } else {
+            "VERA:PlayerNotResponding"
+        };
+        let text = crate::i18n::tr_fill(key, &[("name", &name)]);
+        crate::app::input::messages::post_relay_notice(state, &text);
+    }
+}
+
+/// VERA: the label of what this game's connection to the game server is
+/// going through, if anything: reconnecting, or catching up with the
+/// relay's frames, which a returning game does as it rejoins.
+/// `messages::show_status_notices` shows it as a message row.
+pub(crate) fn recovery_notice(state: &AppState) -> Option<&'static str> {
+    use crate::net::live_commands::NetworkRecoveryStatus;
+    let live = state.match_state.live_network.as_ref()?;
+    let frame = state
+        .match_state
+        .sim_runtime
+        .runtime()?
+        .simulation
+        .session()
+        .binary_frame();
+    let now = super::frame_pacer::wall_clock_ms() as u32;
+    Some(match live.recovery_status(now, frame)? {
+        NetworkRecoveryStatus::Reconnecting => {
+            // The relay drops a lapsed pass, which only the lobby can renew:
+            // then waiting cannot help.
+            let lapsed = live.relay_expires().is_some_and(|expires| {
+                crate::util::time::SystemTime::now()
+                    .duration_since(crate::util::time::UNIX_EPOCH)
+                    .is_ok_and(|now| now.as_secs() >= expires)
+            });
+            if lapsed {
+                "VERA:ReconnectPassLapsed"
+            } else {
+                "VERA:Reconnecting"
+            }
+        }
+        NetworkRecoveryStatus::CatchingUp { .. } if live.restoring_match() => "VERA:Rejoining",
+        NetworkRecoveryStatus::CatchingUp { .. } => "VERA:CatchingUp",
+    })
+}
+
+/// The name of the player whose House is `house`, when it has one.
+fn house_player_name(state: &AppState, house: i8) -> Option<String> {
+    let runtime = state.match_state.sim_runtime.runtime()?;
+    house_source(
+        &state.match_state.session,
+        &runtime.simulation,
+        i32::from(house),
+    )
+    .map(|source| participant_name(&state.match_state.session, source))
+    .filter(|name| !name.is_empty())
 }
 
 /// VERA: once this game reaches a pause that found it catching up, it tells

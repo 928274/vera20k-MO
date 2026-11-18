@@ -96,7 +96,7 @@ cargo run --release --bin vera20k
 ต้องปิดไว้จนกว่าจะเปิดด้วยวิธีใดวิธีหนึ่งต่อไปนี้:
 
 - **ตัวเลือกของผู้เล่นใน VERA** อยู่ใน **Options** และบันทึกในส่วน `[VERA]` ของ `VERA.INI`
-- **ตัวเลือกตอนบิลด์** เช่น `--features ares` สำหรับ[ส่วนขยาย Ares](docs/ares.md)ที่รองรับ
+- **ตัวเลือกตอนบิลด์** เช่น `--features phobos` สำหรับ[ส่วนขยาย Phobos](docs/phobos.md)ที่รองรับ
 - **คีย์ INI** ที่ม็อดหรือแผนที่กำหนด
 
 การตั้งค่าเสียง กราฟิก และการควบคุมจะบันทึกไว้ใน `VERA.INI` กฎการเล่นมาจากการตั้งค่าล็อบบี้
@@ -128,6 +128,7 @@ Command & Conquer และ Red Alert เป็นเครื่องหมา
 VERA20K ไม่มีความเกี่ยวข้องกับ Electronic Arts และไม่ได้รับการรับรองจาก Electronic Arts
 
 This product includes software developed by the [Ares Contributors](LICENSES/Ares.txt).
+This product includes software developed by the [Phobos Developers](docs/phobos.md#original-project-and-authors).
 
 **โปรดอ่าน[ประกาศทางกฎหมาย](LEGAL.md)ก่อนแชร์ ขาย หรือ fork VERA20K**
 

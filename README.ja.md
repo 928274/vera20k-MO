@@ -86,7 +86,7 @@ cargo run --release --bin vera20k
 VERA20K は、既定ではオリジナルのゲームと同じようにプレイできます。Ares などの MOD に由来する拡張を含め、新しい機能はすべて、次のいずれかで有効にされるまでオフのままでなければなりません。
 
 - **VERA のプレイヤーオプション**：**Options** にあり、`VERA.INI` の `[VERA]` に保存されます。
-- **ビルドオプション**：対応する [Ares 拡張](docs/ares.md)を有効にする `--features ares` など。
+- **ビルドオプション**：対応する [Phobos 拡張](docs/phobos.md)を有効にする `--features phobos` など。
 - **INI キー**：MOD またはマップが設定します。
 
 サウンド、グラフィック、操作の設定は `VERA.INI` に保存されます。ゲームプレイのルールは、ロビーの設定、MOD、マップによって決まります。
@@ -110,6 +110,7 @@ OpenRA、XCC Mixer、ModEnc wiki、Project Perfect Mod、EA が GPL で公開し
 本プロジェクトは[追加条項](LEGAL.md#additional-terms)付きの [GPLv3](LICENSE-GPL) でライセンスされています。このリポジトリにゲームファイルは含まれていません。Command & Conquer および Red Alert は Electronic Arts Inc. の商標です。スクリーンショットとアプリアイコン（Red Alert 2 の赤い星）には、Electronic Arts が所有するゲームアートが含まれています。VERA20K は Electronic Arts と提携関係になく、同社の承認を受けたものでもありません。
 
 This product includes software developed by the [Ares Contributors](LICENSES/Ares.txt).
+This product includes software developed by the [Phobos Developers](docs/phobos.md#original-project-and-authors).
 
 **VERA20K を共有、販売、またはフォークする前に、[法的通知](LEGAL.md)をお読みください。**
 

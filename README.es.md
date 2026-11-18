@@ -106,7 +106,7 @@ incluidas las extensiones de mods como Ares, debe permanecer desactivada hasta q
 de estas opciones:
 
 - **Una opción de VERA para el jugador**, en **Options**, guardada en la sección `[VERA]` de `VERA.INI`.
-- **Una opción de compilación**, como `--features ares` para las [extensiones de Ares](docs/ares.md)
+- **Una opción de compilación**, como `--features phobos` para las [extensiones de Phobos](docs/phobos.md)
   compatibles.
 - **Una clave INI**, definida por un mod o un mapa.
 
@@ -140,6 +140,7 @@ pantalla y el icono de la aplicación, la estrella roja de Red Alert 2, muestran
 propiedad de Electronic Arts. VERA20K no está afiliado a Electronic Arts ni cuenta con su respaldo.
 
 This product includes software developed by the [Ares Contributors](LICENSES/Ares.txt).
+This product includes software developed by the [Phobos Developers](docs/phobos.md#original-project-and-authors).
 
 **Lee el [aviso legal](LEGAL.md) antes de compartir, vender o hacer un fork de VERA20K.**
 

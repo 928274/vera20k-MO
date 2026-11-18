@@ -324,7 +324,6 @@ impl Simulation {
                 if let Some(before) = layer_before {
                     Self::complete_tunnel_display_process(
                         &self.interner,
-                        &self.terrain_objects,
                         &mut self.substrate,
                         &self.resolved_terrain,
                         stable_id,

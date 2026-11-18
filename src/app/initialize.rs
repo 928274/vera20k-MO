@@ -681,6 +681,9 @@ impl App {
                     mods.dir(),
                     startup_options.media_archive_mode,
                     ares_setting,
+                    crate::assets::asset_manager::ArchiveFamily::for_ini_profile(
+                        config.ini.profile,
+                    ),
                 )
                 .and_then(|assets| assets.with_ini_roots(&config.ini))
                     .with_context(|| crate::i18n::tr("VERA:CannotLoadArchives")),
@@ -1130,7 +1133,6 @@ impl App {
                     screen_shake: Default::default(),
                     line_trails: Default::default(),
                     lasers: Default::default(),
-                    #[cfg(feature = "ares")]
                     flying_credits: Default::default(),
                     talk_bubble: Default::default(),
                     electric_bolts: Default::default(),
@@ -1192,6 +1194,7 @@ impl App {
                     house_color_map: HashMap::new(),
                     house_roster: HouseRoster::default(),
                     relation_colors: false,
+                    superweapon_building_timers: false,
                     relation_color_map: None,
                     relation_color_generation: 0,
                     lighting: Default::default(),

@@ -38,6 +38,9 @@ const LOADING_LIMIT_MS: u64 = 180_000;
 /// outage keeps its place for the returning player's replay. The game ends its
 /// own match once it has heard nothing for this long (`SequencedError::Absent`).
 pub const ABSENT_MS: u64 = 600_000;
+/// VERA: once started, a source silent this long is named in the other
+/// players' STATUS until it is heard again (README "Silence").
+const SILENT_NOTICE_MS: u64 = 10_000;
 // A started room ends at its final frame, which pauses postpone, and silence
 // ends an abandoned one. Past this age it is retired anyway: a day of play and
 // as long again paused.
@@ -314,6 +317,10 @@ pub struct OrderStatus {
     /// player reported alike, of a frame the watcher may read (README
     /// "Watchers").
     pub watch_sample: Option<(u32, u32)>,
+    /// VERA: a player's STATUS only: the active sources the relay has not
+    /// heard from for `SILENT_NOTICE_MS` (README "Silence"). 0 while it heard
+    /// every player lately, and always from a relay that does not tell.
+    pub silent_sources: u32,
 }
 
 #[derive(Debug)]
@@ -683,8 +690,9 @@ impl ClientSession {
                 return Ok(read(&mut reader).unwrap_or(OrderEvent::Unrecognized));
             }
             STATUS_EVENT => {
+                let watching = self.is_watching();
                 let read = |reader: &mut Reader| -> Result<OrderStatus, RelayError> {
-                    Ok(OrderStatus {
+                    let mut status = OrderStatus {
                         head_frame: reader.varint_u32()?,
                         oldest_seq: reader.varint()?,
                         next_seq: reader.varint()?,
@@ -693,8 +701,17 @@ impl ClientSession {
                         start_delay_ms: reader.varint_u32()?,
                         started: reader.u8()? != 0,
                         feedback: crate::link::read_feedback(reader)?,
-                        watch_sample: watch::read_sample(reader),
-                    })
+                        watch_sample: None,
+                        silent_sources: 0,
+                    };
+                    // After the feedback, a watcher's sample or a player's
+                    // silent sources, each absent without one.
+                    if watching {
+                        status.watch_sample = watch::read_sample(reader);
+                    } else {
+                        status.silent_sources = reader.u32().unwrap_or(0);
+                    }
+                    Ok(status)
                 };
                 return Ok(read(&mut reader).map_or(OrderEvent::Unrecognized, OrderEvent::Status));
             }
@@ -1059,6 +1076,9 @@ pub(super) struct OrderingRoom {
     local: u32,
     // A federated Leave before the start asks the coordinator to cancel.
     cancel_requested: bool,
+    // A federated Ready proved a different initial world. Keep the reason
+    // in the cancelled room so retries receive the existing precise error.
+    agreement_mismatch: bool,
     next_seq: u64,
     history: VecDeque<Stored>,
     history_bytes: usize,
@@ -1119,6 +1139,7 @@ impl OrderingRoom {
             sealed: 0,
             local,
             cancel_requested: false,
+            agreement_mismatch: false,
             next_seq: 1,
             history: VecDeque::new(),
             history_bytes: 0,
@@ -1672,10 +1693,11 @@ impl OrderingRoom {
         self.finished_at = Some(now_ms);
     }
 
-    /// The coordinator's cancel before the start ends this startup here too.
+    /// A coordinator cancellation or proved mismatch ends this startup.
     fn cancel(&mut self, now_ms: u64) {
         self.active = 0;
-        self.ready = 0;
+        // Retain the authenticated Ready/agreement proof for other relays.
+        // Cancellation still wins over starting, even on older relays.
         self.finished_at = Some(now_ms);
     }
 
@@ -1695,6 +1717,44 @@ impl OrderingRoom {
             encoded.extend_from_slice(&report.frames_per_second.to_le_bytes());
             encoded.extend_from_slice(&report.tick_micros.unwrap_or(0).to_le_bytes());
             let age = now_ms.saturating_sub(report.at_ms).min(u64::from(u32::MAX)) as u32;
+            encoded.extend_from_slice(&age.to_le_bytes());
+        }
+        encoded
+    }
+
+    /// VERA: active sources not heard from for `SILENT_NOTICE_MS` since the
+    /// start, of those whose silence this relay knows: its own, and those of
+    /// federated relays that report their players' (README "Silence").
+    pub(super) fn silent_sources(
+        &self,
+        federation: Option<&federation::Federation>,
+        now_ms: u64,
+    ) -> u32 {
+        if self.starts_at.is_none_or(|start| start > now_ms) {
+            return 0;
+        }
+        let known = self.local | federation.map_or(0, federation::Federation::reporting_silence);
+        (0..MAX_PEERS)
+            .filter(|&source| {
+                self.active & known & (1 << source) != 0
+                    && now_ms.saturating_sub(self.sources[usize::from(source)].heard_ms)
+                        >= SILENT_NOTICE_MS
+            })
+            .fold(0, |mask, source| mask | 1 << source)
+    }
+
+    /// When this relay last heard each active source homed here, as
+    /// `[source][LE age u32]` entries for the other relays of the match.
+    pub(super) fn local_silence(&self, now_ms: u64) -> Vec<u8> {
+        let mut encoded = Vec::new();
+        for (index, source) in self.sources.iter().enumerate() {
+            if self.active & self.local & (1 << index) == 0 {
+                continue;
+            }
+            encoded.push(index as u8);
+            let age = now_ms
+                .saturating_sub(source.heard_ms)
+                .min(u64::from(u32::MAX)) as u32;
             encoded.extend_from_slice(&age.to_le_bytes());
         }
         encoded
@@ -2217,6 +2277,9 @@ impl OrderingRoom {
             return Ok(error(OrderError::StorageUnavailable, self.next_seq));
         }
         self.authenticate_reader(ticket)?;
+        if self.agreement_mismatch {
+            return Ok(error(OrderError::AgreementMismatch, 0));
+        }
         let Some(&kind) = payload.first() else {
             return Err(RelayError::Malformed);
         };
@@ -5278,6 +5341,44 @@ mod tests {
         );
     }
 
+    /// The silent sources in the STATUS answering `player`'s ordering probe.
+    pub(super) fn told_silent(
+        server: &mut RelayServer,
+        player: &mut ClientSession,
+        now_ms: u64,
+    ) -> u32 {
+        let mut bytes = Vec::new();
+        let probe = raw_uplink(crate::link::FLAG_PROBE, 1, &[]);
+        player.encode(CONTROL, &probe, &mut bytes).unwrap();
+        events(server, player, &bytes, now_ms)
+            .into_iter()
+            .find_map(|event| match event {
+                OrderEvent::Status(status) => Some(status.silent_sources),
+                _ => None,
+            })
+            .expect("a STATUS")
+    }
+
+    #[test]
+    fn a_player_silent_for_ten_seconds_is_named_to_the_others_until_heard_again() {
+        let key = SecretKey::new([73; 32]);
+        let mut server = RelayServer::new(key.clone(), 2);
+        let (mut first, mut second) = (client(&key, 0), client(&key, 1));
+        let cert = certificate(&key, 3, 2000);
+        for player in [&mut first, &mut second] {
+            connect(&mut server, player, 0);
+            configure(&mut server, player, &cert, 0);
+        }
+        let start = ordering(&server).starts_at.unwrap();
+        assert_eq!(told_silent(&mut server, &mut second, start), 0);
+        let silent_at = start + SILENT_NOTICE_MS;
+        assert_eq!(told_silent(&mut server, &mut first, silent_at - 1), 0);
+        assert_eq!(told_silent(&mut server, &mut first, silent_at), 0b10);
+        // Any packet ends it: here the silent player's own probe.
+        assert_eq!(told_silent(&mut server, &mut second, silent_at + 1), 0);
+        assert_eq!(told_silent(&mut server, &mut first, silent_at + 2), 0);
+    }
+
     #[test]
     fn players_who_never_finish_loading_depart_in_the_first_frame() {
         let key = SecretKey::new([73; 32]);
@@ -5976,7 +6077,8 @@ impl RelayServer {
             });
             if ordering.storage_failed {
                 error(OrderError::StorageUnavailable, ordering.next_seq)
-            } else if ordering.certificate.room != certificate.room
+            } else if ordering.agreement_mismatch
+                || ordering.certificate.room != certificate.room
                 || ordering.certificate.sources_mask != certificate.sources_mask
                 || ordering.certificate.tick_hz != certificate.tick_hz
                 || ordering.agreement != agreement
@@ -6085,6 +6187,15 @@ impl RelayServer {
             return self.ordering_reply(ticket, replies, now, now_ms, crate::link::SEND_OTHER);
         }
         ordering.authenticate_reader(ticket)?;
+        if ordering.agreement_mismatch {
+            return self.ordering_reply(
+                ticket,
+                error(OrderError::AgreementMismatch, 0),
+                now,
+                now_ms,
+                crate::link::SEND_OTHER,
+            );
+        }
         let peer = room
             .peers
             .iter_mut()
@@ -6180,8 +6291,9 @@ impl RelayServer {
     }
 
     /// Sends `replies` on `ticket`'s hop under every rate budget. STATUS and
-    /// ACK get the hop feedback tail as they are encoded (spec §4.1); PACKs
-    /// are logged as `pack_kind`, everything else as non-PACK (spec §4.2).
+    /// ACK get the hop feedback tail as they are encoded (spec §4.1), and a
+    /// STATUS then the silent sources if any (README "Silence"); PACKs are
+    /// logged as `pack_kind`, everything else as non-PACK (spec §4.2).
     fn ordering_reply(
         &mut self,
         ticket: Ticket,
@@ -6190,15 +6302,19 @@ impl RelayServer {
         now_ms: u64,
         pack_kind: u8,
     ) -> Result<Vec<ForwardDatagram>, RelayError> {
-        if let Some(peer) = self
-            .rooms
-            .get(&ticket.room)
-            .and_then(|room| room.peers.iter().find(|peer| peer.ticket == ticket))
+        if let Some(room) = self.rooms.get(&ticket.room)
+            && let Some(peer) = room.peers.iter().find(|peer| peer.ticket == ticket)
         {
             let feedback = peer.link.feedback(now_ms);
+            let silent = room.ordering.as_ref().map_or(0, |ordering| {
+                ordering.silent_sources(room.federation.as_ref(), now_ms)
+            });
             for reply in &mut replies {
                 if matches!(reply.first(), Some(&STATUS_EVENT | &ACK_EVENT)) {
                     crate::link::append_feedback(reply, feedback);
+                }
+                if reply.first() == Some(&STATUS_EVENT) && silent != 0 {
+                    reply.extend_from_slice(&silent.to_le_bytes());
                 }
             }
         }

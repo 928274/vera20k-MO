@@ -455,8 +455,8 @@ fn resolve_trigger_owner(
             // writes the display name ("Russia" for [USSR] Name=Russia);
             // the stock ID-only lookup cannot bind those triggers and turns
             // them into a fixed-source refusal. Use the native trigger lookup
-            // under the compiled Ares capability.
-            let resolved = if crate::rules::ARES_BUILD {
+            // under the Ares way this game's Rules were read.
+            let resolved = if crate::rules::ares_switch::ares_way() {
                 rules.trigger_house_type_index(owner)
             } else {
                 rules.country_index(owner)

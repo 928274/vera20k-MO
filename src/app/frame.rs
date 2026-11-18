@@ -48,10 +48,6 @@ pub(super) enum FrameRenderOutcome {
     /// A probe drew nothing: the presented picture still stands, or the draw
     /// limits hold the next one.
     Unchanged,
-    /// The match was serviced, but the hand-off thread is still taking the
-    /// window's next picture: a draw would wait for the screen. Its wake
-    /// brings the draw (`GpuContext::screen_busy`).
-    ScreenBusy,
 }
 
 /// What one pass of `render_frame` may do once the match is serviced.
@@ -152,6 +148,47 @@ impl App {
         for (window, event) in std::mem::take(&mut self.held_window_events) {
             winit::application::ApplicationHandler::window_event(self, event_loop, window, event);
         }
+    }
+
+    /// When the local timer has the match's next frame due, for the frame
+    /// loop's wake (`LocalFramePacer::until_next_frame`): now or earlier once
+    /// it is due. `None` off the battlefield, at GameSpeed 0, before the
+    /// first frame, and in sequenced online play, whose frames the relay's
+    /// clock admits.
+    pub(super) fn next_local_frame_due(state: &AppState, now: Instant) -> Option<Instant> {
+        if state.frontend.screen != GameScreen::InGame
+            || state
+                .match_state
+                .live_network
+                .as_ref()
+                .is_some_and(|live| live.uses_sequenced_lockstep())
+        {
+            return None;
+        }
+        let (game_speed, network_fps) = sim_tick::local_pacing_inputs(state);
+        state
+            .platform
+            .frame_pacer
+            .until_next_frame(
+                crate::app::match_runtime::frame_pacer::wall_clock_ms(),
+                game_speed,
+                network_fps,
+            )
+            .map(|left| now + left)
+    }
+
+    /// When a loop that services the match without drawing should wake:
+    /// after [`SERVICE_WAKE`], or sooner for a frame the local timer has due
+    /// before then ([`Self::next_local_frame_due`]). One already due moves
+    /// nothing: the pass that just ran did not admit it, and waking for it
+    /// again would spin.
+    ///
+    /// [`SERVICE_WAKE`]: crate::app::match_runtime::frame_pacer::SERVICE_WAKE
+    pub(super) fn match_service_wake(state: &AppState, now: Instant) -> Instant {
+        let service = now + crate::app::match_runtime::frame_pacer::SERVICE_WAKE;
+        Self::next_local_frame_due(state, now)
+            .filter(|due| *due > now)
+            .map_or(service, |due| due.min(service))
     }
 
     /// Service the match runtime for one pass: the outcome voice wait, the
@@ -880,10 +917,11 @@ impl App {
                 Some(splash),
             )?;
             if presented {
-                state
-                    .platform
-                    .frame_pacer
-                    .record_presented(Instant::now(), None);
+                state.platform.frame_pacer.record_presented(
+                    Instant::now(),
+                    None,
+                    crate::util::time::Duration::ZERO,
+                );
                 state
                     .frontend
                     .startup_splash
@@ -965,6 +1003,7 @@ impl App {
         let message_ms = if state.focus_freeze_active() {
             None
         } else {
+            crate::app::input::messages::show_status_notices(state);
             crate::app::input::messages::update(
                 state,
                 runtime_pass.main_tick_admitted || hidden_run.is_some(),
@@ -1015,12 +1054,6 @@ impl App {
         ) {
             return Ok(FrameRenderOutcome::Deferred);
         }
-        // The game never waits for the screen: with VSync on, the wait for a
-        // free picture is the hand-off thread's, and the ticks that come due
-        // meanwhile run in the passes its wake and the simulation's bring.
-        if state.renderer.gpu.screen_busy() {
-            return Ok(FrameRenderOutcome::ScreenBusy);
-        }
         let draw_started = Instant::now();
         state.diag.frame_timer.sample(draw_started);
 
@@ -1056,6 +1089,9 @@ impl App {
             crate::app::frontend::shell_transition::MainMenuFirstPaintPoll::Acquire => {}
         }
 
+        // With VSync the acquire waits for a free picture, for most of a
+        // refresh once two are queued: the draw's wait, not its work.
+        let acquire_started = Instant::now();
         let Some(output) = state
             .renderer
             .gpu
@@ -1065,6 +1101,7 @@ impl App {
             Self::follow_window_size(state);
             return Ok(FrameRenderOutcome::Unavailable);
         };
+        let screen_wait = Instant::now().saturating_duration_since(acquire_started);
         let view: wgpu::TextureView = output.texture.create_view(&Default::default());
         let mut encoder: wgpu::CommandEncoder =
             state
@@ -1456,6 +1493,7 @@ impl App {
                         .as_ref()
                         .unwrap()
                         .draw(&mut encoder, &view);
+                    render::draw_world_window_copy(state, &mut encoder, &view);
                     crate::app::presentation::sidebar_surface::draw_window_copy(
                         state,
                         &mut encoder,
@@ -1551,64 +1589,6 @@ impl App {
             &state.renderer.bit_font,
             crate::app::diagnostics::performance_overlay::match_panel(state),
         );
-        if state.frontend.screen == GameScreen::InGame {
-            let status = state
-                .match_state
-                .match_diagnostics
-                .playback_status()
-                .or_else(|| {
-                    let live = state.match_state.live_network.as_ref()?;
-                    let frame = state
-                        .match_state
-                        .sim_runtime
-                        .runtime()?
-                        .simulation
-                        .session()
-                        .binary_frame();
-                    match live.recovery_status(
-                        crate::app::match_runtime::frame_pacer::wall_clock_ms() as u32,
-                        frame,
-                    )? {
-                        crate::net::live_commands::NetworkRecoveryStatus::Reconnecting => {
-                            // The relay drops a lapsed pass, which only the
-                            // lobby can renew: then waiting cannot help.
-                            let lapsed = live.relay_expires().is_some_and(|expires| {
-                                crate::util::time::SystemTime::now()
-                                    .duration_since(crate::util::time::UNIX_EPOCH)
-                                    .is_ok_and(|now| now.as_secs() >= expires)
-                            });
-                            Some(crate::i18n::tr(if lapsed {
-                                "VERA:ReconnectPassLapsed"
-                            } else {
-                                "VERA:Reconnecting"
-                            }))
-                        }
-                        crate::net::live_commands::NetworkRecoveryStatus::CatchingUp { frames } => {
-                            let key = if live.restoring_match() {
-                                "VERA:Rejoining"
-                            } else {
-                                "VERA:CatchingUp"
-                            };
-                            Some(crate::i18n::tr_count(key, frames, &[]))
-                        }
-                    }
-                })
-                .or_else(|| {
-                    crate::app::input::pause_menu::multiplayer_control(state)?
-                        .status
-                        .map(crate::i18n::tr)
-                });
-            if let Some(status) = status {
-                state.renderer.performance_overlay.encode_status(
-                    &state.renderer.gpu,
-                    &state.renderer.batch_renderer,
-                    &mut encoder,
-                    &output.texture,
-                    &state.renderer.bit_font,
-                    &status,
-                );
-            }
-        }
         if state.frontend.screen == GameScreen::InGame
             && let Some(offset_px) = runtime_pass.screen_shake_offset
         {
@@ -1693,7 +1673,10 @@ impl App {
             std::mem::take(&mut state.match_state.input.retail_screenshot_requested);
         let screenshot_central_rect = shake_central_rect(state, &output.texture);
         // Text drawn in the window (`window_ui`) is not in the frame the
-        // screenshot retains: this frame's goes over its copy.
+        // screenshot retains, and neither is the wheel-zoomed battlefield's
+        // window copy: this frame's go over its copy, the battlefield only
+        // when this frame drew it (not under an in-game menu). A zoomed frame
+        // is always copied, being smaller than the window.
         let window_text = state.renderer.window_ui.drew_text();
         let previous_composition = state
             .renderer
@@ -1711,12 +1694,20 @@ impl App {
         if let Some(copy) = previous_composition
             .as_ref()
             .and_then(|previous| previous.copy())
-            .filter(|_| window_text)
         {
-            state
-                .renderer
-                .window_ui
-                .draw_screenshot_text(state, &mut encoder, copy);
+            if game_render_output.is_some() {
+                render::draw_world_window_copy(
+                    state,
+                    &mut encoder,
+                    &copy.create_view(&Default::default()),
+                );
+            }
+            if window_text {
+                state
+                    .renderer
+                    .window_ui
+                    .draw_screenshot_text(state, &mut encoder, copy);
+            }
         }
         let pending_retail_screenshot = previous_composition
             .map(|previous| {
@@ -1778,10 +1769,11 @@ impl App {
                 .record_render_phases(phases);
         }
         let battlefield = state.frontend.screen == GameScreen::InGame;
-        state
-            .platform
-            .frame_pacer
-            .record_presented(presented_at, battlefield.then_some(draw_started));
+        state.platform.frame_pacer.record_presented(
+            presented_at,
+            battlefield.then_some(draw_started),
+            screen_wait,
+        );
         if battlefield {
             state
                 .match_state

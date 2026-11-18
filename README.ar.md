@@ -102,7 +102,7 @@ cargo run --release --bin vera20k
 من تعديلات مثل Ares، معطّلة إلى أن تُفعَّل بإحدى الطرق التالية:
 
 - **خيار للاعب في VERA**، ضمن **Options**، يُحفظ في القسم `[VERA]` من `VERA.INI`.
-- **خيار بناء**، مثل `--features ares` لتضمين [إضافات Ares](docs/ares.md) المدعومة.
+- **خيار بناء**، مثل `--features phobos` لتضمين [إضافات Phobos](docs/phobos.md) المدعومة.
 - **مفتاح INI**، يضبطه تعديل أو خريطة.
 
 تُحفظ إعدادات الصوت والرسوم والتحكم في `VERA.INI`. وتأتي قواعد اللعب من إعدادات الردهة أو التعديلات أو الخرائط.
@@ -134,6 +134,7 @@ Command & Conquer وRed Alert علامتين تجاريتين لشركة Electro
 لا يتبع VERA20K شركة Electronic Arts ولا يحظى بتأييدها.
 
 This product includes software developed by the [Ares Contributors](LICENSES/Ares.txt).
+This product includes software developed by the [Phobos Developers](docs/phobos.md#original-project-and-authors).
 
 **اقرأ [الإشعار القانوني](LEGAL.md) قبل أن تشارك VERA20K أو تبيعه أو تنشئ نسخة متفرعة منه.**
 

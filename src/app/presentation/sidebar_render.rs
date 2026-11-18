@@ -179,6 +179,15 @@ pub(crate) fn sidebar_layout_spec(state: &AppState) -> crate::ui::sidebar::Sideb
     if let Some(layout) = side_layout(state).filter(|_| !map_picture) {
         layout.apply_to_sidebar(&mut spec);
     }
+    // VERA's own: the player's cameo columns, laid inside the width the
+    // layout leaves. After the layout, so the player's choice draws; a
+    // capture keeps the original's two so its pictures stay reproducible.
+    let columns = if state.platform.capture_client_size.is_some() {
+        2
+    } else {
+        state.persistence.options_profile.sidebar_columns.count()
+    };
+    spec.apply_player_columns(columns);
     spec
 }
 
@@ -1003,13 +1012,14 @@ pub(crate) fn active_minimap_screen_rect(state: &AppState) -> crate::ui::sidebar
 // ---------------------------------------------------------------------------
 
 /// Keep VERA's smooth sidebar (`render::sidebar_smoothing`) at this frame's
-/// draw scale, or drop its copies when the option is off or the sidebar draws
-/// at its own pixels.
+/// draw scale, or drop its copies when the option is off, the sidebar draws
+/// at its own pixels, or the scale is not a whole one (xBR has no 1.5x).
 pub(crate) fn prepare_smooth_sidebar(state: &mut AppState) {
     let scale = state
         .smooth_sidebar()
         .then(|| state.sidebar_frame().draw_scale())
-        .filter(|&scale| scale > 1);
+        .filter(|scale| *scale >= 2.0 && scale.fract() == 0.0)
+        .map(|scale| scale as u32);
     let side = current_sidebar_side(state);
     let (gpu, batch) = (&state.renderer.gpu, &state.renderer.batch_renderer);
     let presentation = &mut state.match_state.match_presentation;

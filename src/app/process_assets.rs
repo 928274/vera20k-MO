@@ -329,6 +329,7 @@ impl ProcessAssets {
             self.mod_dir.as_deref(),
             self.media_archive_mode,
             self.ares_setting,
+            crate::assets::asset_manager::ArchiveFamily::for_ini_profile(self.ini_config.profile),
         )?;
         Ok(if let Some(roots) = &self.selected_ini_roots {
             assets.with_selected_ini_roots(roots.clone())
@@ -387,7 +388,7 @@ impl ProcessAssets {
                 "sound_count": definitions.sounds().len(),
                 "eva_count": definitions.eva().len(),
             });
-            let source_receipt = if assets.ares_form() {
+            let source_receipt = if assets.ships_ares() {
                 let mut receipt = source_receipt;
                 receipt["additional_indexes"] =
                     serde_json::json!(index.as_ref().map(|loaded| &loaded.additional_sources));
@@ -417,12 +418,13 @@ impl ProcessAssets {
     }
 
     /// Init_Game52C605/ClearScene685609 use fresh local INI objects while keeping the
-    /// campaign array. This selected retail route reads BATTLEMD.INI through
-    /// the same archive/loose-file resolver as the other process sources.
+    /// campaign array. This selected retail route reads the BATTLEMD file the
+    /// INI roots name through the same archive/loose-file resolver as the
+    /// other process sources.
     pub(crate) fn reload_campaigns(&mut self, assets: &AssetManager) {
         self.apply_campaign_source(crate::rules::retail_sources::select_ini(
             assets,
-            "BATTLEMD.INI",
+            assets.ini_roots().battle(),
         ));
     }
 
@@ -441,10 +443,9 @@ impl ProcessAssets {
     /// ClearScene685609 re-reads the process-retained Campaign registry on
     /// saved loads too. It never infers campaign identity from a map name.
     pub(crate) fn refresh_campaigns_if_available(&mut self) {
-        let selected = self
-            .manager
-            .as_ref()
-            .map(|assets| crate::rules::retail_sources::select_ini(assets, "BATTLEMD.INI"));
+        let selected = self.manager.as_ref().map(|assets| {
+            crate::rules::retail_sources::select_ini(assets, assets.ini_roots().battle())
+        });
         if let Some(selected) = selected {
             self.apply_campaign_source(selected);
         }
@@ -492,6 +493,15 @@ impl ProcessAssets {
         &self,
     ) -> Option<&crate::rules::process_owner::NativeRulesProcessOwner> {
         self.native_rules.as_ref()
+    }
+
+    /// Whether this game is read the Ares way, as Ares.dll loaded reads it
+    /// (`NativeRulesProcessOwner::reads_ares_way`): the shell's answer for its
+    /// Ares hooks, the random map generator's and the random countries'.
+    pub(crate) fn reads_ares_way(&self) -> bool {
+        self.native_rules
+            .as_ref()
+            .is_some_and(|rules| rules.reads_ares_way())
     }
 
     pub(crate) fn native_ini_hashes(
@@ -555,10 +565,8 @@ impl ProcessAssets {
         // setting is On. Such a game adds the byte, so the same files read
         // with and without Ares never agree; with no mod selected and the
         // setting on Auto the installed archive is ignored and adds nothing.
-        // Until the `ares` feature is deleted a build with it writes the byte
-        // for every game, as it always has.
-        if cfg!(feature = "ares") || assets.ships_ares() {
-            bytes.push(u8::from(assets.ships_ares()));
+        if assets.ships_ares() {
+            bytes.push(1);
         }
         // VERA: the player's Ares setting. Off keeps Ares keys from turning
         // Ares on, so such a game never agrees with one set to Auto; Auto
@@ -725,7 +733,6 @@ impl ProcessAssets {
             .flat_map(|rules| rules.multiplayer_countries())
     }
 
-    #[cfg(feature = "ares")]
     pub(crate) fn country_random_rows(&self) -> Vec<(&str, Option<&str>, bool, i32, i32)> {
         self.native_rules
             .as_ref()
@@ -766,19 +773,13 @@ impl ProcessAssets {
 
     /// `Game_GetFlagSurface @ 0x1001DCE0` country insignia by HouseType index,
     /// for lobby/diplomacy rows that resolve before a match Rules projection
-    /// exists.
+    /// exists. `None` unless Ares.dll is loaded (the game is read the Ares
+    /// way).
     pub(crate) fn country_flag_surface(&self, index: u16) -> Option<String> {
-        #[cfg(feature = "ares")]
-        {
-            return self
-                .native_rules
-                .as_ref()
-                .and_then(|rules| rules.country_flag_surface(index))
-                .map(str::to_owned);
-        }
-        #[cfg(not(feature = "ares"))]
-        {
-            let _ = index;
+        let rules = self.native_rules.as_ref()?;
+        if rules.reads_ares_way() {
+            rules.country_flag_surface(index).map(str::to_owned)
+        } else {
             None
         }
     }
@@ -1366,6 +1367,39 @@ mod tests {
                 .read_bool("Voxel", false),
             true
         );
+    }
+
+    /// MO's spawner renames BATTLEMD to BATTLEMO with the other MO roots.
+    #[test]
+    fn mo_profile_reads_the_mo_campaign_catalog() {
+        use crate::util::ini_roots::{IniProfile, IniRootConfig};
+        let dir = crate::assets::asset_manager::test_support::audio_test_install("mo-battle");
+        for name in ["rulesmo.ini", "artmo.ini", "aimo.ini"] {
+            std::fs::write(dir.path().join(name), b"[General]\n").unwrap();
+        }
+        std::fs::write(
+            dir.path().join("battlemd.ini"),
+            b"[Battles]\n1=YR\n[YR]\nScenario=YR.MAP\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("battlemo.ini"),
+            b"[Battles]\n1=MO\n[MO]\nScenario=ADEMON.MAP\n",
+        )
+        .unwrap();
+        let config = IniRootConfig {
+            profile: IniProfile::Mo,
+            ..Default::default()
+        };
+        let manager = AssetManager::new(dir.path(), MediaArchiveMode::STOCK_DIGITAL)
+            .unwrap()
+            .with_ini_roots(&config)
+            .unwrap();
+        let mut process =
+            ProcessAssets::new_with_ini_config(MediaArchiveMode::STOCK_DIGITAL, false, config);
+        process.reload_campaigns(&manager);
+        let campaigns = process.campaigns().unwrap();
+        assert_eq!(campaigns.get(0).unwrap().scenario(), "ADEMON.MAP");
     }
 
     /// The production install over the retail sources against the native

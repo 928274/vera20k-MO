@@ -1154,7 +1154,8 @@ impl LanCapture {
             num_players: 2,
             ..Default::default()
         };
-        let sed = options.to_sed_bytes();
+        let ares = state.process_assets.reads_ares_way();
+        let sed = options.to_sed_bytes(ares);
         // A path, as a bare name would be read from VERA's random-map folder.
         let sed_path = host_dir.join(crate::map::skirmish_scenarios::RANDMAP_SED);
         fs::write(&sed_path, &sed)?;
@@ -3940,8 +3941,9 @@ impl LanCapture {
                     crate::map::source::random_map_dir(root)
                         .join(crate::map::skirmish_scenarios::RANDMAP_SED),
                 )?;
+                let ares = state.process_assets.reads_ares_way();
                 let mut options = crate::map::rmg::RmgOptions::default();
-                options.apply_sed(&crate::rules::ini_parser::IniFile::from_bytes(&sed)?);
+                options.apply_sed(&crate::rules::ini_parser::IniFile::from_bytes(&sed)?, ares);
                 ensure!(
                     metadata.digest == options.native_digest()
                         && metadata.official
@@ -4571,7 +4573,7 @@ fn click_cooperative_mode(state: &mut AppState) -> Result<Vec<String>> {
     let row = modal
         .mode_rows()
         .iter()
-        .position(|id| *id == mode_id)
+        .position(|mode| mode.id == mode_id)
         .context("Cooperative listed on the network")?;
     let point = list_row_point(modal.mode_geometry(&layout), row, modal.mode_top_index);
     chooser_press(state, point);
@@ -4582,7 +4584,7 @@ fn click_cooperative_mode(state: &mut AppState) -> Result<Vec<String>> {
         .as_ref()
         .context("chooser")?;
     ensure!(
-        modal.selected_mode_id == mode_id,
+        modal.selected_mode.id == mode_id,
         "the game-type click missed Cooperative"
     );
     let labels = modal.row_labels.clone().context("Cooperative rows")?;
@@ -4870,7 +4872,7 @@ fn setup_button(state: &mut AppState, id: u16) -> Result<()> {
 
 fn offline_selection(state: &AppState) -> (i32, usize) {
     let dialog = &state.frontend.skirmish_shell_state;
-    (dialog.selected_mode_id, dialog.selected_map_idx)
+    (dialog.selected_mode.id, dialog.selected_map_idx)
 }
 
 #[cfg(all(test, tests_app))]

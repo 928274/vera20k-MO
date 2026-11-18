@@ -218,7 +218,7 @@ fn a_tank_killed_by_its_bridge_fall_still_scans_on_that_visit() {
         .unwrap();
     put_on_deck(&mut sim, &rules, tank, false);
     sim.object_custom_sounds
-        .insert(tank, "TestAmbient".to_owned());
+        .insert(tank, "TestAmbient".to_owned().into());
     remove_deck(&mut sim);
     blow_up_bridge_cell_fallout(
         &mut sim,
@@ -472,7 +472,6 @@ fn vanished_structural_deck_per_cell_arms_the_same_object_fall() {
 /// flags (Unit737F80): being shot while still falling must never escape a
 /// passenger merely because this ordinary hit did not use ignoreDefenses.
 // The +8F passenger kill (7380AF) is in the stock Unit tail Ares replaces.
-#[cfg(not(feature = "ares"))]
 #[test]
 fn a_transport_shot_mid_fall_kills_its_passenger_without_the_landing_force_flags() {
     use crate::sim::combat::{EntityDamageEvent, RAD_NO_ATTACKER, ReceiverCallFlags};

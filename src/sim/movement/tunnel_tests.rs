@@ -124,7 +124,7 @@ fn a_dig_moves_the_owners_display_registration_underground_and_back() {
     use crate::sim::world::display_layers::DisplayLayer;
     let (mut sim, rules) = fixture();
     // Object Unlimbo's Display submit (4A9720) of the Idle owner.
-    sim.submit_object_display_for_test(DIGGER, DisplayLayer::GROUND, Some(&rules));
+    sim.submit_object_display_for_test(DIGGER, DisplayLayer::GROUND);
     assert_eq!(
         sim.display_layers().layer_of(DIGGER),
         Some(DisplayLayer::GROUND)

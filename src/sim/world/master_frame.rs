@@ -266,6 +266,10 @@ impl Simulation {
                 clock.stamp(slot);
             }
         }
+        // Sim-layer scripts run at one fixed point, after the ordered logic
+        // steps and before the late region. An empty registry returns
+        // immediately, so this is a no-op until scripts are installed.
+        self.dispatch_script_frame(inputs.rules, inputs.overlay_registry, inputs.effects);
         let tail_result = self.run_late_region(inputs, &mut frame, None)?;
         if let Some(clock) = frame_clock.as_mut() {
             clock.stamp(crate::sim::frame_profile::phase::LATE_AI);
@@ -306,14 +310,10 @@ impl Simulation {
                 if request.lane == TickLane::Ordinary {
                     frame.commands = self.admit_frame_commands(request.ingress, rules, effects);
                 }
-                // MainTick55DBC8 precedes Logic55DC9E (including trigger polling).
-                Self::sort_display_ground(
-                    &self.interner,
-                    &self.terrain_objects,
-                    &mut self.substrate,
-                    rules,
-                );
-                // MainTick55DBCD saves the post-input, post-sort world before Logic.
+                // MainTick55DBC8 sorts Ground here, before Logic55DC9E. The
+                // simulation keeps Ground unordered (`DisplayLayers::submit`);
+                // the picture sorts it (`Simulation::ground_draw_order`).
+                // MainTick55DBCD saves the post-input world before Logic.
                 effects.before_logic(self);
                 self.lifecycle_outputs.emit(LifecycleOutput::LogicVisit);
             }
@@ -457,6 +457,13 @@ impl Simulation {
             }
             FrameStep::LocalAnims => {
                 for id in self.substrate.anims.local_ids() {
+                    // No expiry reaches a presentation anim, which nothing
+                    // lists: it ends with its owner's UnInit instead
+                    // (`AnimConstructorInput::Presentation`).
+                    if self.presentation_anim_orphaned(id) {
+                        self.destroy_anim(id, rules);
+                        continue;
+                    }
                     frame.bridge_state_changed |= self
                         .visit_anim(id, rules, overlay_registry, effects)
                         .map_err(|error| {

@@ -131,6 +131,7 @@ pub mod insignia_type;
 #[cfg(feature = "phobos")]
 pub mod invulnerability_rules;
 pub mod phobos_parallel_ai_queues;
+pub mod phobos_switch;
 #[cfg(all(test, tests_rules_o_z, feature = "phobos"))]
 #[path = "phobos_infantry_deploy_tests.rs"]
 mod phobos_infantry_deploy_tests;
@@ -157,13 +158,11 @@ pub mod phobos_sw_sidebar;
 pub mod phobos_warhead_anim;
 pub mod phobos_radiation;
 pub mod phobos_shields;
-/// Whether this binary compiles the supported Ares extensions. Whether Ares
-/// plays in a game is the per-game switch [`ruleset::RuleSet::ares`], decided
-/// from the game's data by [`ares_switch`]; this gates only what still forks
-/// at build time: Rules loading before that answer exists, launch and network
-/// identity, and the `cfg(feature = "ares")` sites not yet converted.
-pub const ARES_BUILD: bool = cfg!(feature = "ares");
-/// Whether this binary includes the supported Phobos extensions. INIs cannot change it.
+/// Whether this binary compiles all the supported Phobos extensions. Whether
+/// Phobos plays in a game is the per-game switch [`ruleset::RuleSet::phobos`],
+/// decided from the game's data by [`phobos_switch`], which a build with this
+/// feature turns on in every game; this gates the `cfg(feature = "phobos")`
+/// sites not yet moved to that switch, and launch and network identity.
 pub const PHOBOS_ENABLED: bool = cfg!(feature = "phobos");
 /// Whether this binary includes supported NPatch behavior. INIs cannot change it.
 pub const NPATCH_ENABLED: bool = cfg!(feature = "npatch");
@@ -288,7 +287,7 @@ pub mod voxel_asset_catalog;
 mod voxel_model_plan;
 pub mod voxel_frame_catalog;
 pub mod warhead_type;
-#[cfg(all(test, tests_rules_o_z, not(feature = "ares")))]
+#[cfg(all(test, tests_rules_o_z))]
 mod warhead_verses_tests;
 pub mod weapon_type;
 

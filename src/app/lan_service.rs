@@ -2190,16 +2190,17 @@ fn receive(state: &mut AppState, incoming: GlobalMessage, now: u32) -> anyhow::R
                     crate::skirmish_launch::LaunchStartPosition::Position(u8::try_from(values[2])?)
                 };
                 choices.team = crate::skirmish_launch::LaunchTeam::from_shell_value(values[3]);
-                // A guest's own team pick keeps to the room's Teams.
-                let refused = state
+                // A guest's own seat and team pick keep to the room's teams.
+                let mut observer = values[0] == -3;
+                let refused = state.match_state.session.admit_network_team(
+                    source,
+                    &mut choices,
+                    &mut observer,
+                );
+                let mut change = state
                     .match_state
                     .session
-                    .admit_network_team(source, &mut choices);
-                let mut change = state.match_state.session.accept_lan_peer_choices(
-                    source,
-                    choices,
-                    values[0] == -3,
-                )?;
+                    .accept_lan_peer_choices(source, choices, observer)?;
                 change.options |= refused;
                 // A VERA room's guest who starts or stops watching changes
                 // rows: the roster, then the options, as WOL's R arm.
@@ -6057,7 +6058,7 @@ fn advance_go(state: &mut AppState, now: u32, service_ok: bool) {
     {
         // A retired failed send is not proof that its final fragment or GO
         // arrived. Fail through the existing setup owner instead of loading.
-        super::shell_network_setup::fail_go_handoff(state);
+        super::shell_network_setup::fail_go_delivery(state);
         return;
     }
     let queued = observation.queued;

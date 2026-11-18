@@ -123,6 +123,27 @@ pub enum MatchSpeedChange {
     Normal,
 }
 
+/// VERA: a shared pause or resume another player asked for, released when
+/// the world reaches it: a pause once the frame it follows has dispatched, a
+/// resume with the frame after it. The app names that player in a line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MatchPauseChange {
+    /// The House of the player who asked.
+    pub house: i8,
+    pub paused: bool,
+}
+
+/// VERA: another player the relay has not heard from for 10 seconds, or
+/// hears again while they are still in the match (relay README "Silence").
+/// The app names them in a line. gamemd holds the match for a silent player
+/// and names them in its Wait_For_Players dialog (called from ProcessNetwork
+/// `0x0064800E`); the relay plays on without them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MatchConnectionChange {
+    pub house: i8,
+    pub responding: bool,
+}
+
 /// This PC's progress against the relay's clock, reported about once a
 /// second. Lagging means frames waited here for `PACE_BACKLOG_MS`; behind
 /// also means two report windows in a row with frames waiting ran fewer
@@ -368,6 +389,9 @@ struct CommittedFrame {
     lost: Vec<i8>,
     // A rate marker after the previous frame.
     speed: Option<MatchSpeedChange>,
+    // Other players' pause markers the world reaches with this frame: a
+    // resume after the previous frame, then a pause after this one.
+    pauses: Vec<MatchPauseChange>,
     // A DESYNC record after the previous frame ends the match here.
     desync: Option<RelayDesync>,
 }
@@ -450,6 +474,11 @@ pub(super) struct SequencedSession {
     // Released when their frame dispatches; the app posts each line.
     lost: Vec<i8>,
     speed_changes: Vec<MatchSpeedChange>,
+    pause_changes: Vec<MatchPauseChange>,
+    // Other players the relay last said it has not heard from lately, and
+    // the changes the app has yet to post.
+    silent: u32,
+    connection_changes: Vec<MatchConnectionChange>,
 }
 
 impl SequencedSession {
@@ -570,6 +599,9 @@ impl SequencedSession {
             command_traces: VecDeque::new(),
             lost: Vec::new(),
             speed_changes: Vec::new(),
+            pause_changes: Vec::new(),
+            silent: 0,
+            connection_changes: Vec::new(),
         }
     }
 
@@ -650,6 +682,16 @@ impl SequencedSession {
     /// The relay's rate changes in dispatched frames.
     pub(super) fn take_speed_changes(&mut self) -> Vec<MatchSpeedChange> {
         std::mem::take(&mut self.speed_changes)
+    }
+
+    /// Other players' shared pauses and resumes the world has reached.
+    pub(super) fn take_pause_changes(&mut self) -> Vec<MatchPauseChange> {
+        std::mem::take(&mut self.pause_changes)
+    }
+
+    /// Other players the relay stopped or started hearing since the last call.
+    pub(super) fn take_connection_changes(&mut self) -> Vec<MatchConnectionChange> {
+        std::mem::take(&mut self.connection_changes)
     }
 
     pub(super) fn set_presentation_hidden(&mut self, hidden: bool) {
@@ -1090,6 +1132,7 @@ impl SequencedSession {
                 self.head_frame = self.head_frame.max(status.head_frame);
                 self.remote_next_sequence = self.remote_next_sequence.max(status.next_seq);
                 self.pause_active_sources &= status.active_sources;
+                self.note_silent(status.silent_sources);
                 if let Some(watch) = &mut self.watch
                     && let Some(sample) = status.watch_sample
                     && watch.samples.back().is_none_or(|last| last.0 < sample.0)
@@ -1226,7 +1269,7 @@ impl SequencedSession {
     }
 
     /// How far this game is behind the relay's head, when that is more than
-    /// half a second of frames: the Catching up status line.
+    /// half a second of frames: the Catching up message row.
     fn catching_up_frames(&self, current_frame: u32) -> Option<u32> {
         let frames = self.head_frame.saturating_sub(current_frame);
         // A watcher's frames come a pull or a second at a time and wait
@@ -1327,6 +1370,12 @@ impl SequencedSession {
                     if let Some(watch) = &mut self.watch {
                         watch.departed |= 1 << source;
                     }
+                    // The relay ends a pause that its last player left with a
+                    // resume in that player's name (`retire`); the player
+                    // leaves in this frame, so nobody asked for it.
+                    self.assembling
+                        .pauses
+                        .retain(|change| change.house != house);
                     if self.refused & 1 << source != 0 {
                         // It already left at its refused batch.
                         continue;
@@ -1417,6 +1466,24 @@ impl SequencedSession {
                     self.pause.paused = paused;
                     self.pause.frame = frame;
                     self.pause.epoch = epoch;
+                    // VERA: another player's marker names them once the world
+                    // reaches it; gamemd's speed line likewise skips its own
+                    // sender (0x004C794B). A watcher names every player.
+                    if let Some(house) = self.houses[usize::from(source)]
+                        && (source != self.local_source || self.watch.is_some())
+                    {
+                        let change = MatchPauseChange { house, paused };
+                        if !paused {
+                            // The world runs on from the next frame.
+                            self.assembling.pauses.push(change);
+                        } else if let Some(last) = self.frames.back_mut() {
+                            // The world stops after `frame`, still queued.
+                            last.pauses.push(change);
+                        } else if !self.restoring {
+                            // `frame` has dispatched: the world is there.
+                            self.pause_changes.push(change);
+                        }
+                    }
                     // The authenticated sequencer only emits these markers
                     // after every active source advertises support. That is
                     // sufficient proof even if all of our status replies were
@@ -1515,6 +1582,30 @@ impl SequencedSession {
             local,
             remote,
         }
+    }
+
+    /// VERA: a player's STATUS names the sources its relay has not heard from
+    /// lately. One newly named is not responding; one no longer named is
+    /// back. A source any report so far showed gone is never named, even by
+    /// a late STATUS, and neither is this game's own player.
+    pub(super) fn note_silent(&mut self, silent: u32) {
+        let active = self.pause_active_sources;
+        let silent = silent & active & !(1 << self.local_source);
+        for (source, house) in self.houses.iter().enumerate() {
+            let bit = 1 << source;
+            let responding = if silent & !self.silent & bit != 0 {
+                false
+            } else if self.silent & !silent & active & bit != 0 {
+                true
+            } else {
+                continue;
+            };
+            if let Some(house) = *house {
+                self.connection_changes
+                    .push(MatchConnectionChange { house, responding });
+            }
+        }
+        self.silent = silent;
     }
 
     /// A watcher's world against the checksums every player reported alike,
@@ -1764,6 +1855,7 @@ impl SequencedSession {
         // A rejoining world replays the past without its lines.
         if !self.restoring {
             self.speed_changes.extend(frame.speed);
+            self.pause_changes.extend(frame.pauses);
         }
         self.current = Some((context, true));
         Ok(NetworkQueuePass::Dispatch)
@@ -1938,6 +2030,7 @@ mod restore_tests {
             started: true,
             feedback: Default::default(),
             watch_sample: None,
+            silent_sources: 0,
         })
     }
 
@@ -2125,6 +2218,7 @@ mod stall_tests {
             started: true,
             feedback: Default::default(),
             watch_sample: None,
+            silent_sources: 0,
         };
         session
             .receive(OrderEvent::Status(status), Instant::now())
@@ -2282,6 +2376,7 @@ mod departure_tests {
             started: false,
             feedback: Default::default(),
             watch_sample: None,
+            silent_sources: 0,
         };
         session
             .receive(OrderEvent::Status(status), Instant::now())
@@ -2525,6 +2620,128 @@ mod pace_tests {
             Err(SequencedError::InvalidTimeline)
         ));
     }
+
+    /// VERA: another player's pause names them with the frame it follows, or
+    /// at once when that frame has dispatched, and a resume with the next
+    /// frame. This game's own pause names nobody, nor does a resume whose
+    /// player leaves in the next frame (the relay's own, for a pause every
+    /// player left).
+    #[test]
+    fn another_players_pause_names_them_when_the_world_reaches_it() {
+        let mut houses = [None; 30];
+        houses[..2].copy_from_slice(&[Some(0), Some(4)]);
+        let mut session = SequencedSession::with_roster(houses, 0, [0; 32], 30);
+        let pause = |sequence, frame, epoch, paused, source| OrderEntry::Pause {
+            sequence,
+            frame,
+            epoch,
+            paused,
+            source,
+        };
+        let frame_end = |sequence, frame| OrderEntry::FrameEnd { sequence, frame };
+        let by = |paused| MatchPauseChange { house: 4, paused };
+        let receive = |session: &mut SequencedSession, entries: Vec<OrderEntry>| {
+            for entry in entries {
+                session
+                    .receive(OrderEvent::Entry(entry), Instant::now())
+                    .unwrap();
+            }
+            session.assemble().unwrap();
+        };
+        receive(
+            &mut session,
+            vec![
+                frame_end(1, 1),
+                pause(2, 1, 1, true, 1),
+                pause(3, 1, 2, false, 1),
+                frame_end(4, 2),
+            ],
+        );
+        let named: Vec<_> = session
+            .frames
+            .iter()
+            .map(|frame| frame.pauses.clone())
+            .collect();
+        assert_eq!(named, [vec![by(true)], vec![by(false)]]);
+        // Both frames have dispatched: the world is already where the next
+        // pause stops it.
+        session.frames.clear();
+        receive(&mut session, vec![pause(5, 2, 3, true, 1)]);
+        assert_eq!(session.take_pause_changes(), [by(true)]);
+        receive(
+            &mut session,
+            vec![
+                pause(6, 2, 4, false, 1),
+                frame_end(7, 3),
+                pause(8, 3, 5, true, 0),
+            ],
+        );
+        let named: Vec<_> = session
+            .frames
+            .iter()
+            .map(|frame| frame.pauses.clone())
+            .collect();
+        assert_eq!(named, [vec![by(false)]]);
+        assert!(session.take_pause_changes().is_empty());
+        // A resume by a player who leaves in the next frame names nobody:
+        // the relay's own resume for a pause every player left, which only
+        // watchers read, comes this way.
+        session.frames.clear();
+        receive(
+            &mut session,
+            vec![
+                pause(9, 3, 6, false, 1),
+                OrderEntry::Departure {
+                    sequence: 10,
+                    frame: 4,
+                    source: 1,
+                    lost: false,
+                },
+                frame_end(11, 4),
+            ],
+        );
+        assert_eq!(session.frames.len(), 1);
+        assert!(session.frames[0].pauses.is_empty());
+    }
+
+    /// VERA: a player the relay stops hearing is named once, and once more
+    /// when it hears them again; one who left while silent is not back, nor
+    /// named again by a late STATUS, and this game's own player is never
+    /// named.
+    #[test]
+    fn another_player_the_relay_stops_hearing_is_named_until_heard_again() {
+        use vera20k_relay_protocol::OrderStatus;
+        let mut houses = [None; 30];
+        houses[..3].copy_from_slice(&[Some(0), Some(4), Some(7)]);
+        let mut session = SequencedSession::with_roster(houses, 0, [0; 32], 30);
+        let status = |session: &mut SequencedSession, silent_sources: u32, active_sources: u32| {
+            let status = OrderStatus {
+                head_frame: 0,
+                oldest_seq: 1,
+                next_seq: 1,
+                active_sources,
+                tick_hz: 30,
+                start_delay_ms: 0,
+                started: true,
+                feedback: Default::default(),
+                watch_sample: None,
+                silent_sources,
+            };
+            session
+                .receive(OrderEvent::Status(status), Instant::now())
+                .unwrap();
+            session.take_connection_changes()
+        };
+        let named = |house, responding| MatchConnectionChange { house, responding };
+        assert_eq!(status(&mut session, 0b011, 0b111), [named(4, false)]);
+        assert!(status(&mut session, 0b011, 0b111).is_empty());
+        assert_eq!(
+            status(&mut session, 0b100, 0b111),
+            [named(4, true), named(7, false)]
+        );
+        assert!(status(&mut session, 0, 0b011).is_empty());
+        assert!(status(&mut session, 0b100, 0b111).is_empty());
+    }
 }
 
 #[cfg(all(test, tests_net))]
@@ -2632,6 +2849,7 @@ mod watch_tests {
                 started: true,
                 feedback: Default::default(),
                 watch_sample: Some(sample),
+                silent_sources: 0,
             })
         };
         session.receive(status((240, 7)), Instant::now()).unwrap();

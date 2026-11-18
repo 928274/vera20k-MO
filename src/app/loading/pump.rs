@@ -461,6 +461,7 @@ impl LoadingRequest {
                         == Some(
                             crate::map::source::effective_network_map_digest(
                                 &loaded.map_data().ini,
+                                false,
                                 false
                             )
                             .as_str()
@@ -558,7 +559,7 @@ impl LoadingRequest {
             map_additions,
             progress,
         )?;
-        initial.retain_process_state(mapgen_retention, resident);
+        initial.retain_process_state(mapgen_retention, resident, self.startup().session_mode());
         self.prepare_initial(initial)
     }
 
@@ -1515,9 +1516,7 @@ fn lease_loading_assets_and_play_loading_theme(
     // Ares683C70 needs the selected map INI. When the Rules are read the Ares
     // way its one playback occurs at the consuming Selected->Prepared
     // transition, before the Rules prefix reset.
-    let ares = process_assets
-        .native_rules()
-        .is_some_and(|owner| owner.reads_ares_way());
+    let ares = process_assets.reads_ares_way();
     if !ares && let Some(assets) = audio_service_asset_manager(process_assets, Some(&session)) {
         let _ = audio.play_theme("LOADING", assets, now_ms);
     }
@@ -2564,9 +2563,7 @@ fn prepare_loading_session(
                 // an immutable request, while retained catalog fields update.
                 process_assets.reload_campaigns(assets);
             }
-            let ares = process_assets
-                .native_rules()
-                .is_some_and(|owner| owner.reads_ares_way());
+            let ares = process_assets.reads_ares_way();
             if ares && let Some(native) = native.as_mut() {
                 let early = process_assets
                     .native_rules()
@@ -2976,7 +2973,9 @@ pub(crate) fn ensure_native_loading_atlas(state: &mut AppState) -> anyhow::Resul
         // Original Full_Init686D46 opens MISSIONMD for the current filename.
         // Missing keys retain SetDefaults' zero/empty values. Missing metadata
         // suppresses DrawLoading552D60 without inventing a generic screen.
-        if let Ok(selected) = crate::rules::retail_sources::select_ini(assets, "MISSIONMD.INI") {
+        if let Ok(selected) =
+            crate::rules::retail_sources::select_ini(assets, assets.ini_roots().mission())
+        {
             log::info!(
                 "Campaign MISSION source: {}",
                 serde_json::json!(selected.source)
@@ -2996,10 +2995,7 @@ pub(crate) fn ensure_native_loading_atlas(state: &mut AppState) -> anyhow::Resul
         // 0x642B30 picks AlliedLoad/SovietLoad by Campaign.CD; no scheme of
         // that name keeps the stock colour. Only when the Rules are read the
         // Ares way.
-        let ares = state
-            .process_assets
-            .native_rules()
-            .is_some_and(|owner| owner.reads_ares_way());
+        let ares = state.process_assets.reads_ares_way();
         let ares_text_rgb = if ares {
             state.rules().and_then(|rules| {
                 let schemes = &rules.color_schemes;
@@ -3593,7 +3589,8 @@ pub(super) fn loading_art_variant_from_launch_country(
 /// answers each loading row's insignia from that row's own HouseType index, so
 /// an added Country draws its `File.Flag` where the stock chain at `0x4E3579`
 /// has no entry. An observer row is not a Country index and keeps the stock
-/// `-3` insignia; a stock build's rules return `None` and keep the table.
+/// `-3` insignia; a game without Ares (`RuleSet::ares`) answers `None` and
+/// keeps the table.
 fn loading_row_insignia(
     rules: Option<&crate::rules::ruleset::RuleSet>,
     variant: Option<LoadingArtVariant>,

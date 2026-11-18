@@ -802,6 +802,41 @@ fn ares_power_plants_fall_back_to_the_first_candidate_without_a_draw() {
     assert_eq!(sim.scenario_rng.logical_state(), before, "no draw");
 }
 
+/// Phobos `[AI] EnablePowerSurplus=yes` makes House+0x160B4 `PowerSurplus`,
+/// which the splice takes off the output (`0x004FE6FC..0x004FE71D`, `JLE`
+/// past the splice): drain 100 plus the radar's 50 fits under 200 less 50
+/// exactly, but not under 200 less 51, so that house builds a plant first.
+/// Without the switch the stock `PowerSurplus=` changes nothing.
+#[test]
+fn phobos_spare_power_puts_a_power_plant_first() {
+    let (mut sim, owner) = computer_house(true);
+    let mut power = PowerState::default();
+    power.set_total_output_for_test(200);
+    power.set_total_drain_for_test(100);
+    sim.power_states.map_mut_for_test().insert(owner, power);
+    for (ai, plant) in [
+        ("PowerSurplus=51", None),
+        ("EnablePowerSurplus=yes\nPowerSurplus=50", None),
+        ("EnablePowerSurplus=yes\nPowerSurplus=51", Some("GAPOWR")),
+    ] {
+        let rules = RuleSet::from_ini(&IniFile::from_str(&format!(
+            "[BuildingTypes]\n0=GAPOWR\n1=RADAR\n[GAPOWR]\nPower=200\n[RADAR]\nPower=-50\n\
+             [General]\nGDIPowerPlant=GAPOWR\n[AI]\n{ai}\n"
+        )))
+        .expect("spare power rules");
+        assert_eq!(
+            rules.phobos(),
+            ai.starts_with("Enable") || crate::rules::PHOBOS_ENABLED
+        );
+        let radar = rules.object("RADAR").expect("consumer type");
+        assert_eq!(
+            super::power_plant_to_splice(&mut sim, &rules, owner, radar),
+            plant.and_then(|name| rules.building_type_index(name)),
+            "{ai:?}"
+        );
+    }
+}
+
 /// Retail rules through the production layers: no retail country sets
 /// `AI.PowerPlants=`, so with Ares a Soviet computer house is offered
 /// `[NodRegularPower, NodAdvancedPower]`, NAPOWR and NANRCT
@@ -850,7 +885,6 @@ fn ares_retail_soviet_computer_draws_between_both_nod_plants() {
 /// One Allied-style country with `AI.PowerPlants=PLANT,UPGRADE`, a built
 /// Construction Yard and one bare host plant. The two VERA20K opt-in flags
 /// are set directly here; their INI parsing has its own test in `ruleset.rs`.
-#[cfg(feature = "ares")]
 fn ares_power_plant_scene(aggressive: bool, fix: bool) -> (RuleSet, Simulation, InternedId) {
     let mut rules = RuleSet::from_ini(&crate::sim::arena_fixture::clear_ground_ini(
         "[Countries]\n0=Greece\n[Greece]\nAI.PowerPlants=PLANT,UPGRADE\n\
@@ -891,9 +925,9 @@ fn ares_power_plant_scene(aggressive: bool, fix: bool) -> (RuleSet, Simulation, 
 /// `0x1001DDC0`: both candidates pass, so the native uniform draw decides.
 /// Without the opt-in boost an upgrade gets exactly its share of the splices,
 /// as in the original game.
-#[cfg(feature = "ares")]
 #[test]
 fn ares_power_plants_draw_uniformly_by_default() {
+    let _ares = crate::rules::ares_switch::read_ares_way(true);
     let (rules, mut sim, owner) = ares_power_plant_scene(false, false);
     let radar = rules.object("RADAR").expect("consumer type");
     for (answer, expected) in [(0, "PLANT"), (1, "UPGRADE")] {
@@ -916,9 +950,9 @@ fn ares_power_plants_draw_uniformly_by_default() {
 /// `[AI] VERA20K.AggressivePowerUpgrades=yes`: the installable upgrade wins
 /// even when the native draw would have picked the plain plant. The draw
 /// still runs, so the Scenario RNG cadence is unchanged.
-#[cfg(feature = "ares")]
 #[test]
 fn the_aggressive_power_upgrades_key_prefers_an_upgrade() {
+    let _ares = crate::rules::ares_switch::read_ares_way(true);
     let (rules, mut sim, owner) = ares_power_plant_scene(true, false);
     sim.scenario_rng = SimRng::answering(0, 1, 0);
     let mut expected_rng = sim.scenario_rng.clone();
@@ -938,9 +972,9 @@ fn the_aggressive_power_upgrades_key_prefers_an_upgrade() {
 /// The no-candidate fallback (`0x1001DEA2..0x1001DEC6`) must skip an upgrade
 /// when the house owns no host: splicing it would again produce a node that
 /// can never be placed.
-#[cfg(feature = "ares")]
 #[test]
 fn ares_power_plant_fallback_skips_an_upgrade_without_a_host() {
+    let _ares = crate::rules::ares_switch::read_ares_way(true);
     let rules = RuleSet::from_ini(&IniFile::from_str(
         "[Countries]\n0=Greece\n[Greece]\nAI.PowerPlants=UPGRADE,PLANT\n\
          [BuildingTypes]\n0=UPGRADE\n1=PLANT\n2=RADAR\n\
@@ -972,9 +1006,9 @@ fn ares_power_plant_fallback_skips_an_upgrade_without_a_host() {
 /// With both keys off, a bare host with power to spare gets no upgrade: the
 /// original game's splice waits for a shortage, and the MO-only accelerated
 /// splice is disabled.
-#[cfg(feature = "ares")]
 #[test]
 fn no_upgrade_is_spliced_without_a_shortage_by_default() {
+    let _ares = crate::rules::ares_switch::read_ares_way(true);
     let (rules, mut sim, owner) = ares_power_plant_scene(false, false);
     let plant = rules.object("PLANT").expect("host plant type");
     assert_eq!(
@@ -992,9 +1026,9 @@ fn no_upgrade_is_spliced_without_a_shortage_by_default() {
 /// With the boost on, the turbine's own host node is the moment to install
 /// it. A bare host with power to spare would otherwise never see a turbine:
 /// the first turbine removes the shortage that the stock splice waits for.
-#[cfg(feature = "ares")]
 #[test]
 fn a_host_power_plant_node_splices_an_upgrade_without_a_power_shortage() {
+    let _ares = crate::rules::ares_switch::read_ares_way(true);
     let (rules, mut sim, owner) = ares_power_plant_scene(true, false);
     let plant = rules.object("PLANT").expect("host plant type");
     let upgrade = rules.building_type_index("UPGRADE").expect("upgrade index");
@@ -1017,9 +1051,9 @@ fn a_host_power_plant_node_splices_an_upgrade_without_a_power_shortage() {
 
 /// One open upgrade node at a time: without this guard every revisit of a
 /// plant node would push another upgrade in front of it forever.
-#[cfg(feature = "ares")]
 #[test]
 fn an_open_upgrade_node_blocks_a_second_splice() {
+    let _ares = crate::rules::ares_switch::read_ares_way(true);
     let (rules, mut sim, owner) = ares_power_plant_scene(true, false);
     let upgrade = rules.building_type_index("UPGRADE").expect("upgrade index");
     sim.houses
@@ -1038,9 +1072,9 @@ fn an_open_upgrade_node_blocks_a_second_splice() {
 
 /// End-to-end: `AI_Choose_Building` meets a plant node and splices the
 /// turbine in front of it, leaving the choice open for the next tick.
-#[cfg(feature = "ares")]
 #[test]
 fn choose_building_splices_an_upgrade_ahead_of_the_host_plant() {
+    let _ares = crate::rules::ares_switch::read_ares_way(true);
     let (rules, mut sim, owner) = ares_power_plant_scene(true, false);
     let plant = rules.building_type_index("PLANT").expect("plant index");
     let upgrade = rules.building_type_index("UPGRADE").expect("upgrade index");

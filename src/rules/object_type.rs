@@ -101,6 +101,47 @@ impl VhpScan {
     }
 }
 
+/// Phobos `TargetZoneScanType=` (TechnoTypeExt, default `same`): what a
+/// scanner does with a candidate outside its movement zone in
+/// `Greatest_Threat`'s walk over every object, once Phobos plays
+/// (`crate::sim::combat::greatest_threat`'s zone gate).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TargetZoneScanType {
+    /// Refuse it.
+    #[default]
+    Same,
+    /// Keep it.
+    Any,
+    /// Keep it when the selected weapon reaches it from the passable cell
+    /// found nearest it.
+    InRange,
+}
+
+impl TargetZoneScanType {
+    /// Phobos' enum reader (`detail::read<TargetZoneScanType>`,
+    /// `src/Utilities/TemplateDef.h`): `INI_EX::ReadString` into its
+    /// 2048-byte buffer, then `_strcmpi` of the whole value with `same`, `any`
+    /// and `inrange`. Other text keeps the value, which Phobos logs
+    /// (`Debug::INIParseFailed`), and each rules pass supplies its prior value.
+    fn read_ini(section: &IniSection) -> Self {
+        section.read_string_with("TargetZoneScanType", 2048, Self::Same, |current, value| {
+            if value.eq_ignore_ascii_case("same") {
+                Self::Same
+            } else if value.eq_ignore_ascii_case("any") {
+                Self::Any
+            } else if value.eq_ignore_ascii_case("inrange") {
+                Self::InRange
+            } else {
+                log::warn!(
+                    "[{}] TargetZoneScanType={value}: expected same, any or inrange",
+                    section.name
+                );
+                current
+            }
+        })
+    }
+}
+
 /// Sidebar/build-queue classification for buildable buildings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuildCategory {
@@ -808,8 +849,9 @@ pub struct ObjectType {
     /// `[GlobalControls] AllowParallelAIQueues=` is on, a computer house that
     /// already has a factory building for this type's category does not start
     /// another one for this type.
-    #[cfg(feature = "phobos")]
     pub forbid_parallel_ai_queues: bool,
+    /// Phobos `TargetZoneScanType=` ([`TargetZoneScanType`]).
+    pub target_zone_scan_type: TargetZoneScanType,
     /// `[BuildingTypes] AIPlanningCount=` — the NPSE count of plan nodes a
     /// computer house's base plan gives this building. The techno reader
     /// extension chain reads it with the current field as its default and
@@ -3787,24 +3829,38 @@ impl ObjectType {
         self.vehicle_thief = flags.vehicle_thief.unwrap_or(self.vehicle_thief);
     }
 
-    /// TechnoType GetPipMax716290, virtual+74. Signed configuration capacity;
-    /// callers own allocation/fill bounds. Uses the live bound base weapon0,
-    /// not a capture manager's retained admission capacity or elite weapon.
+    /// GetPipMax, virtual+74: BuildingType's override (0x0045ECE0) for a
+    /// Building, else TechnoType's (0x00716290). Signed configuration
+    /// capacity; callers own allocation/fill bounds. Uses the live bound base
+    /// weapon0, not a capture manager's retained admission capacity or elite
+    /// weapon.
     pub fn pip_max(&self, rules: &crate::rules::ruleset::RuleSet) -> i32 {
-        // Ares 3.0 BuildingTypeClass_GetMaxPips 10010150 (hook 0x45ECE0): a
-        // building on a custom foundation answers its `Foundation.X` width
-        // for every PipScale. (VERA lacks the stock BuildingType override
-        // 0x0045ECE0 itself, which sizes Tiberium and Power pips by the
-        // foundation width; buildings take the TechnoType answer below.)
-        // Only a Rules read the Ares way installs a custom foundation.
-        if self.category == ObjectCategory::Building
-            && matches!(
-                self.foundation,
-                crate::rules::foundation::Foundation::Custom(_)
-            )
-        {
-            return i32::from(self.foundation.dimensions().0);
+        // BuildingTypeClass::GetPipMax 0x0045ECE0: the foundation width
+        // (table 0x008192B8) times 60, divided by 8 toward zero
+        // (0x0045ECED..0x0045ED02), caps Tiberium pips at `Storage=`, or a
+        // Weeder's at `[General] WeedCapacity=`, a negative one answering 0;
+        // Power answers the cap, every other scale TechnoType's. Ares
+        // BuildingTypeClass_GetMaxPips (Ares.dll 10010150, hook 0x45ECE0)
+        // only loads a custom foundation's `Foundation.X` as that width and
+        // resumes at 0x0045ECED. Stock buildings draw no Tiberium pips
+        // (DrawPipScalePips 0x00709B61), so the Tiberium arm shows only with
+        // Ares' storage pips (docs/ares-tiberium.md).
+        if self.category == ObjectCategory::Building {
+            let cap = i32::from(self.foundation.dimensions().0) * 60 / 8;
+            match self.pip_scale {
+                PipScale::Tiberium => {
+                    let held = if self.weeder {
+                        rules.general.weed_capacity
+                    } else {
+                        self.storage
+                    };
+                    return if held < 0 { 0 } else { held.min(cap) };
+                }
+                PipScale::Power => return cap,
+                _ => {}
+            }
         }
+        // TechnoTypeClass::GetPipMax 0x00716290.
         match self.pip_scale {
             PipScale::None => 0,
             PipScale::Ammo => self.ammo,
@@ -4352,7 +4408,7 @@ impl ObjectType {
         // missing or shorter Nums entry means one passenger, and a count that
         // does not parse or is non-positive contributes no passenger. MO ships
         // these in pairs, often alongside NoManualUnload/NoManualEnter.
-        let initial_payload = if crate::rules::ARES_BUILD {
+        let initial_payload = if crate::rules::ares_switch::ares_way() {
             let types = section
                 .read_list("InitialPayload.Types", 0x800)
                 .unwrap_or_default();
@@ -4738,8 +4794,13 @@ impl ObjectType {
             } else {
                 i32::MAX
             },
-            #[cfg(feature = "phobos")]
-            forbid_parallel_ai_queues: section.read_bool("ForbidParallelAIQueues", false),
+            forbid_parallel_ai_queues: crate::rules::phobos_switch::phobos_read(|| {
+                section.read_bool("ForbidParallelAIQueues", false)
+            }),
+            // TechnoTypeExt::ExtData::LoadFromINIFile (src/Ext/TechnoType/Body.cpp).
+            target_zone_scan_type: crate::rules::phobos_switch::phobos_read(|| {
+                TargetZoneScanType::read_ini(section)
+            }),
             ai_planning_count: if crate::rules::NPATCH_ENABLED {
                 building_int(section, category, "AIPlanningCount") & 0xFF
             } else {
@@ -5247,15 +5308,15 @@ impl ObjectType {
             nod_barracks,
             yuri_barracks,
             cloning: section.read_bool("Cloning", false),
-            cloning_facility: crate::rules::ARES_BUILD
+            cloning_facility: crate::rules::ares_switch::ares_way()
                 && category == ObjectCategory::Building
                 && section.read_bool("CloningFacility", false),
-            cloneable: if crate::rules::ARES_BUILD {
+            cloneable: if crate::rules::ares_switch::ares_way() {
                 section.read_bool("Cloneable", true)
             } else {
                 true
             },
-            cloned_as: if crate::rules::ARES_BUILD {
+            cloned_as: if crate::rules::ares_switch::ares_way() {
                 section.read_name("ClonedAs", 0x20).map(str::to_owned)
             } else {
                 None
@@ -5308,9 +5369,9 @@ impl ObjectType {
             size_limit: section.read_double("SizeLimit", 0.0),
             open_topped: section.read_bool("OpenTopped", false),
             initial_payload,
-            no_manual_unload: crate::rules::ARES_BUILD
+            no_manual_unload: crate::rules::ares_switch::ares_way()
                 && section.read_bool("NoManualUnload", false),
-            no_manual_enter: crate::rules::ARES_BUILD
+            no_manual_enter: crate::rules::ares_switch::ares_way()
                 && section.read_bool("NoManualEnter", false),
             gunner: false, // Constructor byte; retained reader binds GunnerTurrets::is_gunner.
             ifv_mode: section.read_int("IFVMode", 0),
@@ -5759,6 +5820,10 @@ mod ammo_pip_tests;
 #[cfg(all(test, tests_rules_o_z))]
 #[path = "absorber_pip_tests.rs"]
 mod absorber_pip_tests;
+
+#[cfg(all(test, tests_rules_o_z))]
+#[path = "building_pip_tests.rs"]
+mod building_pip_tests;
 
 #[cfg(all(test, tests_rules_o_z))]
 mod tests {
@@ -7182,8 +7247,8 @@ mod tests {
     }
     /// `0x00713C37`: ReadString 0x80, then each `strtok` token as written to
     /// `ParticleSystemTypeClass::FindOrAllocate` (`0x00644890`).
-    // Ares reads these lists Find-only through ParseList (Misc/Bugfixes.Buffer.cpp).
-    #[cfg(not(feature = "ares"))]
+    // Read the stock way: Ares reads these lists Find-only through ParseList
+    // (Misc/Bugfixes.Buffer.cpp).
     #[test]
     fn techno_type_parses_damage_particle_systems_csv() {
         let rules = rules(
@@ -7228,10 +7293,7 @@ mod tests {
             sparks("[CYB]\nStrength=90\n[VCYB]\nStrength=90\n"),
             (true, false)
         );
-        // A build with the `ares` feature reads every scope the Ares way.
-        if !cfg!(feature = "ares") {
-            assert_eq!(sparks(""), (false, false));
-        }
+        assert_eq!(sparks(""), (false, false));
         let _ares = crate::rules::ares_switch::read_ares_way(true);
         assert_eq!(sparks(""), (true, false));
     }

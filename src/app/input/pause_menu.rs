@@ -214,6 +214,7 @@ fn run_options_page(state: &mut AppState) {
             event,
             LauncherOptionsEvent::ZoomSelected(_)
                 | LauncherOptionsEvent::SidebarSelected(_)
+                | LauncherOptionsEvent::SidebarColumnsSelected(_)
                 | LauncherOptionsEvent::OriginalShapeChanged(_)
                 | LauncherOptionsEvent::HdRadarChanged(_)
                 | LauncherOptionsEvent::SmoothSidebarChanged(_)
@@ -302,6 +303,8 @@ pub(crate) struct MultiplayerPauseControl {
     /// [`crate::i18n`] labels, resolved where they are drawn.
     pub(crate) caption: &'static str,
     pub(crate) enabled: bool,
+    /// The pause's notice, a message row while it lasts
+    /// (`messages::show_status_notices`).
     pub(crate) status: Option<&'static str>,
 }
 

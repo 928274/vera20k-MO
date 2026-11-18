@@ -35,6 +35,7 @@ use crate::rules::object_type::{
 };
 use crate::rules::particle_system_type::{ParticleSystemType, ParticleSystemTypeId};
 use crate::rules::particle_type::{ParticleType, ParticleTypeId};
+use crate::rules::phobos_switch::phobos_read;
 use crate::rules::prerequisite::{Prerequisite, PrerequisiteGroup};
 use crate::rules::projectile_type::ProjectileType;
 use crate::rules::radar_event_config::RadarEventConfig;
@@ -824,6 +825,11 @@ pub struct GeneralRules {
     /// (`0x00665711`), read by ReadInteger at `0x00671981` without a clamp.
     /// The radar combat flash's toggle period.
     pub flash_frame_time: i32,
+    /// `[General] WeedCapacity=`, Rules `+0x17D0`: the constructor's 0
+    /// (`0x006676FD`), read by ReadInteger at `0x00671962` without a clamp.
+    /// A Weeder building's Tiberium pip maximum
+    /// (`BuildingTypeClass::GetPipMax @ 0x0045ECE0`).
+    pub weed_capacity: i32,
     /// `[General] RadarCombatFlashTime=`, Rules `+0x8C`: the constructor's 21
     /// (`0x0066571B`), read by ReadInteger at `0x006719A1` without a clamp.
     /// ReceiveDamage starts each Techno's radar combat flash with it.
@@ -2076,21 +2082,17 @@ pub struct GeneralRules {
     /// Phobos `[General] AIFireSale=` (default true): whether a computer
     /// house on its last legs (`0x004FD879..0x004FD904`, no live
     /// `Factory=` building) sells every building.
-    #[cfg(feature = "phobos")]
     pub ai_fire_sale: bool,
     /// Phobos `[General] AIFireSaleDelay=` in frames (default 0): the first
     /// last-legs tick starts this timer instead of selling; the sale waits
     /// until it completes. Non-positive sells at once.
-    #[cfg(feature = "phobos")]
     pub ai_fire_sale_delay: i32,
     /// Phobos `[General] AIAllToHunt=` (default true): whether the same
     /// last-legs block sends every techno to hunt.
-    #[cfg(feature = "phobos")]
     pub ai_all_to_hunt: bool,
     /// Phobos `[General] GatherWhenMCVDeploy=` (default true): whether a
     /// computer house's yard deploy runs
     /// `HouseClass::MoveGroundForcesToBase @ 0x0050C920` (`0x00739926`).
-    #[cfg(feature = "phobos")]
     pub gather_when_mcv_deploy: bool,
     /// Phobos `[AudioVisual] TimerBlinkColorScheme=`: the runtime ColorScheme
     /// a finished superweapon timer blinks in, `[Colors]` entry `R / 2`, or -1
@@ -2319,6 +2321,19 @@ pub struct GeneralRules {
     /// ([AI] BlockagePathDelay). Native signed dword, in frames directly.
     /// When this timer expires, the unit re-pathfinds with urgency=2 (scatter).
     pub blockage_path_delay_ticks: i32,
+    /// `Rules+0x1134`, `[AI] PowerSurplus=`: `RulesClass::ReadAI` reads it
+    /// through `CCINIClass::ReadInteger 0x005276D0` (`0x00673A8B..0x00673AB0`)
+    /// over the constructor's 50 (`0x00666DDC`). Stock code never uses it;
+    /// Phobos' `EnablePowerSurplus` makes it the AI's spare power
+    /// (`PowerState::power_surplus`).
+    pub power_surplus: i32,
+    /// Phobos `[AI] EnablePowerSurplus=` (`RulesExt`, default false): computer
+    /// houses plan to keep `PowerSurplus` power spare.
+    pub enable_power_surplus: bool,
+    /// Phobos `[AI] PowerSurplus.ScaleToDrainAmount=` (`RulesExt`, default 0):
+    /// above 0, the spare power is `PowerSurplus` times the house's drain over
+    /// this amount.
+    pub power_surplus_scale_to_drain_amount: i32,
     /// [General] AIAutoDeployFrameDelay, native signed DynamicVector at
     /// Rules+E2C (data+E30), indexed Hard/Normal/Easy by Infantry52155C.
     /// Constructor666932..666961 leaves it empty; stock15,25,100 is authored.
@@ -2891,6 +2906,7 @@ impl Default for GeneralRules {
             max_waypoint_path_length: 15,
             talk_bubble_time: 300,
             flash_frame_time: 7,
+            weed_capacity: 0,
             radar_combat_flash_time: 21,
             detail: DetailRules::default(),
             pose_dir: 0,
@@ -3203,13 +3219,9 @@ impl Default for GeneralRules {
             building_production_queue: false,
             #[cfg(feature = "phobos")]
             building_type_selectable: false,
-            #[cfg(feature = "phobos")]
             ai_fire_sale: true,
-            #[cfg(feature = "phobos")]
             ai_fire_sale_delay: 0,
-            #[cfg(feature = "phobos")]
             ai_all_to_hunt: true,
-            #[cfg(feature = "phobos")]
             gather_when_mcv_deploy: true,
             #[cfg(feature = "phobos")]
             timer_blink_color_scheme: 5,
@@ -3276,6 +3288,9 @@ impl Default for GeneralRules {
             path_delay: 0.016,
             // BlockagePathDelay=60 frames (directly in frames, not minutes).
             blockage_path_delay_ticks: 60,
+            power_surplus: 50,
+            enable_power_surplus: false,
+            power_surplus_scale_to_drain_amount: 0,
             ai_auto_deploy_frame_delay: Vec::new(),
             #[cfg(feature = "phobos")]
             infantry_auto_deploy: false,
@@ -4006,6 +4021,20 @@ impl GeneralRules {
         let path_delay = ai.read_double("PathDelay", defaults.path_delay);
         let blockage_path_delay_ticks =
             ai.read_int("BlockagePathDelay", defaults.blockage_path_delay_ticks);
+        let power_surplus = ai.read_int("PowerSurplus", defaults.power_surplus);
+        // Phobos `RulesExt::ExtData::LoadBeforeTypeData` (src/Ext/Rules/Body.cpp
+        // at c783774a) reads these from hook 0x00679A15 in
+        // `RulesClass::ReadTypeData`, which `Process` runs for every Rules pass.
+        // Its `Read<bool, 1>` gives the stock reader's verdict, except that a
+        // first comma piece of 128 bytes or more keeps the value.
+        let enable_power_surplus =
+            phobos_read(|| ai.read_bool("EnablePowerSurplus", defaults.enable_power_surplus));
+        let power_surplus_scale_to_drain_amount = phobos_read(|| {
+            ai.read_phobos_int(
+                "PowerSurplus.ScaleToDrainAmount",
+                defaults.power_surplus_scale_to_drain_amount,
+            )
+        });
         // ReadAudioVisual66B673..66B74E belongs to the retained Process
         // owner; a final merged INI cannot reproduce omitted-key defaults.
         let extra_unit_light = defaults.extra_unit_light;
@@ -4041,6 +4070,9 @@ impl GeneralRules {
                 path_delay,
                 attack_delay,
                 blockage_path_delay_ticks,
+                power_surplus,
+                enable_power_surplus,
+                power_surplus_scale_to_drain_amount,
                 bomb_ticking_sound,
                 bomb_attach_sound,
                 ally_reveal,
@@ -4088,6 +4120,7 @@ impl GeneralRules {
             max_waypoint_path_length: general
                 .read_int("MaxWaypointPathLength", defaults.max_waypoint_path_length),
             flash_frame_time: general.read_int("FlashFrameTime", defaults.flash_frame_time),
+            weed_capacity: general.read_int("WeedCapacity", defaults.weed_capacity),
             radar_combat_flash_time: general
                 .read_int("RadarCombatFlashTime", defaults.radar_combat_flash_time),
             scroll_multiplier: audio_visual
@@ -4560,14 +4593,10 @@ impl GeneralRules {
             #[cfg(feature = "phobos")]
             building_type_selectable: crate::rules::ares_switch::ares_way()
                 && general.read_bool("BuildingTypeSelectable", false),
-            #[cfg(feature = "phobos")]
-            ai_fire_sale: general.read_bool("AIFireSale", true),
-            #[cfg(feature = "phobos")]
-            ai_fire_sale_delay: general.read_int("AIFireSaleDelay", 0),
-            #[cfg(feature = "phobos")]
-            ai_all_to_hunt: general.read_bool("AIAllToHunt", true),
-            #[cfg(feature = "phobos")]
-            gather_when_mcv_deploy: general.read_bool("GatherWhenMCVDeploy", true),
+            ai_fire_sale: phobos_read(|| general.read_bool("AIFireSale", true)),
+            ai_fire_sale_delay: phobos_read(|| general.read_int("AIFireSaleDelay", 0)),
+            ai_all_to_hunt: phobos_read(|| general.read_bool("AIAllToHunt", true)),
+            gather_when_mcv_deploy: phobos_read(|| general.read_bool("GatherWhenMCVDeploy", true)),
             harvester_too_far_distance: general.read_int("HarvesterTooFarDistance", 5),
             approach_target_reset_multiplier: general.read_int("ApproachTargetResetMultiplier", 1),
             chrono_harv_too_far_distance: general.read_int("ChronoHarvTooFarDistance", 50),
@@ -4666,6 +4695,9 @@ impl GeneralRules {
             large_visceroid: None,
             path_delay,
             blockage_path_delay_ticks,
+            power_surplus,
+            enable_power_surplus,
+            power_surplus_scale_to_drain_amount,
             // ReadGeneral670235..670267 uses the same475D70 signed vector
             // reader as the existing Recalc difficulty tables below.
             ai_auto_deploy_frame_delay: general
@@ -5198,6 +5230,9 @@ pub struct RuleSet {
     /// Whether Ares plays in this game, decided once from its Rules layers
     /// and `ares.mix` by `rules::ares_switch`. Read through [`Self::ares`].
     ares: bool,
+    /// Whether Phobos plays in this game, decided once from its Rules
+    /// projection by `rules::phobos_switch`. Read through [`Self::phobos`].
+    phobos: bool,
     /// Whether its Rules were read the Ares way (`ares_switch::ares_way`).
     /// Read through [`Self::reads_ares_way`].
     reads_ares_way: bool,
@@ -5222,7 +5257,6 @@ pub struct RuleSet {
         BTreeMap<String, crate::rules::superweapon_type::PhobosSuperWeaponAvailability>,
     /// Phobos `[GlobalControls] AllowParallelAIQueues=` and the
     /// `ForbidParallelAIQueues.*` category switches.
-    #[cfg(feature = "phobos")]
     parallel_ai_queues: crate::rules::phobos_parallel_ai_queues::ParallelAiQueueRules,
     /// Rules-driven terrain land-type semantics keyed by TMP land byte.
     pub terrain_rules: TerrainRules,
@@ -5632,8 +5666,9 @@ impl RuleSet {
 
     /// Project processed Rules into the game's rules, the Ares way when their
     /// registry reads that way (`ares_switch::ares_way`). The projection's
-    /// reader lookups are recorded, so the per-game Ares switch it stores
-    /// ([`Self::ares`]) also counts the keys only these readers read.
+    /// reader lookups are recorded, so the per-game Ares and Phobos switches
+    /// it stores ([`Self::ares`], [`Self::phobos`]) also count the keys only
+    /// these readers read.
     pub fn from_processed_rules(processed: &ProcessedRulesLayers) -> Result<Self, RulesError> {
         let _ares_way = crate::rules::ares_switch::read_ares_way(
             processed.native_registry_state().reads_ares_way(),
@@ -5641,6 +5676,7 @@ impl RuleSet {
         let (rules, reads) = crate::rules::ares_switch::record(|| Self::project(processed));
         let mut rules = rules?;
         rules.ares = processed.ares_inputs().decide(&reads);
+        rules.phobos = crate::rules::phobos_switch::decide(&reads);
         rules.reads_ares_way = processed.native_registry_state().reads_ares_way();
         Ok(rules)
     }
@@ -7563,6 +7599,7 @@ impl RuleSet {
             emp_sparkles: None,
             // Decided by `from_processed_rules` once its readers ran.
             ares: false,
+            phobos: false,
             reads_ares_way: false,
             ares_global_controls: processed.ares_global_controls().clone(),
             ares_mouse_cursors: processed.ares_mouse_cursors().clone(),
@@ -7573,7 +7610,6 @@ impl RuleSet {
             ares_super_weapon_metadata: BTreeMap::new(),
             #[cfg(feature = "phobos")]
             phobos_super_weapon_metadata: BTreeMap::new(),
-            #[cfg(feature = "phobos")]
             parallel_ai_queues:
                 crate::rules::phobos_parallel_ai_queues::ParallelAiQueueRules::from_ini(ini),
             ares_prerequisite_alternates: HashSet::new(),
@@ -8499,6 +8535,15 @@ impl RuleSet {
         self.ares
     }
 
+    /// Whether Phobos plays in this game: its Rules layers or map hold a key
+    /// of a Phobos piece that runs in every build, or the build has the
+    /// `phobos` feature (`rules::phobos_switch`). Sim and presentation read
+    /// this one answer.
+    #[inline]
+    pub fn phobos(&self) -> bool {
+        self.phobos
+    }
+
     /// Whether this game's Rules were read the Ares way
     /// (`ares_switch::ares_way`). The game's readers after the projection (its
     /// fixed ART, the asset closures) open the same mode with
@@ -8515,9 +8560,7 @@ impl RuleSet {
     /// misread such data (a handler type's absent PreDependent). So they
     /// follow how the Rules were read, not [`Self::ares`] alone. A game Ares
     /// turned on in by its keys, read the stock way, keeps the stock form of
-    /// these until loading reads its Rules the Ares way; a build with the
-    /// `ares` feature reads every game the Ares way and keeps their Ares form
-    /// in every game, as before the switch.
+    /// these until loading reads its Rules the Ares way.
     pub fn ares_form(&self) -> bool {
         self.reads_ares_way
     }
@@ -8819,6 +8862,8 @@ impl RuleSet {
         {
             b"phobos-super-availability-v1".hash(&mut hasher);
             self.phobos_super_weapon_metadata.hash(&mut hasher);
+        }
+        if self.phobos {
             self.parallel_ai_queues.hash_into(&mut hasher);
         }
         if self.ares {
@@ -8911,9 +8956,10 @@ impl RuleSet {
             .hash(&mut hasher);
         // The process registry is admitted only when its retained capability
         // matches this binary. Include that immutable build identity even if
-        // the selected INIs contain no extension keys.
+        // the selected INIs contain no extension keys. The `false` held the
+        // retired `ares` build feature and keeps a released game's hash.
         b"rules-build-compatibility-v1".hash(&mut hasher);
-        crate::rules::ARES_BUILD.hash(&mut hasher);
+        false.hash(&mut hasher);
         // The game's Ares switch: two peers or a replay with the same layers
         // but another `ares.mix` answer play different games. Folded only
         // when Ares plays, so a stock game's hash stays as it was.
@@ -9987,13 +10033,18 @@ impl RuleSet {
         self.general.weapon_nullify_anim.hash(&mut hasher);
         #[cfg(feature = "phobos")]
         self.general.building_production_queue.hash(&mut hasher);
-        #[cfg(feature = "phobos")]
-        {
+        if self.phobos {
             b"phobos-ai-dehardcode-v1".hash(&mut hasher);
             self.general.ai_fire_sale.hash(&mut hasher);
             self.general.ai_fire_sale_delay.hash(&mut hasher);
             self.general.ai_all_to_hunt.hash(&mut hasher);
             self.general.gather_when_mcv_deploy.hash(&mut hasher);
+            b"phobos-power-surplus-v1".hash(&mut hasher);
+            self.general.enable_power_surplus.hash(&mut hasher);
+            self.general.power_surplus.hash(&mut hasher);
+            self.general
+                .power_surplus_scale_to_drain_amount
+                .hash(&mut hasher);
         }
         self.combat_damage.splash_list.hash(&mut hasher);
         self.combat_damage.death_weapon.hash(&mut hasher);
@@ -11381,11 +11432,17 @@ impl RuleSet {
     }
 
     /// The `[GlobalControls]` parallel AI queue switches (Phobos extension).
-    #[cfg(feature = "phobos")]
     pub fn parallel_ai_queues(
         &self,
     ) -> &crate::rules::phobos_parallel_ai_queues::ParallelAiQueueRules {
         &self.parallel_ai_queues
+    }
+
+    /// Whether the Phobos parallel AI queue hooks act in this game: Phobos
+    /// plays ([`Self::phobos`]) and Ares' `AllowParallelAIQueues=` gate is on.
+    /// Each hook of that chain does nothing otherwise.
+    pub fn parallel_ai_queues_act(&self) -> bool {
+        self.phobos && self.parallel_ai_queues.allows_parallel()
     }
 
     /// A superweapon type's `SuperWeaponTypeClass` array index (its
@@ -12501,53 +12558,53 @@ mod tests {
             mission_data::MissionType,
             native_processing::{RulesLayerKind, RulesLayerStack},
         };
-        let root = "[VehicleTypes]\n0=TANK\n[TANK]\nStrength=400\n[CombatDamage]\nEMPAIRecoverMission=Guard\n";
-        let make = |language: &str| {
-            let mut layers = RulesLayerStack::new(IniFile::from_str(root));
-            layers.push(
-                RulesLayerKind::LangRule,
-                IniFile::from_str(&format!("[CombatDamage]\nEMPAIRecoverMission={language}\n")),
+        for ares_way in [false, true] {
+            let _ares = crate::rules::ares_switch::read_ares_way(ares_way);
+            let root = "[VehicleTypes]\n0=TANK\n[TANK]\nStrength=400\n[CombatDamage]\nEMPAIRecoverMission=Guard\n";
+            let make = |language: &str| {
+                let mut layers = RulesLayerStack::new(IniFile::from_str(root));
+                layers.push(
+                    RulesLayerKind::LangRule,
+                    IniFile::from_str(&format!("[CombatDamage]\nEMPAIRecoverMission={language}\n")),
+                );
+                layers.push(
+                    RulesLayerKind::GameMode,
+                    IniFile::from_str("[CombatDamage]\nEMPAIRecoverMission=junk\n"),
+                );
+                layers.push(
+                    RulesLayerKind::Scenario,
+                    IniFile::from_str("[CombatDamage]\nEMPAIRecoverMission=\n"),
+                );
+                RuleSet::from_processed_rules(&layers.process().unwrap()).unwrap()
+            };
+            let rules = make("Area Guard");
+            let expected = ares_way.then_some(MissionType::AreaGuard);
+            assert_eq!(rules.ares_emp_ai_recover_mission(), expected);
+            let retained_hash = rules.simulation_config_hash();
+            let mut changed = make("Hunt");
+            // Source identity deliberately includes layer history, even when the
+            // final merged text agrees. Normalize only this private test input to
+            // isolate the retained extension state in the compatibility hash.
+            assert_ne!(rules.source_ini_hash(), changed.source_ini_hash());
+            changed.source_ini_hash = rules.source_ini_hash;
+            assert_eq!(
+                changed.ares_emp_ai_recover_mission(),
+                ares_way.then_some(MissionType::Hunt)
             );
-            layers.push(
-                RulesLayerKind::GameMode,
-                IniFile::from_str("[CombatDamage]\nEMPAIRecoverMission=junk\n"),
+            assert_eq!(retained_hash == changed.simulation_config_hash(), !ares_way);
+            let fresh = RuleSet::from_processed_rules(
+                &RulesLayerStack::new(IniFile::from_str(
+                    "[VehicleTypes]\n0=TANK\n[TANK]\nStrength=400\n",
+                ))
+                .process()
+                .unwrap(),
+            )
+            .unwrap();
+            assert!(
+                fresh.ares_emp_ai_recover_mission().is_none(),
+                "new RulesClass constructor"
             );
-            layers.push(
-                RulesLayerKind::Scenario,
-                IniFile::from_str("[CombatDamage]\nEMPAIRecoverMission=\n"),
-            );
-            RuleSet::from_processed_rules(&layers.process().unwrap()).unwrap()
-        };
-        let rules = make("Area Guard");
-        let expected = crate::rules::ARES_BUILD.then_some(MissionType::AreaGuard);
-        assert_eq!(rules.ares_emp_ai_recover_mission(), expected);
-        let retained_hash = rules.simulation_config_hash();
-        let mut changed = make("Hunt");
-        // Source identity deliberately includes layer history, even when the
-        // final merged text agrees. Normalize only this private test input to
-        // isolate the retained extension state in the compatibility hash.
-        assert_ne!(rules.source_ini_hash(), changed.source_ini_hash());
-        changed.source_ini_hash = rules.source_ini_hash;
-        assert_eq!(
-            changed.ares_emp_ai_recover_mission(),
-            crate::rules::ARES_BUILD.then_some(MissionType::Hunt)
-        );
-        assert_eq!(
-            retained_hash == changed.simulation_config_hash(),
-            !crate::rules::ARES_BUILD
-        );
-        let fresh = RuleSet::from_processed_rules(
-            &RulesLayerStack::new(IniFile::from_str(
-                "[VehicleTypes]\n0=TANK\n[TANK]\nStrength=400\n",
-            ))
-            .process()
-            .unwrap(),
-        )
-        .unwrap();
-        assert!(
-            fresh.ares_emp_ai_recover_mission().is_none(),
-            "new RulesClass constructor"
-        );
+        }
     }
     #[test]
     fn infantry_occupy_pip_uses_each_admitted_rules_section_pass() {
@@ -15637,7 +15694,6 @@ DefaultSparkSystem=SparkSys
         IniFile::from_str(&text)
     }
 
-    #[cfg(feature = "phobos")]
     #[test]
     fn ai_dehardcode_keys_default_and_read_general() {
         let defaults = GeneralRules::default();
@@ -16304,8 +16360,8 @@ Projectile=Invisible
         assert!(!defaults.object("YARD").unwrap().build_const_eligible);
     }
 
-    // Ares reads these lists Find-only through ParseList (Misc/Bugfixes.Buffer.cpp).
-    #[cfg(not(feature = "ares"))]
+    // Read the stock way: Ares reads these lists Find-only through ParseList
+    // (Misc/Bugfixes.Buffer.cpp).
     #[test]
     fn build_const_readai_does_not_trim_individual_tokens() {
         let rules = RuleSet::from_ini(&IniFile::from_str(
@@ -16328,8 +16384,8 @@ Projectile=Invisible
         );
     }
 
-    // Ares reads these lists Find-only through ParseList (Misc/Bugfixes.Buffer.cpp).
-    #[cfg(not(feature = "ares"))]
+    // Read the stock way: Ares reads these lists Find-only through ParseList
+    // (Misc/Bugfixes.Buffer.cpp).
     #[test]
     fn build_const_readai_uses_native_127_source_byte_prefix() {
         let oversized = format!("GACNST,{},LATE", "X".repeat(120));
@@ -16373,8 +16429,8 @@ Projectile=Invisible
         assert!(!rules.object("LATE").unwrap().build_const_eligible);
     }
 
-    // Ares reads these lists Find-only through ParseList (Misc/Bugfixes.Buffer.cpp).
-    #[cfg(not(feature = "ares"))]
+    // Read the stock way: Ares reads these lists Find-only through ParseList
+    // (Misc/Bugfixes.Buffer.cpp).
     #[test]
     fn recalc_type_lists_share_native_parser_and_registered_family_resolution() {
         let ini = IniFile::from_str(
@@ -17614,7 +17670,6 @@ Projectile=Invisible
         );
     }
 
-    #[cfg(feature = "phobos")]
     #[test]
     fn parallel_ai_queue_switches_default_the_gate_on_and_read_global_controls() {
         // Phobos RulesExt constructs AllowParallelAIQueues { true }.
@@ -17637,7 +17692,6 @@ Projectile=Invisible
         assert!(!controls.forbids_category(ObjectCategory::Building, false));
     }
 
-    #[cfg(feature = "phobos")]
     #[test]
     fn techno_forbid_parallel_ai_queues_reads_per_type() {
         let rules = RuleSet::from_ini(&IniFile::from_str(

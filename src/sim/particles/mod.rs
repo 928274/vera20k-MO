@@ -50,7 +50,7 @@ mod native_fixture;
 #[cfg(all(test, tests_sim_p_s))]
 mod native_identity_tests;
 // Ares simulates this Railgun system itself (hooks 0x62DF05, 0x62FD60).
-#[cfg(all(test, tests_sim_p_s, not(feature = "ares")))]
+#[cfg(all(test, tests_sim_p_s))]
 mod railgun_native_tests;
 #[cfg(all(test, tests_sim_p_s))]
 mod virus_tests;
@@ -854,14 +854,12 @@ pub struct ParticleSystemStore {
 /// log. Each reads its own log, so one reader's take leaves the others' intact.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ParticleTouchReader {
-    /// The kept Ground display sort keys.
-    GroundKeys = 0,
     /// The pointer-expiry broadcast's listener index.
-    ExpiryListeners = 1,
+    ExpiryListeners = 0,
 }
 
 impl ParticleTouchReader {
-    const COUNT: usize = 2;
+    const COUNT: usize = 1;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

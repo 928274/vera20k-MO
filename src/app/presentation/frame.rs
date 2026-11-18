@@ -152,7 +152,6 @@ struct Answers {
     has_airstrike_marker: bool,
     building_cloak_stage: u8,
     native_cloak_offset_words: i32,
-    #[cfg(feature = "ares")]
     driver_killed: bool,
     #[cfg(feature = "phobos")]
     is_power_plant_enhancer_active: bool,
@@ -183,7 +182,6 @@ impl Answers {
             has_airstrike_marker: entity.has_airstrike_marker(),
             building_cloak_stage: entity.building_cloak_stage(),
             native_cloak_offset_words: entity.native_cloak_offset_words(),
-            #[cfg(feature = "ares")]
             driver_killed: entity.driver_killed(),
             #[cfg(feature = "phobos")]
             is_power_plant_enhancer_active: entity.is_power_plant_enhancer_active(),
@@ -329,7 +327,6 @@ pub(crate) struct Place {
     /// `Simulation::airstrike_tint_active`.
     pub(crate) airstrike_tint_active: bool,
     /// `Simulation::ares_is_operated`.
-    #[cfg(feature = "ares")]
     pub(crate) ares_operated: bool,
     /// `Simulation::airstrike_laser_target_color`.
     #[cfg(feature = "phobos")]
@@ -494,8 +491,9 @@ impl Place {
             // Only a Structure's is ever active.
             airstrike_tint_active: entity.category() == EntityCategory::Structure
                 && sim.airstrike_tint_active(entity.stable_id()),
-            #[cfg(feature = "ares")]
-            ares_operated: sim.ares_is_operated(entity.stable_id(), at.rules()),
+            // Read only by the DeactivateDim lighting, which runs when Ares plays.
+            ares_operated: at.rules().ares()
+                && sim.ares_is_operated(entity.stable_id(), at.rules()),
             #[cfg(feature = "phobos")]
             airstrike_laser_target_color: sim
                 .airstrike_laser_target_color(entity.stable_id(), at.rules()),
@@ -790,7 +788,6 @@ impl ObjectRecord {
         self.answers.native_cloak_offset_words
     }
 
-    #[cfg(feature = "ares")]
     pub(crate) fn driver_killed(&self) -> bool {
         self.answers.driver_killed
     }
@@ -1183,6 +1180,9 @@ pub(crate) struct PresentationFrame {
     display_order: crate::util::sync::OnceLock<
         crate::app::presentation::render::draw_plan_lowering::NativeDisplayOrder,
     >,
+    /// The rules the world was captured under, which the Ground draw order
+    /// reads (`Simulation::ground_draw_order`).
+    resources: CapturedRules,
     /// Every anim's absolute coordinate (`Simulation::anim_absolute_coord`),
     /// which an attached anim takes from its owner object.
     anim_coords: crate::util::lookup_hash::LookupMap<u64, crate::sim::anim_class::AnimWorldCoord>,
@@ -1194,6 +1194,16 @@ pub(crate) struct PresentationFrame {
     pub(crate) scene: crate::app::presentation::frame_scene::SceneFrame,
     /// Whether the current house has psychic detection sites.
     pub(crate) psychic_detection: bool,
+}
+
+/// The resources a frame was captured under; none for a default frame.
+#[derive(Clone, Default)]
+struct CapturedRules(Option<std::sync::Arc<crate::sim::runtime::SimResources>>);
+
+impl std::fmt::Debug for CapturedRules {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CapturedRules")
+    }
 }
 
 impl PresentationFrame {
@@ -1275,6 +1285,7 @@ impl PresentationFrame {
             line_sources,
             display_members: Default::default(),
             display_order: Default::default(),
+            resources: CapturedRules(Some(runtime.resources.clone())),
             anim_coords,
             parachute_animations,
             scene,
@@ -1314,15 +1325,16 @@ impl PresentationFrame {
         })
     }
 
-    /// `display`'s order for this frame's draws. `display` is the Display
-    /// registry of the world the frame was captured from.
+    /// `sim`'s draw order for this frame's draws. `sim` is the world the
+    /// frame was captured from.
     pub(crate) fn display_order(
         &self,
-        display: &crate::sim::world::display_layers::DisplayLayers,
+        sim: &Simulation,
     ) -> &crate::app::presentation::render::draw_plan_lowering::NativeDisplayOrder {
         self.display_order.get_or_init(|| {
-            crate::app::presentation::render::draw_plan_lowering::NativeDisplayOrder::from_display(
-                display,
+            crate::app::presentation::render::draw_plan_lowering::NativeDisplayOrder::from_world(
+                sim,
+                self.resources.0.as_ref().map(|resources| &resources.rules),
             )
         })
     }
