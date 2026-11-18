@@ -688,7 +688,7 @@ mod map_wall_owner_candidate_tests {
         sim.session_mut_for_test()
             .lighting_mut()
             .set_current_ambient_for_test(30);
-        sim.rebuild_lighting_sources_after_load(&rules);
+        sim.rebuild_lighting_sources_for_test(&rules);
         assert!(sim.lighting_sources().pending().is_empty());
         assert!(sim.lighting_sources().buildings()[&41].active);
         // A load reinstalls lighting through the world-presentation owner.
@@ -1644,7 +1644,16 @@ impl MapLoadInitial {
     /// The same inactive transfer retains current SpecialFlags and offline local
     /// values. ClearScene6851F0 clears globals, but ReadLocal689B20 retains
     /// unassigned locals. VERA starts fresh LAN/WOL worlds from map assignments
-    /// only: peers (including replays/rejoins) cannot share prior-match locals.
+    /// only: peers cannot share prior-match locals. Replays and rejoins run in
+    /// a newly started process and never had any; a watch loads in the running
+    /// game and starts fresh too.
+    ///
+    /// RESIDUAL (VERA network adaptation): a LAN/WOL co-op campaign's next
+    /// mission and a retried mission are such starts too, so they drop the
+    /// previous mission's unassigned locals, which gamemd's ReadLocal689B20
+    /// keeps. Trigger: a co-op stage whose triggers test a local its map does
+    /// not assign; effect: that local reads cleared instead of carried.
+    /// Frequency over the retail co-op maps is not counted.
     pub(super) fn retain_process_state(
         &mut self,
         retention: &mut crate::app::shell_random_map::RandomMapGenerationRetention,
@@ -2331,7 +2340,7 @@ impl MapLoadInitial {
             .collect();
         let scenario_after_trace = simulation.rng_state().scenario;
 
-        let mut overlay_grid =
+        let overlay_grid =
             generated_overlay_grid(&map_data, &mut resolved_terrain, &overlay_registry)
                 .expect("random-map snapshot precedes authored pack consumption");
         let house_roster =
@@ -2348,17 +2357,17 @@ impl MapLoadInitial {
             (scenario_cell_extent, scenario_cell_extent),
             "Fill allocates the extent the descriptor announced"
         );
-        crate::app::loading::init_helpers::populate_staged_app_scenario(
+        crate::sim::runtime::populate_staged_generated_scenario(
             &mut simulation,
             &map_data,
             &resolved_terrain,
             &map_data.header.theater,
             &rules,
-            Some(&overlay_registry),
-            Some(&overlay_grid),
+            &overlay_registry,
+            overlay_grid,
             bridge_destroyability_mode,
             &scenario_descriptor,
-            Some(&table),
+            &table,
             |simulation| {
                 initialize_skirmish_launch_houses(
                     simulation,
@@ -2369,32 +2378,6 @@ impl MapLoadInitial {
             },
         )
         .expect("production generated-map construction funnel");
-        overlay_grid = simulation
-            .overlay_grid_mut_for_test()
-            .take()
-            .expect("populated generated CellClass grid");
-        // The generator tail, where the match load runs it: growth and spread
-        // queues from the painted densities, then the final germination
-        // (`RandomMapGenerator::Generate @ 0x00598960` tail). The post-map
-        // finalizer below leaves the queues alone.
-        let _ = crate::sim::runtime::initialize_native_tiberium_queues(
-            &mut simulation,
-            &map_data.basic,
-            &map_data.special_flags,
-            &rules,
-            &overlay_registry,
-            Some(&overlay_grid),
-            (map_data.header.width as u16, map_data.header.height as u16),
-        );
-        let _ = crate::sim::tiberium_germinate::run_generated_final_cell_attributes(
-            &resolved_terrain,
-            &mut overlay_grid,
-            &rules.tiberium_types,
-            &overlay_registry,
-            map_data.header.width as u16,
-            map_data.header.height as u16,
-        );
-        *simulation.overlay_grid_mut_for_test() = Some(overlay_grid.clone());
         let installed_constructor_words = map_data
             .entities
             .iter()
@@ -2437,7 +2420,6 @@ impl MapLoadInitial {
             &map_data,
             &rules,
             &overlay_registry,
-            overlay_grid,
             &house_roster,
             Some(&match_launch_descriptor),
         )
@@ -2581,6 +2563,13 @@ pub(crate) fn load_map_initial_with_assets(
     launch_seed: Option<u32>,
     progress: &mut dyn crate::app::loading::pump::LoadingProgressSink,
 ) -> Result<MapLoadInitial> {
+    if full_init_entry_mode.is_network() {
+        native_rules
+            .as_deref_mut()
+            .ok_or_else(|| anyhow::anyhow!("network loading requires the Rules owner"))?
+            .reset_for_network_match()
+            .map_err(|error| anyhow::anyhow!("reset network Rules: {error}"))?;
+    }
     // Check RA2_QUICKPLAY env var: if it names a .map/.mpr file, load that directly.
     // UI-selected map name/path (requested_map) takes precedence.
     // Default: try testmap1.map in the project directory first, then fall back to .mmx files.
@@ -2643,7 +2632,8 @@ pub(crate) fn load_map_initial_with_assets(
             .ok_or_else(|| anyhow::anyhow!("random map: theater {theater_name} unavailable"))?;
 
         // Generate598A74 -> InitMap599A56 completes Full_Init before terrain
-        // generation. Transfer outgoing writes and retain this exact Rules/AI
+        // generation. Offline loads transfer outgoing writes; network loads
+        // keep the cold registry installed above. Retain this exact Rules/AI
         // result and its E/P receipt; the later load must not read them again.
         let mode_rules =
             crate::rules::retail_sources::select_mode_ini(asset_manager, mode_rules_file)
@@ -2653,7 +2643,9 @@ pub(crate) fn load_map_initial_with_assets(
         })?;
         if let Some(resident) = resident {
             resident.retire_scenario_started();
-            crate::app::process_assets::transfer_outgoing_simulation_rules(owner, resident)?;
+            if !full_init_entry_mode.is_network() {
+                crate::app::process_assets::transfer_outgoing_simulation_rules(owner, resident)?;
+            }
         }
         if owner.multiplayer_countries().next().is_none() {
             // Direct .SED adapters can bypass PrepareSession52E11E/52E123.
@@ -2892,7 +2884,7 @@ mod generated_overlay_grid_tests {
         grid.place_overlay(2, 2, id, u8::MAX);
         grid.clear_overlay(2, 2);
         let mut sim = Simulation::new();
-        sim.install_overlay_grid_for_load(grid);
+        *sim.overlay_grid_mut_for_test() = Some(grid);
         let mut presented = Vec::new();
         assert_eq!(connect_startup_crate_overlays(&mut presented, &sim), 1);
         assert_eq!(presented.len(), 1);
@@ -3595,7 +3587,7 @@ fn load_map_first_step(
                                             }
                                         })
                                         .unwrap_or(BridgeDestroyabilityMode::CampaignOrEditor);
-                                    let overlay_grid = match materialization {
+                                    match materialization {
                                         FreshMapMaterialization::Authored => {
                                             let theater =
                                                 theater_result.as_ref().ok_or_else(|| {
@@ -3612,7 +3604,7 @@ fn load_map_first_step(
                                                 theater_ext,
                                                 &map_data.header.theater,
                                             );
-                                            let output = crate::sim::runtime::finalize_and_populate_staged_authored_scenario(
+                                            let terrain = crate::sim::runtime::finalize_and_populate_staged_authored_scenario(
                 &mut staged_simulation,
                 &mut map_data,
                 fill,
@@ -3635,29 +3627,28 @@ fn load_map_first_step(
                     }
                 },
             )?;
-                                            resolved_terrain = Some(output.resolved_terrain);
-                                            output.overlay_grid
+                                            resolved_terrain = Some(terrain);
                                         }
                                         FreshMapMaterialization::AcceptedGenerated => {
                                             let resolved_terrain = resolved_terrain.as_mut().expect(
                                         "generated materialization retained its eager terrain",
                                     );
-                                            let mut overlay_grid = generated_overlay_grid(
+                                            let overlay_grid = generated_overlay_grid(
                                                 &map_data,
                                                 resolved_terrain,
                                                 &overlay_registry,
                                             )?;
-                                            crate::app::loading::init_helpers::populate_staged_app_scenario(
+                                            crate::sim::runtime::populate_staged_generated_scenario(
                 &mut staged_simulation,
                 &map_data,
                 resolved_terrain,
                 &map_data.header.theater,
                 &rules,
-                Some(&overlay_registry),
-                Some(&overlay_grid),
+                &overlay_registry,
+                overlay_grid,
                 bridge_destroyability_mode,
                 &scenario_descriptor,
-                generated_techno_inits.as_ref(),
+                generated_techno_inits.as_ref().expect("accepted materialization replayed its generator journal"),
                 |sim| {
                     let ruleset = &rules;
                     let launch = match_launch_descriptor
@@ -3666,67 +3657,14 @@ fn load_map_first_step(
                     initialize_skirmish_launch_houses(sim, &house_roster, ruleset, launch);
                 },
             )?;
-                                            // Keep the live constructor mutations when running the final ore
-                                            // pass. The pre-population materialization copy has no Foot history.
-                                            overlay_grid = staged_simulation
-                                                .take_overlay_grid_for_load()
-                                                .expect("populated generated CellClass grid");
-                                            // `RandomMapGenerator::Generate @ 0x00598960` tail (`0x00599370..
-                                            // 0x0059945B`): after the generator constructors and its final
-                                            // whole-map Recalc (`0x0059937D`), `TiberiumClass::InitGrowthQueues_All
-                                            // @ 0x00722D00` then `InitSpreadQueues_All @ 0x00722240` scan the
-                                            // then-current painted densities; only afterwards does
-                                            // `MapClass::InitCellAttributes(1)` (`push 1` at `0x0059943F`, call
-                                            // at `0x0059944C`) rewrite every ore cell's density from its
-                                            // same-class neighbours. The post-map tail must not rebuild those
-                                            // queues from the germinated state.
-                                            let ruleset = &rules;
-                                            let queue_stats =
-                                        crate::sim::runtime::initialize_native_tiberium_queues(
-                                            &mut staged_simulation,
-                                            &map_data.basic,
-                                            &map_data.special_flags,
-                                            ruleset,
-                                            &overlay_registry,
-                                            Some(&overlay_grid),
-                                            (
-                                                map_data.header.width as u16,
-                                                map_data.header.height as u16,
-                                            ),
-                                        )?;
-                                            if let Some(stats) = queue_stats {
-                                                log::info!(
-                                                    "Initialized generated native tiberium queues before germination: {} growth, {} spread",
-                                                    stats.growth_entries,
-                                                    stats.spread_entries,
-                                                );
-                                            }
-                                            let germination = crate::sim::tiberium_germinate::run_generated_final_cell_attributes(
-                &*resolved_terrain,
-                &mut overlay_grid,
-                &ruleset.tiberium_types,
-                &overlay_registry,
-                map_data.header.width as u16,
-                map_data.header.height as u16,
-            )?;
-                                            log::info!(
-                                                "Generated final InitCellAttributes(1): {} of {} real cells germinated (value total {})",
-                                                germination.germinated_cells,
-                                                germination.real_cells,
-                                                germination.tiberium_value_total,
-                                            );
-                                            if germination.unallocated_cells != 0 {
-                                                log::error!(
-                                                    "Generated final InitCellAttributes(1) reached {} unallocated iterator cells",
-                                                    germination.unallocated_cells,
-                                                );
-                                            }
-                                            staged_simulation.install_overlay_grid_for_load(
-                                                overlay_grid.clone(),
-                                            );
-                                            overlay_grid
                                         }
-                                    };
+                                    }
+                                    // Draw the materialized cells as they stand before starting
+                                    // forces. Post-map crate changes are appended separately.
+                                    let mut overlays_connected = staged_simulation
+                                        .overlay_grid()
+                                        .expect("populated scenario has live overlays")
+                                        .occupied_entries();
                                     let resolved_terrain = resolved_terrain.expect(
                                 "authored or generated materialization produced final terrain",
                             );
@@ -4033,9 +3971,6 @@ fn load_map_first_step(
                                                                     // `PostDestructionWallCleanup @ 0x00480630` in that grid. Taken before
                                                                     // the post-map tail places scenario-start crates, which are appended
                                                                     // from the live grid below.
-                                                                    let mut overlays_connected =
-                                                                        overlay_grid
-                                                                            .occupied_entries();
                                                                     let overlay_assets =
                                                             build_overlay_presentation(
                                                                 &overlays_connected,
@@ -4058,7 +3993,7 @@ fn load_map_first_step(
                                                                 "post-map",
                                                                 move |services| {
                                                                     // F09: the shared post-funnel finalization — spawner seed, map-wall owner
-                                                                    // reconstruction, overlay-grid installation, smudge-grid seeding, and the
+                                                                    // reconstruction, smudge-grid seeding, and the
                                                                     // authoritative post-map tail — runs through the same sim-owned function
                                                                     // the headless loader uses.
                                                                     let rules_for_post_map = &rules;
@@ -4071,7 +4006,6 @@ fn load_map_first_step(
             &map_data,
             rules_for_post_map,
             &overlay_registry,
-            overlay_grid,
             &house_roster,
             match_launch_descriptor.as_ref(),
         )?;

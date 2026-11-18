@@ -1787,14 +1787,16 @@ fn transport_may_unload(
 /// MO's `[AHVYBOT]` Future Tank X-0 ships `Passengers=4` with hidden
 /// `InitialPayload` crew and `NoManualUnload/NoManualEnter=yes`. The player
 /// must not get a Deploy/Unload command just because the cargo hold exists.
-#[cfg(feature = "ares")]
 #[test]
 fn no_manual_unload_hides_the_deploy_command_for_hidden_crew() {
+    let _ares = crate::rules::ares_switch::read_ares_way(true);
     let rules = RuleSet::from_ini(&IniFile::from_str(
         "[VehicleTypes]\n0=X0\n1=APC\n\
+         [InfantryTypes]\n0=GI\n\
          [X0]\nPassengers=4\nNoManualUnload=yes\nNoManualEnter=yes\n\
          InitialPayload.Types=GI\nInitialPayload.Nums=4\n\
-         [APC]\nPassengers=4\n",
+         [APC]\nPassengers=4\n\
+         [GI]\nStrength=125\n",
     ))
     .expect("MO hidden-crew rules");
     let mut sim = Simulation::new();
@@ -1810,8 +1812,11 @@ fn no_manual_unload_hides_the_deploy_command_for_hidden_crew() {
         .spawn_object("APC", "Americans", 21, 22, 0, &rules)
         .expect("APC builds");
     let x0_type = rules.object("X0").expect("X-0 type");
-    assert!(x0_type.no_manual_unload && x0_type.no_manual_enter);
-    assert_eq!(x0_type.initial_payload, vec![("GI".to_owned(), 4)]);
+    let movement = x0_type.techno_combat().movement();
+    assert!(movement.no_manual_unload() && movement.no_manual_enter());
+    let (payload_types, payload_nums) = x0_type.techno_combat().initial_payload();
+    assert_eq!(payload_types[0].id, "GI");
+    assert_eq!(payload_nums, [4]);
     assert!(!sim.can_deploy_slash_unload(x0, &rules));
     assert!(sim.can_deploy_slash_unload(apc, &rules));
 }

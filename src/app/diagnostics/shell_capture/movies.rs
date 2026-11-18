@@ -1969,6 +1969,36 @@ fn wol_api_missing_shown(state: &AppState) -> bool {
         .is_some_and(|message| message.body == expected)
 }
 
+/// A controlled peer's EventClass record from participant `source_index`,
+/// queued at the current frame as if received.
+fn queue_peer_command(
+    state: &mut AppState,
+    source_index: usize,
+    command: crate::sim::command::Command,
+) -> Result<()> {
+    let owner = state
+        .match_state
+        .session
+        .network_source_owner(source_index)
+        .with_context(|| format!("no participant {source_index}"))?;
+    let sim = &mut state
+        .match_state
+        .sim_runtime
+        .write_sim(crate::app::match_runtime::sim_host::SimWrite::Debug)
+        .context("no running match")?
+        .simulation;
+    let owner = sim
+        .interner()
+        .get(&owner)
+        .context("the participant has no House")?;
+    sim.queue_command(crate::sim::command::CommandEnvelope::new(
+        owner,
+        sim.session().tick(),
+        command,
+    ));
+    Ok(())
+}
+
 /// Same physical-window to retained-render coordinates as CursorMoved in the
 /// window handler. The existing hit owner maps them back to its loaded pixels.
 fn set_window_pointer_to_rect_center(
@@ -2118,15 +2148,10 @@ fn initial_save_receipt(state: &AppState, directory: &Path) -> Result<Value> {
         &state.persistence.repository.read(&entry.path)?,
     )?;
     ensure!(
-        saved.sim.session().game_options().game_speed == 2,
+        saved.session().game_options().game_speed == 2,
         "automatic save preceded the Options input"
     );
-    let pending_speed = saved.sim.pending_command_snapshot().iter().any(|command| {
-        matches!(
-            command.payload,
-            crate::sim::command::Command::SetGameSpeed { .. }
-        )
-    });
+    let pending_speed = saved.has_pending_game_speed_input();
     ensure!(
         !pending_speed,
         "automatic save retained already-consumed Options input"
@@ -2143,7 +2168,7 @@ fn initial_save_receipt(state: &AppState, directory: &Path) -> Result<Value> {
         "filename": entry.path.file_name().unwrap().to_string_lossy(),
         "description": entry.header.description, "tick": entry.header.tick,
         "map_name": entry.header.map_name,
-        "game_speed": saved.sim.session().game_options().game_speed,
+        "game_speed": saved.session().game_options().game_speed,
         "pending_speed_input": pending_speed,
         "new_save_description": browser.description_edit.display_text(),
         "observation": "ordinary save browser model; dialog not opened",

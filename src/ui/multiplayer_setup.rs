@@ -42,6 +42,9 @@ pub(crate) const BALANCE: u16 = 0x7F0F;
 /// VERA-only, the host's, in the team bar: Room size, the most people the
 /// room holds, spectators too.
 pub(crate) const ROOM_SIZE: u16 = 0x7F10;
+/// VERA-only, in an online room: Lobby, to the public lobby while the room
+/// goes on hidden (docs/lobby-protocol.md "Visiting the lobby").
+pub(crate) const LOBBY: u16 = 0x7F16;
 /// VERA-only combos of the rows past the resource's eight, one block of
 /// 0x40 ids per column.
 const ROOM_ROW_COMBOS: u16 = 0x7000;
@@ -108,17 +111,21 @@ const ROSTER_SWATCH_LIST_W: i32 = 40;
 /// trackbar, the host's Room size, Team Starts and Team Colors and, online,
 /// Balance; in one without, only the host's Room size. Each part is from
 /// its group's top-left corner, their art at 78% of the shell's size
-/// ([`MultiplayerSetupLayout::control_scale`]). A trackbar is the room's
-/// own 129x21 window at that size, so its frame art fits.
+/// ([`MultiplayerSetupLayout::control_scale`]). A trackbar is a
+/// [`TEAM_BAR_TRACKBAR_WINDOW`] window at that size. Both trackbars' labels
+/// take one width, so the trackbars line up when they stack, and the
+/// buttons stand the groups' gap apart.
 const TEAM_BAR_H: i32 = 25;
 const TEAM_BAR_INSET: i32 = 8;
 const TEAM_BAR_GAP: i32 = 12;
-const TEAM_BAR_LABEL: RectPx = RectPx::new(0, 3, 65, 18);
-const TEAM_BAR_COUNT: RectPx = RectPx::new(67, 4, 101, 17);
-const TEAM_BAR_ROOM_LABEL: RectPx = RectPx::new(0, 3, 90, 18);
-const TEAM_BAR_ROOM: RectPx = RectPx::new(92, 4, 101, 17);
+const TEAM_BAR_LABEL: RectPx = RectPx::new(0, 3, 90, 18);
+const TEAM_BAR_TRACKBAR: RectPx = RectPx::new(92, 4, 151, 17);
+/// The team bar's trackbar window: the room's 129x21 half again as wide,
+/// its plaque the same, so its rail is longer. It has its own frame
+/// (`render::skirmish_shell_chrome::TRACKBAR_FRAMES`).
+const TEAM_BAR_TRACKBAR_WINDOW: (i32, i32) = (194, 21);
 const TEAM_BAR_STARTS: RectPx = RectPx::new(0, 3, 97, 19);
-const TEAM_BAR_COLORS: RectPx = RectPx::new(105, 3, 97, 19);
+const TEAM_BAR_COLORS: RectPx = RectPx::new(97 + TEAM_BAR_GAP, 3, 97, 19);
 const TEAM_BAR_BALANCE: RectPx = RectPx::new(0, 3, 97, 19);
 /// The chat's log ends here, its edit line under it.
 const CHAT_LOG_BOTTOM: i32 = 529;
@@ -540,11 +547,25 @@ const MODERN_GUEST_PAGE: MenuPageSpec = MenuPageSpec {
     }],
     ..GUEST_PAGE
 };
+const LOBBY_BUTTON: MenuPageButtonSpec = MenuPageButtonSpec {
+    id: LOBBY,
+    dlu_top: 0,
+    csf_key: "VERA:Lobby",
+    tooltip_key: "",
+    result: None,
+};
+/// VERA's online room adds Lobby under its other buttons.
 const MODERN_WOL_GUEST_PAGE: MenuPageSpec = MenuPageSpec {
-    stacked: &[MenuPageButtonSpec {
-        dlu_top: WOL_GUEST_PAGE.stacked[0].dlu_top,
-        ..GAME_OPTIONS_BUTTON
-    }],
+    stacked: &[
+        MenuPageButtonSpec {
+            dlu_top: WOL_GUEST_PAGE.stacked[0].dlu_top,
+            ..GAME_OPTIONS_BUTTON
+        },
+        MenuPageButtonSpec {
+            dlu_top: WOL_GUEST_PAGE.stacked[1].dlu_top,
+            ..LOBBY_BUTTON
+        },
+    ],
     ..WOL_GUEST_PAGE
 };
 const MODERN_WOL_HOST_PAGE: MenuPageSpec = MenuPageSpec {
@@ -557,6 +578,10 @@ const MODERN_WOL_HOST_PAGE: MenuPageSpec = MenuPageSpec {
         MenuPageButtonSpec {
             dlu_top: WOL_HOST_PAGE.stacked[2].dlu_top,
             ..WOL_HOST_PAGE.stacked[1]
+        },
+        MenuPageButtonSpec {
+            dlu_top: 2 * WOL_HOST_PAGE.stacked[2].dlu_top - WOL_HOST_PAGE.stacked[1].dlu_top,
+            ..LOBBY_BUTTON
         },
     ],
     ..WOL_HOST_PAGE
@@ -742,6 +767,8 @@ pub(crate) enum SetupGroup {
 #[derive(Debug, Clone)]
 pub(crate) struct SetupHeader {
     pub(crate) group: SetupGroup,
+    /// Chosen swatches of every player on this team, including rows offscreen.
+    pub(crate) member_colors: Vec<u8>,
     pub(crate) caption: String,
     /// The button's caption; `None` shows no button.
     pub(crate) join: Option<String>,
@@ -819,6 +846,8 @@ pub(crate) struct SetupView {
     pub(crate) team_colors_enabled: bool,
     /// Online, the host's Balance: the room's mode seats players on teams.
     pub(crate) balance_enabled: bool,
+    /// Online, Lobby: the lobby offers visits to the public lobby.
+    pub(crate) lobby_enabled: bool,
     /// The rows the host may drag to another box, in a room with teams.
     pub(crate) drag_rows: Vec<DragRow>,
     /// VERA's missing-map offer is open over the room.
@@ -879,6 +908,7 @@ impl SetupView {
         }
         match id {
             BACK | CHAT | CHAT_LOG | GAME_OPTIONS => true,
+            LOBBY => self.lobby_enabled,
             START | CHOOSE_MAP => self.host,
             TEAM_STARTS => self.team_starts_enabled,
             TEAM_COLORS => self.team_colors_enabled,
@@ -940,6 +970,9 @@ pub(crate) enum SetupAction {
     TeamColors,
     /// The host's Balance in the team bar, online.
     Balance,
+    /// Lobby in an online room: the public lobby, the room keeping this
+    /// player's place.
+    Lobby,
     /// The missing-map offer's answer: download the room's map, or leave.
     MapOffer {
         download: bool,
@@ -1109,7 +1142,7 @@ impl MultiplayerSetupState {
         &mut self,
         geometry: ShellListGeometry,
         work: impl FnOnce(&mut ListScrollInteraction, &mut usize),
-    ) -> bool {
+    ) {
         let before = self.roster_top(geometry.max_top);
         let mut top = before;
         work(&mut self.roster_scrollbar, &mut top);
@@ -1117,7 +1150,6 @@ impl MultiplayerSetupState {
         if top != before {
             self.popup.close();
         }
-        top != before
     }
     /// A press on the roster's scrollbar; `false` when it is not on it.
     pub(crate) fn roster_scroll_press(
@@ -1157,17 +1189,42 @@ impl MultiplayerSetupState {
     pub(crate) fn roster_scroll_pressed(&self) -> Option<ListScrollPart> {
         self.roster_scrollbar.pressed_part()
     }
-    /// The wheel over the roster: three places a notch.
-    pub(crate) fn roster_wheel(&mut self, geometry: ShellListGeometry, lines: f32) -> bool {
+    /// An open roster list owns the wheel even at its ends. Once it closes,
+    /// the same gesture over the roster scrolls the teams again.
+    pub(crate) fn wheel(
+        &mut self,
+        view: &SetupView,
+        layout: &MultiplayerSetupLayout,
+        x: i32,
+        y: i32,
+        lines: f32,
+    ) -> bool {
+        let Some(roster) = layout.roster_scroll(view) else {
+            return false;
+        };
+        if view.open_box.is_some() || view.map_offer_open || lines == 0.0 {
+            return false;
+        }
         let step = ((lines * 3.0).round() as i32).clamp(-30, 30);
         let step = if step == 0 {
             lines.signum() as i32
         } else {
             step
         };
-        self.scroll_roster(geometry, |_, top| {
-            *top = (*top as i32 - step).clamp(0, geometry.max_top as i32) as usize;
-        })
+        let wheel_top = |top: usize, max: usize| top.saturating_add_signed(-step as isize).min(max);
+        if let Some(mut popup) = self.popup_geometry(view, layout) {
+            if popup.rect.contains(x, y) {
+                popup.first = wheel_top(popup.first, popup.total - popup.visible_rows);
+                self.popup.top_index = popup.first;
+                popup.track_hot_row(&mut self.popup.hot_row, x, y);
+            }
+            return true;
+        }
+        if layout.roster_area.contains(x, y) {
+            self.scroll_roster(roster, |_, top| *top = wheel_top(*top, roster.max_top));
+            return true;
+        }
+        false
     }
     /// Whether the room looks for `file`'s briefing now: only the first time
     /// it shows that map.
@@ -1240,13 +1297,16 @@ impl MultiplayerSetupState {
         self.focused_control = CHAT;
         self.chat.edit.focused = true;
     }
-    pub(crate) fn cancel_pointer(&mut self) {
-        self.buttons = ShellButtonInteraction::default();
+    pub(crate) fn release_scrollbars(&mut self) {
         self.popup.cancel_pointer();
-        self.trackbar_hold = None;
-        self.row_drag = None;
         self.chat.list.scroll.cancel();
         self.roster_scrollbar.cancel();
+    }
+    pub(crate) fn cancel_pointer(&mut self) {
+        self.buttons = ShellButtonInteraction::default();
+        self.trackbar_hold = None;
+        self.row_drag = None;
+        self.release_scrollbars();
     }
 }
 
@@ -1638,8 +1698,8 @@ impl MultiplayerSetupLayout {
         let columns = self.roster_columns;
         let bar_w = columns.w + 2 * mx;
         let groups: [Option<&[RectPx]>; 4] = [
-            teams.then_some(&[TEAM_BAR_LABEL, TEAM_BAR_COUNT]),
-            room_size.then_some(&[TEAM_BAR_ROOM_LABEL, TEAM_BAR_ROOM]),
+            teams.then_some(&[TEAM_BAR_LABEL, TEAM_BAR_TRACKBAR]),
+            room_size.then_some(&[TEAM_BAR_LABEL, TEAM_BAR_TRACKBAR]),
             (teams && host).then_some(&[TEAM_BAR_STARTS, TEAM_BAR_COLORS]),
             (teams && online).then_some(&[TEAM_BAR_BALANCE]),
         ];
@@ -1706,7 +1766,8 @@ impl MultiplayerSetupLayout {
             }
             if let Some((_, bar)) = self.trackbars.iter_mut().find(|(bar, _)| *bar == id) {
                 let corner = small.base_rect(at(trackbar));
-                *bar = small.scale_rect(RectPx::new(corner.x, corner.y, 129, 21));
+                let (w, h) = TEAM_BAR_TRACKBAR_WINDOW;
+                *bar = small.scale_rect(RectPx::new(corner.x, corner.y, w, h));
             }
         }
         if let Some(&[starts, colors]) = starts.as_deref() {
@@ -2111,6 +2172,7 @@ mod tests {
             team_starts_enabled: true,
             team_colors_enabled: true,
             balance_enabled: true,
+            lobby_enabled: false,
             drag_rows: Vec::new(),
             map_offer_open: false,
             mode_label: String::new(),
@@ -2121,6 +2183,16 @@ mod tests {
             cooperative: false,
             cooperative_description: None,
         }
+    }
+
+    /// Lobby stays off in a room whose lobby does not offer visits, as one
+    /// from before them does not.
+    #[test]
+    fn lobby_needs_a_lobby_that_offers_visits() {
+        let mut view = vera_room_view();
+        assert!(!view.enabled(LOBBY));
+        view.lobby_enabled = true;
+        assert!(view.enabled(LOBBY));
     }
 
     /// VERA's roster stacks its teams in one column, over the team bar. A
@@ -2196,10 +2268,9 @@ mod tests {
         }
         // The wheel scrolls three places a notch, no further than the last.
         let mut ui = MultiplayerSetupState::default();
-        let geometry = layout.roster_scroll(&view).unwrap();
-        ui.roster_wheel(geometry, -1.0);
+        ui.wheel(&view, &layout, area.x, area.y, -1.0);
         assert_eq!(ui.roster_top(scroll.max_top), 3);
-        ui.roster_wheel(geometry, -100.0);
+        ui.wheel(&view, &layout, area.x, area.y, -100.0);
         assert_eq!(ui.roster_top(scroll.max_top), scroll.max_top);
         // A room that fits shows no scrollbar.
         view.roster_scroll = (3, 0);
@@ -2209,6 +2280,7 @@ mod tests {
         // open too; a cell whose list opens takes the press for its list.
         view.headers[0] = Some(SetupHeader {
             group: SetupGroup::Team(1),
+            member_colors: vec![],
             caption: String::new(),
             join: Some(String::new()),
             join_enabled: true,
@@ -2330,6 +2402,7 @@ mod tests {
         let header = |group| {
             Some(SetupHeader {
                 group,
+                member_colors: vec![],
                 caption: String::new(),
                 join: None,
                 join_enabled: false,
@@ -2371,7 +2444,8 @@ mod tests {
     /// VERA's game room trades a guest's Accept for Game Options in its
     /// place; a host's Game Options takes Choose Map's place over Choose Map,
     /// which moves a place down, into C2's Page place. The other buttons keep
-    /// their places, and native diagnostics keep all.
+    /// their places, an online room has its Lobby a place under them, and
+    /// native diagnostics keep all.
     #[test]
     fn game_room_puts_game_options_in_accept_or_choose_map_place() {
         let buttons = |host, flavor, modern| {
@@ -2387,6 +2461,9 @@ mod tests {
             let accept = native.remove(&ACCEPT).unwrap();
             native.remove(&PAGE);
             native.insert(GAME_OPTIONS, accept);
+            if flavor == SetupFlavor::Wol {
+                native.insert(LOBBY, accept.translate(0, accept.h));
+            }
             assert_eq!(buttons(false, flavor, true), native, "{flavor:?} guest");
 
             let mut native = buttons(true, flavor, false);
@@ -2397,6 +2474,9 @@ mod tests {
                 .unwrap_or(choose_map.translate(0, step));
             native.insert(GAME_OPTIONS, choose_map);
             native.insert(CHOOSE_MAP, below);
+            if flavor == SetupFlavor::Wol {
+                native.insert(LOBBY, below.translate(0, step));
+            }
             assert_eq!(buttons(true, flavor, true), native, "{flavor:?} host");
         }
     }
@@ -2488,6 +2568,26 @@ mod tests {
             let (x, y) = center(rect);
             assert_eq!(popup_layout.control_at(&view, x, y), Some(id));
         }
+        // At 800x600 Room size stacks under the Teams count, the two
+        // trackbars in one column, and the buttons stand evenly apart.
+        let [teams, room, starts, colors, balance] =
+            [TEAM_COUNT, ROOM_SIZE, TEAM_STARTS, TEAM_COLORS, BALANCE]
+                .map(|id| popup_layout.control_rect(id).unwrap());
+        assert!(teams.y < room.y && teams.x == room.x);
+        // Their windows are half again as wide as the room's, with a frame.
+        let small = popup_layout.control_scale(TEAM_COUNT);
+        let base = small.base_rect(teams);
+        assert!(
+            base.w > 190
+                && crate::render::skirmish_shell_chrome::drawn_trackbar_frame_slot(
+                    true, base.w, base.h, small
+                )
+                .is_some()
+        );
+        assert_eq!(
+            colors.x - (starts.x + starts.w),
+            balance.x - (colors.x + colors.w)
+        );
         // Its art draws at 78% of the shell's size.
         assert_eq!(popup_layout.control_scale(TEAM_COUNT).factor(), 0.78);
         assert_eq!(popup_layout.control_scale(SPEED).factor(), 1.0);

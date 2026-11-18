@@ -572,10 +572,10 @@ fn projected_options(
         .iter()
         .map(|human| LanOptionsHuman {
             name: human.name.clone(),
-            country: super::country_value(human),
-            color: super::color_value(human),
-            start: start_value(human.slot.start_position),
-            team: team_value(human.slot.team),
+            country: human.slot.country_shell_value(human.is_observer()),
+            color: human.slot.color_shell_value(),
+            start: human.slot.start_position.shell_value(),
+            team: human.slot.team.shell_value(),
         })
         .collect();
     let ai = std::array::from_fn(|row| {
@@ -770,7 +770,7 @@ fn parse_options(
     ensure!(fields.next().is_none(), "extra LAN AI fields");
     launch.ai_player_count = opponents.len() as i32;
     launch.opponents = opponents;
-    launch.rebuild_house_roster();
+    launch.use_live_house_rows();
     let vacancies = std::array::from_fn(|row| {
         session
             .network_vacancy(row as u8)
@@ -837,18 +837,6 @@ pub(super) fn decoded_choices(
     Ok(slot)
 }
 
-pub(super) fn start_value(start: LaunchStartPosition) -> i32 {
-    match start {
-        LaunchStartPosition::Auto => -2,
-        LaunchStartPosition::Position(index) => i32::from(index),
-    }
-}
-pub(super) fn team_value(team: LaunchTeam) -> i32 {
-    match team {
-        LaunchTeam::None => -2,
-        LaunchTeam::Team(index) => i32::from(index),
-    }
-}
 pub(super) fn decoded_difficulty(value: i32) -> Result<AiDifficulty> {
     match value {
         0 => Ok(AiDifficulty::Hard),
@@ -958,7 +946,6 @@ mod tests {
         launch.local_player_index = usize::from(!host);
         launch.options.game_speed = 4;
         launch.options.starting_credits = 9000;
-        launch.rebuild_house_roster();
         let mut session = MatchSession::default();
         session.enter_network(NetworkReturnContext::LanLobby);
         session
@@ -1025,7 +1012,6 @@ mod tests {
                 human
             })
             .collect();
-        launch.rebuild_house_roster();
         host.accept_network_setup(launch.clone(), true, None, false)
             .unwrap();
         host.select_network_map(launch.mode.clone(), "thirty.map".into(), 30)

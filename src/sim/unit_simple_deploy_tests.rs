@@ -782,9 +782,9 @@ fn ares_simple_deployer_converts_to_its_convert_deploy_type() {
 /// `[BASS2]` are two fire modes, not a Siege Chopper-style deploy. The type
 /// swap must happen only after the deployment completed, keep the same
 /// object ID, and leave the destination able to deploy (and move) again.
-#[cfg(feature = "ares")]
 #[test]
 fn ares_convert_deploy_swaps_the_two_modes_after_deployment_completes() {
+    let _ares = crate::rules::ares_switch::read_ares_way(true);
     let ini = crate::sim::arena_fixture::clear_ground_ini(
         "[Countries]\n0=Americans\n1=Russians\n\
          [VehicleTypes]\n0=BASS\n1=BASS2\n\
@@ -798,14 +798,21 @@ fn ares_convert_deploy_swaps_the_two_modes_after_deployment_completes() {
     );
     let rules = RuleSet::from_ini(&ini).unwrap();
     assert_eq!(
-        rules.object("BASS").unwrap().deploy_conversion().unwrap().id,
+        rules
+            .object("BASS")
+            .unwrap()
+            .techno_combat()
+            .convert_deploy()
+            .unwrap()
+            .id,
         "BASS2"
     );
     assert_eq!(
         rules
             .object("BASS2")
             .unwrap()
-            .deploy_conversion()
+            .techno_combat()
+            .convert_deploy()
             .unwrap()
             .id,
         "BASS"
@@ -818,10 +825,12 @@ fn ares_convert_deploy_swaps_the_two_modes_after_deployment_completes() {
         .unwrap();
     let effects = crate::sim::world::FrameEffects::default();
 
-    // An undeployed deploy-order attempt leaves the type alone until the
-    // deployment has actually completed (no DeployingAnim here: immediate).
-    sim.update_unit_simple_deploy(id, true, &rules, effects)
-        .unwrap();
+    // The production Unload visit deploys first and then converts through
+    // Ares 3.0's runtime `techno_combat().convert_deploy()` path.
+    assert_eq!(
+        sim.unit_simple_mission_unload(id, &rules, effects),
+        Ok(450)
+    );
     let entity = sim.substrate.entities.get(id).unwrap();
     assert_eq!(sim.interner.resolve(entity.type_ref()), "BASS2");
     assert!(!entity.is_fully_deployed(), "Ares keeps the mode movable");
@@ -829,8 +838,10 @@ fn ares_convert_deploy_swaps_the_two_modes_after_deployment_completes() {
     assert!(entity.deploy_anim().is_none());
 
     // Pressing D again on the no-attack mode returns to `[BASS]`.
-    sim.update_unit_simple_deploy(id, true, &rules, effects)
-        .unwrap();
+    assert_eq!(
+        sim.unit_simple_mission_unload(id, &rules, effects),
+        Ok(450)
+    );
     assert_eq!(
         sim.interner
             .resolve(sim.substrate.entities.get(id).unwrap().type_ref()),

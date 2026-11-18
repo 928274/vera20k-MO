@@ -34,9 +34,9 @@ Omega writes 541 `CustomPalette=` values, most of them `unittem.pal` or
 Ares substitutes `~~~` with the active theatre's three-letter extension:
 `CustomPalette=abcd.pal` always uses `abcd.pal`, while
 `CustomPalette=lib~~~.pal` uses `libtem.pal`, `libsno.pal`, and so on. VERA
-performs the substitution only under `--features ares`; a default build leaves
-the literal name in place, so the load misses and the art falls back to its
-ordinary palette.
+performs the substitution when the current game's Rules use the runtime Ares
+way; a stock game leaves the literal name in place, so the load misses and the
+art falls back to its ordinary palette.
 
 ## Projectiles
 
@@ -79,7 +79,8 @@ arm, which is why only that phase looked wrong.
 - `render/sprite_atlas.rs`: `projectile_anim_palette_base` resolves a BulletType
   id to its `Image=` AnimType, the atlas decodes each named file once, and
   `sprite_palette_for_key` answers `SpritePaletteChoice::ExtraBuilding` for the
-  animation contexts and (under `--features ares`) the three Bullet contexts.
+  animation contexts and, for Rules read the runtime Ares way, the three Bullet
+  contexts.
   The house remap is skipped for that choice in every case.
 
 ## Residuals

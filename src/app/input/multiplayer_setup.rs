@@ -64,6 +64,25 @@ pub(crate) fn update_geometry(state: &mut AppState) {
     let Some(ui) = state.frontend.multiplayer_setup.as_mut() else {
         return;
     };
+    // VERA's room's chat column changes width with the window: its rows
+    // wrap again to fit it.
+    let visible = layout
+        .chat_list(&ui.chat.list, ui.chat.lines.len())
+        .visible_rows;
+    ui.chat.rewrap(
+        crate::ui::lan_shell::chat_wrap_width(
+            layout.chat_log,
+            layout.page.scale,
+            layout.chat_text_scale(),
+        ),
+        visible,
+        |units| {
+            state
+                .renderer
+                .bit_font
+                .text_width(&String::from_utf16_lossy(units)) as i32
+        },
+    );
     ui.chat.list.reconcile_geometry_for_text(
         layout.chat_log,
         ui.chat.lines.len(),
@@ -502,8 +521,7 @@ pub(crate) fn mouse(state: &mut AppState, button: MouseButton, pressed: bool) {
         }
     } else {
         ui.trackbar_hold = None;
-        ui.popup.cancel_pointer();
-        ui.chat.list.scroll.cancel();
+        ui.release_scrollbars();
         if let Some((row, header)) = ui.drop_row()
             && let Some(group) = view.drop_group(row, header)
         {
@@ -525,6 +543,7 @@ pub(crate) fn mouse(state: &mut AppState, button: MouseButton, pressed: bool) {
                 TEAM_STARTS => Some(SetupAction::TeamStarts),
                 TEAM_COLORS => Some(SetupAction::TeamColors),
                 BALANCE => Some(SetupAction::Balance),
+                LOBBY => Some(SetupAction::Lobby),
                 MAP_OFFER_DOWNLOAD => Some(SetupAction::MapOffer { download: true }),
                 MAP_OFFER_LEAVE => Some(SetupAction::MapOffer { download: false }),
                 control if team_join_row(control).is_some() => Some(SetupAction::Join { control }),
@@ -595,10 +614,14 @@ pub(crate) fn poll(state: &mut AppState) -> Option<Instant> {
         .min()
 }
 
-/// The wheel over VERA's roster scrolls it, while no list or box is open
-/// over the room; returns whether the wheel was the roster's.
+/// Route wheel input to VERA's room when it owns the pointer.
 pub(crate) fn wheel(state: &mut AppState, lines: f32) -> bool {
-    if lines == 0.0 || transfer_active(state) || notice_active(state) {
+    if lines == 0.0
+        || transfer_active(state)
+        || notice_active(state)
+        || crate::app::shell_network_setup::verify(state).is_some()
+        || crate::app::shell_wol::page::open(state)
+    {
         return false;
     }
     let Some(view) = crate::app::shell_network_setup::view(state) else {
@@ -609,16 +632,5 @@ pub(crate) fn wheel(state: &mut AppState, lines: f32) -> bool {
     let Some(ui) = state.frontend.multiplayer_setup.as_mut() else {
         return false;
     };
-    let Some(roster) = layout.roster_scroll(&view) else {
-        return false;
-    };
-    if view.open_box.is_some()
-        || view.map_offer_open
-        || ui.popup_geometry(&view, &layout).is_some()
-        || !layout.roster_area.contains(x, y)
-    {
-        return false;
-    }
-    ui.roster_wheel(roster, lines);
-    true
+    ui.wheel(&view, &layout, x, y, lines)
 }

@@ -375,11 +375,11 @@ fn superweapon_money_cameo_refuses_before_target_or_direct_launch_but_allows_rig
 /// `CCINIClass::ReadAction` maps that unknown name to action 0 (`None`), so
 /// the cameo launches at (0, 0) and recharges at once instead of arming the
 /// type's `Cursor=Scout` for a click on the shroud.
-#[cfg(feature = "ares")]
 #[test]
 fn ares_custom_action_on_a_stock_reveal_arms_the_target_cursor() {
     use crate::rules::superweapon_type::SuperWeaponKind;
 
+    let _ares = crate::rules::ares_switch::read_ares_way(true);
     let rules = RuleSet::from_ini_with_fixed_art_for_test(
         &IniFile::from_str(
             "[MouseCursors]\nScout=100,8,2\nNoCanDo=101,8,2\n\
@@ -392,7 +392,11 @@ fn ares_custom_action_on_a_stock_reveal_arms_the_target_cursor() {
     .unwrap();
     let sw = rules.super_weapon("SpySatSpecial").unwrap();
     assert_eq!(sw.kind, SuperWeaponKind::PsychicReveal);
-    assert_eq!(sw.action.as_deref(), Some("Custom"));
+    assert_eq!(
+        sw.action.as_deref(),
+        Some("PsychicReveal"),
+        "the Ares handler normalizes its finite-range action to a targeted reveal"
+    );
     // SWTypeExt::WhatAction draws the type's own Ares cursor, not the stock
     // PsychicReveal one; it only answers for a handled type or Action=Custom.
     let cursors = rules

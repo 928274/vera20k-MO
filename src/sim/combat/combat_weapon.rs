@@ -805,16 +805,12 @@ fn techno_what_weapon_should_i_use<'r>(
     target: Option<&TargetFacts>,
     get_weapon: impl Fn(i32) -> Option<&'r WeaponType>,
 ) -> i32 {
-    // Ares 0.C `TechnoTypeExt::NoAmmoWeapon` (installed Ares hook on
-    // `TechnoClass::What_Weapon_Should_I_Use`): an Ammo count at or below
+    // Ares 0.C `TechnoTypeExt::NoAmmoWeapon`: an Ammo count at or below
     // NoAmmoAmount overrides the entire ladder with that one slot. The
     // DeployFire class arms of `what_weapon_should_i_use` already ran and
     // still win, matching Ares' documented limitation. MO's `[ABRM]` fires
     // its 0-cost `AbramsLaser` secondary while its 1-round 145mm reloads.
-    #[cfg(feature = "ares")]
-    if let Some(index) = obj.no_ammo_weapon_index(attacker.ammo) {
-        return index;
-    }
+    // `rules::ares_techno_type` owns the sole runtime implementation.
     // A @ 0x006F333B: turreted non-gattling types fire the gunner slot,
     // unconditionally (`-1` collapses to 0).
     if obj.turret_count > 0 && !obj.is_gattling {
@@ -1755,9 +1751,9 @@ mod tests {
     /// MO's `[ABRM]`: `Ammo=1`, `NoAmmoWeapon=1` and a 0-cost
     /// `AbramsLaser` secondary. Ares 0.C overrides the ordinary ladder only
     /// while the live Ammo count is at or below `NoAmmoAmount`.
-    #[cfg(feature = "ares")]
     #[test]
     fn ares_no_ammo_weapon_overrides_the_ladder_at_the_inclusive_boundary() {
+        let _ares = crate::rules::ares_switch::read_ares_way(true);
         let ini = IniFile::from_str(
             "[VehicleTypes]\n0=ABRM\n[ABRM]\nPrimary=CANNON\nSecondary=LASER\n\
              NoAmmoWeapon=1\nNoAmmoAmount=1\nAmmo=2\n\
@@ -1771,28 +1767,29 @@ mod tests {
             1 => rules.weapon("LASER"),
             _ => None,
         };
+        let target = TargetFacts::Cell {
+            land_type: LandType::Clear.as_index(),
+            tile_in_water_set: false,
+            bridge_flag: false,
+        };
         for (ammo, expected) in [(2, 0), (1, 1), (0, 1)] {
             let attacker = AttackerFacts {
                 ammo,
                 ..facts(TechnoKind::Unit)
             };
             assert_eq!(
-                what_weapon_should_i_use(&rules, obj, &attacker, None, &weapon),
+                what_weapon_should_i_use(&rules, obj, &attacker, Some(&target), &weapon),
                 expected,
                 "Ammo {ammo}"
             );
         }
-        // An unset NoAmmoWeapon must leave the retail ladder alone.
-        assert_eq!(
-            rules.object("ABRM").unwrap().no_ammo_weapon_index(0),
-            Some(1)
-        );
+        assert_eq!(obj.techno_combat().ammo().no_ammo_weapon(0), Some(1));
     }
 
-    #[cfg(feature = "ares")]
     #[test]
     fn ares_no_ammo_weapon_reads_the_live_ammo_tracker_and_resolves_the_laser() {
         use crate::sim::ammo::TechnoAmmo;
+        let _ares = crate::rules::ares_switch::read_ares_way(true);
         let ini = IniFile::from_str(
             "[VehicleTypes]\n0=ABRM\n[ABRM]\nPrimary=CANNON\nSecondary=LASER\n\
              NoAmmoWeapon=1\nAmmo=1\n\
@@ -1802,28 +1799,26 @@ mod tests {
         let rules = RuleSet::from_ini(&ini).unwrap();
         let obj = rules.object("ABRM").unwrap();
         let mut tank = GameEntity::test_default(1, "ABRM", "Americans", 5, 5);
-        let entities = EntityStore::new();
-        let interner = crate::sim::intern::test_interner();
-        for (rounds, expected_index, expected_weapon) in [(1, 0, "CANNON"), (0, 1, "LASER")] {
+        let target = TargetFacts::Cell {
+            land_type: LandType::Clear.as_index(),
+            tile_in_water_set: false,
+            bridge_flag: false,
+        };
+        let weapon = |index: i32| match index {
+            0 => rules.weapon("CANNON"),
+            1 => rules.weapon("LASER"),
+            _ => None,
+        };
+        for (rounds, expected_index) in [(1, 0), (0, 1)] {
             let mut ammo = TechnoAmmo::new(1);
             ammo.set_current_for_test(rounds);
             tank.install_ammo_for_test(Some(ammo));
             let attacker = attacker_facts(&tank, obj);
             assert_eq!(attacker.ammo, rounds);
-            let selected = resolve_selected_weapon(
-                &rules,
-                &tank,
-                obj,
-                &attacker,
-                None,
-                &entities,
-                &interner,
-            )
-            .unwrap();
-            assert_eq!(selected.index, expected_index, "Ammo {rounds}");
-            assert_eq!(selected.weapon_id, expected_weapon);
+            let index = what_weapon_should_i_use(&rules, obj, &attacker, Some(&target), &weapon);
+            assert_eq!(index, expected_index, "Ammo {rounds}");
             assert_eq!(
-                selected.weapon.ammo_cost(),
+                weapon(index).unwrap().ammo_cost(),
                 if rounds == 0 { 0 } else { 1 },
                 "the fallback laser must not be blocked by T47's Ammo check"
             );
@@ -1832,9 +1827,9 @@ mod tests {
 
     /// Ares documents that NoAmmoWeapon cannot override DeployFireWeapon;
     /// the class arms of `0x005218E0`/`0x00746CD0` run before the ladder.
-    #[cfg(feature = "ares")]
     #[test]
     fn ares_deploy_fire_weapon_wins_over_no_ammo_weapon() {
+        let _ares = crate::rules::ares_switch::read_ares_way(true);
         let ini = IniFile::from_str(
             "[InfantryTypes]\n0=GUNNER\n[GUNNER]\nPrimary=RIFLE\nSecondary=BEAM\n\
              DeployFire=yes\nDeployFireWeapon=2\nNoAmmoWeapon=1\n\

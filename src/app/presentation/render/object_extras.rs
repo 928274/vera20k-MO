@@ -383,18 +383,14 @@ fn draw_status_prefix<'a>(
     if let (Some(index), Some(shape)) = (power_off, overlay.power_off()) {
         batch.draw_passthrough_range(pass, shape.texture(), buffer, *index, 1);
     }
-    // Phobos `DrawInsignia` retains a custom SHP pointer per rank. Its
-    // instance carries that SHP's own atlas UVs, so the rank draw must bind
-    // that shape's texture rather than the stock PIPS strip — otherwise the
-    // flag art samples PIPS and appears as coloured stripes.
-    if let Some(index) = rank {
-        let shape = match rank_insignia {
-            Some(name) => overlay.insignia_shape(name),
-            None => overlay.pips(),
-        };
-        if let Some(shape) = shape {
-            batch.draw_passthrough_range(pass, shape.texture(), buffer, *index, rank_count);
-        }
+    // A custom insignia rank was cut from its own SHP; binding the PIPS strip
+    // would stretch that whole strip over the insignia's quad.
+    let rank_shape = match rank_insignia {
+        Some(name) => overlay.insignia_shape(name),
+        None => overlay.pips(),
+    };
+    if let (Some(index), Some(shape)) = (rank, rank_shape) {
+        batch.draw_passthrough_range(pass, shape.texture(), buffer, *index, rank_count);
     }
     draw_health_bar(
         pass,
@@ -628,8 +624,8 @@ fn rank_run_end(runs: &[ObjectExtrasRun], start: usize) -> usize {
             || !scale.is_empty()
             || !group_rectangles.is_empty()
             || !group_text.is_empty()
-            || rank_insignia != first_insignia
             || *index != *first + (end - start) as u32
+            || rank_insignia != first_insignia
         {
             break;
         }
@@ -638,56 +634,6 @@ fn rank_run_end(runs: &[ObjectExtrasRun], start: usize) -> usize {
     end
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn rank_run(index: u32, insignia: Option<&str>) -> ObjectExtrasRun {
-        ObjectExtrasRun::Status {
-            parent: 0,
-            bomb_clock: None,
-            wrench: None,
-            power_off: None,
-            rank: Some(index),
-            rank_insignia: insignia.map(str::to_string),
-            background: None,
-            shield_background: None,
-            fills: 0..0,
-            scale: 0..0,
-            self_heal: None,
-            group_rectangles: 0..0,
-            group_text: 0..0,
-            digital_text: Vec::new(),
-            digital_shapes: Vec::new(),
-            talk_bubble: None,
-        }
-    }
-
-    /// A rank draw binds the atlas named by `rank_insignia` (PIPS when none).
-    /// `rank_run_end` batches adjacent parents into ONE bound draw, so it may
-    /// only merge parents whose rank instances share that texture. Without the
-    /// guard a custom USFLAG* parent was drawn through a neighbouring PIPS
-    /// binding and showed up as coloured stripes.
-    #[test]
-    fn rank_runs_merge_only_with_the_same_insignia_atlas() {
-        let stock = vec![rank_run(0, None), rank_run(1, None)];
-        assert_eq!(rank_run_end(&stock, 0), 2);
-        let custom = vec![
-            rank_run(0, Some("USFLAG2.SHP")),
-            rank_run(1, Some("USFLAG2.SHP")),
-        ];
-        assert_eq!(rank_run_end(&custom, 0), 2);
-        let mixed = vec![
-            rank_run(0, None),
-            rank_run(1, Some("USFLAG2.SHP")),
-            rank_run(2, Some("USFLAG2.SHP")),
-        ];
-        assert_eq!(rank_run_end(&mixed, 0), 1);
-        assert_eq!(rank_run_end(&mixed, 1), 3);
-        let distinct = vec![
-            rank_run(0, Some("USFLAG.SHP")),
-            rank_run(1, Some("USFLAG2.SHP")),
-        ];
-        assert_eq!(rank_run_end(&distinct, 0), 1);
-    }
-}
+#[cfg(all(test, tests_app_presentation_render))]
+#[path = "object_extras_tests.rs"]
+mod tests;

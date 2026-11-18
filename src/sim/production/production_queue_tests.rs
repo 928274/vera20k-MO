@@ -2975,8 +2975,8 @@ fn local_strip_raw_place_preserves_remote_change_and_shared_hash() {
 /// and the old MO-only loop fired, producing two free copies instead of one.
 /// This fixture is therefore also the regression guard against a second
 /// cloning pass.
-#[cfg(feature = "ares")]
 fn cloning_facility_world(cloneable_override: &str) -> (Simulation, RuleSet, InternedId, u64) {
+    let _ares = crate::rules::ares_switch::read_ares_way(true);
     let rules = RuleSet::from_ini(&IniFile::from_str(&format!(
         "[Countries]\n0=Americans\n[InfantryTypes]\n[VehicleTypes]\n0=MTNK\n\
          [AircraftTypes]\n[BuildingTypes]\n0=GAWEAP\n1=GAWEAP2\n\
@@ -3016,7 +3016,6 @@ fn cloning_facility_world(cloneable_override: &str) -> (Simulation, RuleSet, Int
     (sim, rules, owner, product)
 }
 
-#[cfg(feature = "ares")]
 fn mtnk_count(sim: &Simulation) -> usize {
     let mtnk = sim.interner.get("MTNK").unwrap();
     sim.substrate
@@ -3028,7 +3027,6 @@ fn mtnk_count(sim: &Simulation) -> usize {
 
 /// Ares `CloningFacility=yes` is the vehicle counterpart of the Cloning Vats:
 /// MO's `[GAWEAP2]` must copy what the ordinary `[GAWEAP]` produces.
-#[cfg(feature = "ares")]
 #[test]
 fn ares_cloning_facility_duplicates_vehicle_output() {
     let (mut sim, rules, _owner, product) = cloning_facility_world("");
@@ -3050,7 +3048,6 @@ fn ares_cloning_facility_duplicates_vehicle_output() {
 
 /// `Cloneable=no` suppresses `CloningFacility=yes` as well as the native
 /// Infantry Cloning Vats loop.
-#[cfg(feature = "ares")]
 #[test]
 fn ares_cloneable_no_suppresses_cloning_facility() {
     let (mut sim, rules, _owner, product) = cloning_facility_world("Cloneable=no");
@@ -3068,9 +3065,9 @@ fn ares_cloneable_no_suppresses_cloning_facility() {
 
 /// Ares `InitialPayload.Types/Nums`: a transport built with the MO-style keys
 /// constructs its free passengers straight into cargo.
-#[cfg(feature = "ares")]
 #[test]
 fn ares_initial_payload_fills_cargo_at_construction() {
+    let _ares = crate::rules::ares_switch::read_ares_way(true);
     let rules = RuleSet::from_ini(&IniFile::from_str(
         "[Countries]\n0=Americans\n[InfantryTypes]\n0=E1\n[VehicleTypes]\n0=CARRIER\n\
          [AircraftTypes]\n[BuildingTypes]\n\
@@ -3082,7 +3079,7 @@ fn ares_initial_payload_fills_cargo_at_construction() {
     let mut sim = Simulation::new();
     sim.intern_rule_type_ids(&rules);
     sim.resolve_type_handles(&rules);
-    let _carrier = sim
+    let carrier = sim
         .construct_object_limbo_at_height(
             "CARRIER",
             "Americans",
@@ -3094,6 +3091,12 @@ fn ares_initial_payload_fills_cargo_at_construction() {
             crate::sim::world::FrameEffects::default(),
         )
         .expect("transport with an initial payload");
+    sim.create_ares_initial_payload(
+        carrier,
+        &rules,
+        None,
+        crate::sim::world::FrameEffects::default(),
+    );
     let e1 = sim.interner.get("E1").unwrap();
     assert_eq!(
         sim.substrate

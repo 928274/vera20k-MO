@@ -152,35 +152,48 @@ pub(crate) fn super_weapon_index_of_name<'a>(
 
 /// HouseClass::GetPlayerAtFromString @ 0x00510FB0 and ReadHouseType
 /// @ 0x00475540 use selectors starting at 0x117B. VERA extends their eight
-/// entries to the room capacity, preserving the original A..H identities.
+/// entries to the offline Skirmish row count, preserving the original A..H
+/// identities.
 pub(crate) const HOUSE_TYPE_PLAYER_AT_SELECTORS: std::ops::Range<i32> =
-    0x117B..0x117B + crate::skirmish_launch::NETWORK_PLAYER_SLOT_COUNT as i32;
+    0x117B..0x117B + crate::skirmish_launch::SKIRMISH_MAX_SLOT_COUNT as i32;
 
 /// Shared case-sensitive player token reader for Session and TeamType House.
-/// VERA extension: A..Z, AA..AD represent the thirty start slots.
+/// VERA extension: A..Z, then AA..AZ through DA..DP, represent the
+/// one hundred twenty start slots.
 pub(crate) fn house_type_player_at(incoming: &str) -> Option<u8> {
+    // A..Z plus the four two-letter blocks A..D cover 130 selectors; the
+    // slot bound below stops at DP, the one hundred twentieth.
+    const _: () = assert!(crate::skirmish_launch::SKIRMISH_MAX_SLOT_COUNT <= 26 + 26 * 4);
     let letters = incoming.strip_prefix("<Player @ ")?.strip_suffix('>')?;
     let slot = match letters.as_bytes() {
         [letter @ b'A'..=b'Z'] => letter - b'A',
-        [b'A', letter @ b'A'..=b'Z'] => 26 + letter - b'A',
+        // Slots 26..119: two letters, the first carrying the block of twenty-six.
+        [first @ b'A'..=b'D', letter @ b'A'..=b'Z'] => 26 + (first - b'A') * 26 + (letter - b'A'),
         _ => return None,
     };
-    (usize::from(slot) < crate::skirmish_launch::NETWORK_PLAYER_SLOT_COUNT).then_some(slot)
+    (usize::from(slot) < crate::skirmish_launch::SKIRMISH_MAX_SLOT_COUNT).then_some(slot)
 }
 
 /// INIClass::Put_HouseType @ 0x00475610 player-selector text, extended to
-/// the same thirty slots as the reader. Other HouseType values stay with callers.
+/// the same one hundred twenty slots as the reader. Other HouseType values stay with
+/// callers.
 pub fn house_type_player_at_text(index: i32) -> Option<String> {
     if !HOUSE_TYPE_PLAYER_AT_SELECTORS.contains(&index) {
         return None;
     }
     let slot = (index - HOUSE_TYPE_PLAYER_AT_SELECTORS.start) as u8;
-    let (prefix, letter) = if slot < 26 {
-        ("", slot)
+    let text = if slot < 26 {
+        char::from(b'A' + slot).to_string()
     } else {
-        ("A", slot - 26)
+        // The same A..D blocks the reader takes: AA..AZ through DA..DP.
+        let block = (slot - 26) / 26;
+        format!(
+            "{}{}",
+            char::from(b'A' + block),
+            char::from(b'A' + (slot - 26) % 26)
+        )
     };
-    Some(format!("<Player @ {prefix}{}>", char::from(b'A' + letter)))
+    Some(format!("<Player @ {text}>"))
 }
 
 /// One native `RulesClass::Process` source in its runtime position.
@@ -1922,6 +1935,34 @@ impl ProcessedRulesLayers {
                         category,
                         member.native_stored_id.as_str(),
                         &member.weapon_slots,
+                    )
+                })
+            })
+    }
+
+    /// Ares insignia state after every reached TechnoType ReadINI pass.
+    pub(crate) fn techno_ares_insignia_states(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            ObjectCategory,
+            &str,
+            &crate::rules::insignia_type::AresInsignia,
+        ),
+    > {
+        self.native_type_construction_trace
+            .registry_state()
+            .families
+            .iter()
+            .filter_map(|(family, members)| {
+                family.object_category().map(|category| (category, members))
+            })
+            .flat_map(|(category, members)| {
+                members.iter().map(move |member| {
+                    (
+                        category,
+                        member.native_stored_id.as_str(),
+                        &member.ares_insignia,
                     )
                 })
             })
@@ -4118,6 +4159,8 @@ pub(crate) struct AresGeneralRules {
     infantry_electrocuted: Option<String>,
     /// +0x28 `CanMakeStuffUp` (false): `sim::ares_make_stuff_up`.
     can_make_stuff_up: bool,
+    /// +0x48 `EnemyInsignia` (true; constructor 0x1002A3DF).
+    enemy_insignia: bool,
     /// +0x49 `EnemyWrench` (true).
     enemy_wrench: bool,
     /// +0x4C `TeamRetaliate` (false): a computer team takes its attacker
@@ -4147,6 +4190,7 @@ impl Default for AresGeneralRules {
         Self {
             infantry_electrocuted: None,
             can_make_stuff_up: false,
+            enemy_insignia: true,
             enemy_wrench: true,
             team_retaliate: false,
             hunter_seeker: [0; 5],
@@ -4166,6 +4210,8 @@ impl AresGeneralRules {
         if let Some(general) = pass.section("General") {
             self.can_make_stuff_up =
                 general.read_ares_bool("CanMakeStuffUp", self.can_make_stuff_up);
+            // 0x1002ABF5.
+            self.enemy_insignia = general.read_ares_bool("EnemyInsignia", self.enemy_insignia);
             self.team_retaliate = general.read_ares_bool("TeamRetaliate", self.team_retaliate);
             self.message_silos_needed =
                 general.read_ares_csf_label("Message.SilosNeeded", &self.message_silos_needed);
@@ -4240,6 +4286,13 @@ impl AresGeneralRules {
     /// Ares.dll 10049FE0, hook 0x6F526C).
     pub(crate) fn enemy_wrench(&self) -> bool {
         self.enemy_wrench
+    }
+
+    /// `EnemyInsignia`: a player not allied with an object's owner sees its
+    /// rank insignia unless the type's `Insignia.ShowEnemy` says otherwise
+    /// (TechnoClass_DrawVeterancy, Ares.dll 1004E0C0, hook 0x70A990).
+    pub(crate) fn enemy_insignia(&self) -> bool {
+        self.enemy_insignia
     }
 
     /// `DiskLaserAnimEnabled`: a disk laser's hit plays the warhead's damage
@@ -4744,7 +4797,8 @@ impl NativeRulesRegistryState {
             rules_global_sounds: self.rules_global_sounds.clone(),
             rules_class_extra_lights: self.rules_class_extra_lights,
             // ReadCrateRules66BA08 retains the same process scalar on a
-            // failed root lookup, including prospective RMG agreement.
+            // failed root lookup in an offline preview. Network agreement
+            // projects from the cold registry instead.
             rules_crate: CrateRules {
                 heal_crate_sound: self.rules_crate.heal_crate_sound.clone(),
                 ..CrateRules::default()
@@ -5687,6 +5741,10 @@ struct ProcessedType {
     #[cfg(feature = "phobos")]
     #[serde(default)]
     phobos_insignia: crate::rules::insignia_type::PhobosInsignia,
+    /// Ares `TechnoTypeExt`'s insignia keys, read on every reached pass of
+    /// the same live TechnoType like Phobos's block above.
+    #[serde(default)]
+    ares_insignia: crate::rules::insignia_type::AresInsignia,
     /// Ares `SW.Warhead=`, read only for Type=GenericWarhead.
     generic_super_weapon_warhead: Option<String>,
     unit_delivery: Option<UnitDeliveryRules>,
@@ -5801,11 +5859,6 @@ pub(crate) struct TechnoTypeReferences {
     convert_water: Option<crate::rules::superweapon_type::DeliveryType>,
     #[serde(default)]
     convert_land: Option<crate::rules::superweapon_type::DeliveryType>,
-    /// Ares 2.0 UnitTypeExt::Convert.Deploy; same lookup-only pointer reader
-    /// (1003FA40/1003C650) as Convert.Water/Land, but on the Unit subclass.
-    #[cfg(feature = "ares")]
-    #[serde(default)]
-    convert_deploy: Option<crate::rules::superweapon_type::DeliveryType>,
 }
 
 impl TechnoTypeReferences {
@@ -5838,8 +5891,6 @@ impl TechnoTypeReferences {
             convert_script: None,
             convert_water: None,
             convert_land: None,
-            #[cfg(feature = "ares")]
-            convert_deploy: None,
         }
     }
 
@@ -5883,8 +5934,6 @@ impl TechnoTypeReferences {
         // Ares' Convert.* targets; only a read the Ares way sets them.
         object.bind_script_conversion(self.convert_script.as_ref());
         object.bind_surface_conversions(self.convert_water.as_ref(), self.convert_land.as_ref());
-        #[cfg(feature = "ares")]
-        object.bind_deploy_conversion(self.convert_deploy.as_ref());
     }
 }
 
@@ -6297,6 +6346,7 @@ impl ProcessedType {
             ore_gathering: crate::rules::object_type::PhobosOreGathering::default(),
             #[cfg(feature = "phobos")]
             phobos_insignia: Default::default(),
+            ares_insignia: Default::default(),
             generic_super_weapon_warhead: None,
             particle_warhead: None,
             voxel_anim_references: VoxelAnimTypeReferences::default(),
@@ -8876,6 +8926,14 @@ impl RulesPassProcessor {
                         .apply_pass(&raw, catalog.as_ref(), weapon_count, gunner);
                     self.phobos_insignia_types = catalog;
                 }
+                // Ares TechnoTypeExt reads its insignia keys on the same pass
+                // (Ares.dll 0x1003E355..0x1003E380, 0x1003E6D5).
+                if ares_way {
+                    let _ares = crate::rules::ares_switch::ares_reads();
+                    self.families.get_mut(&family).unwrap()[index]
+                        .ares_insignia
+                        .apply_pass(&raw);
+                }
                 if family == RulesTypeFamily::Infantry {
                     let member = &mut self.families.get_mut(&family).unwrap()[index];
                     member.infantry_pips.apply_pass(&raw);
@@ -9384,18 +9442,6 @@ impl RulesPassProcessor {
                         trailer.apply_read(animation, spawn_delay);
                     }
                     RulesTypeFamily::Vehicle => {
-                        // Ares 2.0 UnitTypeExt reader: Convert.Deploy points
-                        // at an existing same-class TechnoType. MO's Athena
-                        // Cannon, Siren, Aeroflyer and similar two-mode tanks
-                        // register their alternate mode as a VehicleType.
-                        #[cfg(feature = "ares")]
-                        if let Some(target) =
-                            self.resolve_existing_techno_type_from(&raw, "Convert.Deploy")
-                        {
-                            self.family_mut(family)[index]
-                                .techno_references
-                                .convert_deploy = target;
-                        }
                         let member = &mut self.families.get_mut(&family).unwrap()[index];
                         member.unit_speed_type = member
                             .unit_speed_type

@@ -120,17 +120,10 @@ const PUBLISHED_FLAGS: u8 = FLAG_REVEALED
 /// the raw effective radius; the independent border traversal clamps to11.
 pub const MAX_SIGHT_RANGE: u16 = 10;
 
-/// The radius cap a reveal walk admits. Retail `MapClass::RevealArea` looks up
-/// its spiral in a fixed table and so stops at 10; Ares 0.6 swaps that walk for
-/// a `CellSpreadEnumerator` (`Helpers/Enumerators.h`) whose enumeration runs to
-/// its own `Max` of `0x100`, letting `Sight > 10` light an octagonal field
-/// (`Ares-Docs/new/sight.html`). Under `ares` the reveal callers therefore
-/// clamp to the enumerator's `Max` instead of 10; without it they keep retail.
-pub(crate) const REVEAL_RADIUS_MAX: u16 = if cfg!(feature = "ares") {
-    0x100
-} else {
-    MAX_SIGHT_RANGE
-};
+/// Ares 0.6's `CellSpreadEnumerator::Max`: the reveal radius cap when the
+/// current game's Rules select the Ares way. Retail instead keeps
+/// [`MAX_SIGHT_RANGE`]. This is per-game state, not a build-time feature.
+const ARES_REVEAL_RADIUS_MAX: u16 = 0x100;
 
 /// World height of one terrain level, in leptons. Same retail value the
 /// coordinate-Z evaluator uses (`util::lepton::LEPTONS_PER_LEVEL`); kept local
@@ -2183,6 +2176,10 @@ impl FogState {
 /// `Simulation::sight_reveal_config`).
 #[derive(PartialEq)]
 pub struct VisionConfig {
+    /// Whether this game's Rules use Ares's reveal enumeration, including its
+    /// `Sight > 10` range and octagonal geometry. Captured from `RuleSet` so
+    /// simulation threads do not depend on a launch thread's local switch.
+    ares: bool,
     /// When true, Techno reveal/update readers require the canonical stored
     /// TechnoClass+0x3D5 membership byte. Headless fixtures without live
     /// MapClass authority leave this false.
@@ -2214,6 +2211,7 @@ pub struct VisionConfig {
 impl Default for VisionConfig {
     fn default() -> Self {
         Self {
+            ares: false,
             require_playfield_membership: false,
             veteran_sight: 0.0,
             leptons_per_sight_increase: 0,
@@ -2235,6 +2233,7 @@ impl VisionConfig {
         passive_owners: Vec<InternedId>,
     ) -> Self {
         Self {
+            ares: rules.ares(),
             require_playfield_membership,
             veteran_sight: rules.general.veteran_sight,
             leptons_per_sight_increase: rules.general.leptons_per_sight_increase,
@@ -2242,6 +2241,16 @@ impl VisionConfig {
             map_size,
             ally_reveal: rules.general.ally_reveal,
             passive_owners,
+        }
+    }
+
+    /// The reveal radius cap for this game: Ares's enumerator limit or the
+    /// retail spiral table's last ring.
+    pub(crate) fn reveal_radius_max(&self) -> u16 {
+        if self.ares {
+            ARES_REVEAL_RADIUS_MAX
+        } else {
+            MAX_SIGHT_RANGE
         }
     }
 
@@ -2289,7 +2298,7 @@ impl VisionConfig {
     ) -> (Vec<(u16, u16)>, Option<(u16, u16, i32)>) {
         let origin = reveal_area_origin((cell.0, cell.1, z), radius, self.map_size)
             .map(|(x, y)| (x as u16, y as u16, z));
-        let cells = collect_reveal_cells(
+        let cells = collect_reveal_cells_with_ares(
             cell.0,
             cell.1,
             radius,
@@ -2298,6 +2307,7 @@ impl VisionConfig {
             line_of_sight,
             dimensions,
             self.map_size,
+            self.ares,
         );
         (cells, origin)
     }
@@ -2456,15 +2466,18 @@ pub(crate) fn sight_admission(
         return None;
     }
     let (rx, ry, height_leptons) = geometry.origin;
-    let cells = collect_reveal_cells(
+    let cells = collect_reveal_cells_with_ares(
         rx,
         ry,
-        geometry.radius.clamp(0, i32::from(REVEAL_RADIUS_MAX)) as u16,
+        geometry
+            .radius
+            .clamp(0, i32::from(config.reveal_radius_max())) as u16,
         height_leptons,
         config.reveal_by_height,
         height_grid,
         (width, height),
         config.map_size,
+        config.ares,
     );
     // This vector indexes derived real-cell sight counts, not native receiver
     // calls. Map5678E0 still visits every geometry target (including the shared
@@ -2722,7 +2735,32 @@ impl CellLevels<'_> {
 /// - With `RevealByHeight=` off, a caller's outline argument (arg 3, the
 ///   Techno sight callers') walks only the outer three rings
 ///   (`0x00567A77..0x00567AA5`); retail rules leave the key on.
-pub(crate) fn collect_reveal_cells(
+#[cfg(any(test, feature = "test-support"))]
+fn collect_reveal_cells(
+    center_rx: u16,
+    center_ry: u16,
+    range: u16,
+    viewer_height_leptons: i32,
+    reveal_by_height: bool,
+    height_grid: Option<CellLevels<'_>>,
+    dimensions: (u16, u16),
+    map_size: Option<(i32, i32)>,
+) -> Vec<(u16, u16)> {
+    collect_reveal_cells_with_ares(
+        center_rx,
+        center_ry,
+        range,
+        viewer_height_leptons,
+        reveal_by_height,
+        height_grid,
+        dimensions,
+        map_size,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_reveal_cells_with_ares(
     center_rx: u16,
     center_ry: u16,
     range: u16,
@@ -2731,6 +2769,7 @@ pub(crate) fn collect_reveal_cells(
     height_grid: Option<CellLevels<'_>>,
     (width, height): (u16, u16),
     map_size: Option<(i32, i32)>,
+    ares: bool,
 ) -> Vec<(u16, u16)> {
     let Some((cx, cy)) = reveal_area_origin(
         (center_rx, center_ry, viewer_height_leptons),
@@ -2760,9 +2799,8 @@ pub(crate) fn collect_reveal_cells(
     // check degrades to the offset's sign relation (no `REVEAL_MIRROR` entry
     // exists past 10) and, unlike the retail spiral, the enumerator's offsets
     // are already Z-shifted through `Base()`.
-    #[cfg(feature = "ares")]
-    if range > MAX_SIGHT_RANGE {
-        let spread = usize::from(range).min(0x100); // CellSpreadEnumerator::Max
+    if ares && range > MAX_SIGHT_RANGE {
+        let spread = usize::from(range).min(usize::from(ARES_REVEAL_RADIUS_MAX));
         let limit_sqr = (spread as i64 + 1) * (spread as i64 + 1);
         let spread_i = spread as i32;
         for (dx, dy) in crate::sim::cell_rect::cell_spread_offsets(spread) {

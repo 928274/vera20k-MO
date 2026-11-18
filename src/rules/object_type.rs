@@ -374,6 +374,18 @@ pub const WEAPON_COUNT_LIMIT: i32 = 1024;
 /// which for a value near `i32::MAX` exhausts memory; no dock layout needs more.
 pub const DOCK_CONTACT_LIMIT: i32 = 256;
 
+/// VERA's bound on `MaxDebris=` and `MinDebris=` (TechnoType and Warhead).
+/// The debris throw (`0x00702291..0x0070256C`, `0x00469D0C..0x00469EB4`)
+/// draws and builds one piece at a time, so a value near `i32::MAX` freezes
+/// the match on the first death; retail throws at most 15.
+pub const DEBRIS_LIMIT: i32 = 256;
+
+/// VERA's bound on `SpawnsNumber=`, read by `TechnoTypeClass::ReadINI`'s
+/// ReadInt (`0x00714EF0`, `+0xD5C`). The spawn manager constructor
+/// (`0x006B6C90`) builds one node per spawn and each node its aircraft, so a
+/// value near `i32::MAX` exhausts memory; no carrier needs more.
+pub const SPAWNS_NUMBER_LIMIT: i32 = 128;
+
 /// Weapon-array slot the `Primary=` / `ElitePrimary=` keys name
 /// (`TechnoTypeClass+0x898` / `+0xA94`).
 pub const WEAPON_SLOT_PRIMARY: usize = 0;
@@ -903,6 +915,9 @@ pub struct ObjectType {
     /// the ordered TechnoType reader.
     #[cfg(feature = "phobos")]
     pub phobos_insignia: crate::rules::insignia_type::PhobosInsignia,
+    /// Ares `TechnoTypeExt` insignia keys (`Insignia*`, `InsigniaFrame*`,
+    /// `Insignia.ShowEnemy`), accumulated like the Phobos block above.
+    pub ares_insignia: crate::rules::insignia_type::AresInsignia,
     /// Phobos `Passengers.BySize` (`Valueable<bool>`, default yes): the
     /// passenger-count key `DrawInsignia` indexes `Insignia.PassengersN`
     /// with. Its other consumer, the NoQueueUpToEnter admission rewrite, is
@@ -1282,12 +1297,6 @@ pub struct ObjectType {
     convert_script: Option<crate::rules::superweapon_type::DeliveryType>,
     convert_water: Option<crate::rules::superweapon_type::DeliveryType>,
     convert_land: Option<crate::rules::superweapon_type::DeliveryType>,
-    /// Ares 2.0 `UnitTypeExt::Convert.Deploy`: the same-class type an
-    /// `IsSimpleDeployer=yes` Unit converts into AFTER its deployment (and
-    /// optional `DeployingAnim`) finishes. MO's `[BASS]`/`[BASS2]` pair uses
-    /// it for the Athena Cannon's two firing modes.
-    #[cfg(feature = "ares")]
-    convert_deploy: Option<crate::rules::superweapon_type::DeliveryType>,
     /// TechnoTypeExt+1DC, a registered UnitType used by Ares' water draw.
     water_image: Option<String>,
     turret_rot_override: Option<i32>,
@@ -1524,14 +1533,6 @@ pub struct ObjectType {
     /// TechnoType+680, ReadINI71474C (InitialAmmo); -1 selects Ammo at
     /// Aircraft InitFromType414033..41404B. Other signed values are retained.
     pub initial_ammo: i32,
-    /// Ares 0.C `TechnoTypeExt::NoAmmoWeapon` (Valueable<int>, default -1):
-    /// the weapon-array index selected while `TechnoClass+0x2FC Ammo` is at or
-    /// below `NoAmmoAmount`. Read by Ares' `What_Weapon_Should_I_Use` hook,
-    /// which overrides the ordinary ladder entirely. MO's `[ABRM]` uses
-    /// `NoAmmoWeapon=1` with `Ammo=1` and a 0-cost `AbramsLaser` secondary.
-    no_ammo_weapon: i32,
-    /// Ares 0.C `NoAmmoAmount` (Valueable<int>, default 0), inclusive bound.
-    no_ammo_amount: i32,
     /// TechnoType+698, raw signed frames. Constructor711122 seeds0;
     /// ReadINI71486A..71487E retains the current value as ReadInt's default.
     pub reload: i32,
@@ -1556,7 +1557,8 @@ pub struct ObjectType {
     /// resolvable value is the sole gate on creating a spawn manager, matching
     /// `TechnoClass::Init_Managers`.
     pub spawns: Option<String>,
-    /// Spawn pool capacity (`SpawnsNumber=`). Default 0.
+    /// Spawn pool capacity (`SpawnsNumber=`). Default 0, at most
+    /// [`SPAWNS_NUMBER_LIMIT`].
     pub spawns_number: i32,
     /// Frames before a destroyed spawn child is rebuilt (`SpawnRegenRate=`).
     pub spawn_regen_rate: u32,
@@ -1759,7 +1761,7 @@ pub struct ObjectType {
     /// pointer vector (`RulesClass__ReadAI @ 0x00672AE0`, binding
     /// `0x00672B14..0x00672C01`). `RuleSet` stamps this after all type
     /// registries exist.
-    pub build_const_eligible: bool,
+    pub(super) build_const_eligible: bool,
     /// Native BuildingType registry index used by ordered House BasePlan nodes.
     /// Non-building types retain `-1`.
     pub base_plan_type_index: i32,
@@ -3102,16 +3104,6 @@ impl ObjectType {
         self.convert_script = target.cloned();
     }
 
-    /// Ares 0.C `TechnoClass_WhatWeaponShouldIUse` override: with a live Ammo
-    /// count at or below `NoAmmoAmount` the sole permitted slot is
-    /// `NoAmmoWeapon`. The class-level `DeployFireWeapon` arms of
-    /// `0x005218E0`/`0x00746CD0` run ahead of the ladder and win, as Ares
-    /// documents that this tag cannot override them.
-    #[cfg(feature = "ares")]
-    pub(crate) fn no_ammo_weapon_index(&self, ammo: i32) -> Option<i32> {
-        (self.no_ammo_weapon >= 0 && ammo <= self.no_ammo_amount).then_some(self.no_ammo_weapon)
-    }
-
     pub(crate) fn bind_super_weapon_techno_rules(
         &mut self,
         retained: &crate::rules::superweapon_influence::TechnoSuperWeaponRules,
@@ -3157,21 +3149,6 @@ impl ObjectType {
     ) {
         self.convert_water = water.cloned();
         self.convert_land = land.cloned();
-    }
-
-    #[cfg(feature = "ares")]
-    pub(crate) fn deploy_conversion(
-        &self,
-    ) -> Option<&crate::rules::superweapon_type::DeliveryType> {
-        self.convert_deploy.as_ref()
-    }
-
-    #[cfg(feature = "ares")]
-    pub(crate) fn bind_deploy_conversion(
-        &mut self,
-        target: Option<&crate::rules::superweapon_type::DeliveryType>,
-    ) {
-        self.convert_deploy = target.cloned();
     }
 
     /// Read-only projection of the retained WaterImage pointer.
@@ -4343,6 +4320,11 @@ impl ObjectType {
         }
     }
 
+    /// Membership in the ruleset's ordered `[AI] BuildConst=` list.
+    pub fn build_const_eligible(&self) -> bool {
+        self.build_const_eligible
+    }
+
     /// BuildingType gate used by the native base-reservation setter. With
     /// Ares, `BuildingExt::ExtData::IsBaseNormal @ 10011810` (hooks
     /// `0x00440C08` Unlimbo, `0x00445A72` Limbo, `0x00456370` the neighbour
@@ -4519,8 +4501,8 @@ impl ObjectType {
         // no folding step, so the 17 `[VehicleTypes]` that spell it
         // `Maxdebris=3` are invisible to gamemd and keep the constructor
         // default of 0 (`TechnoTypeClass::Constructor 0x00710FB7`).
-        let max_debris = section.read_int("MaxDebris", 0);
-        let min_debris = section.read_int("MinDebris", 0).max(0);
+        let max_debris = section.read_int("MaxDebris", 0).min(DEBRIS_LIMIT);
+        let min_debris = section.read_int("MinDebris", 0).clamp(0, DEBRIS_LIMIT);
         let max_debris = max_debris.max(min_debris);
 
         Self {
@@ -4827,6 +4809,7 @@ impl ObjectType {
             // accumulates these keys over every reached pass.
             #[cfg(feature = "phobos")]
             phobos_insignia: crate::rules::insignia_type::PhobosInsignia::default(),
+            ares_insignia: crate::rules::insignia_type::AresInsignia::default(),
             #[cfg(feature = "phobos")]
             phobos_passengers_by_size: crate::rules::ares_switch::not_ares_read(|| {
                 section.read_ares_bool("Passengers.BySize", true)
@@ -5000,8 +4983,6 @@ impl ObjectType {
             convert_script: None,
             convert_water: None,
             convert_land: None,
-            #[cfg(feature = "ares")]
-            convert_deploy: None,
             water_image: None,
             turret_rot_override: None,
             spotlight: Default::default(),
@@ -5082,9 +5063,6 @@ impl ObjectType {
             deploying_anim: None,
             ammo: section.read_int("Ammo", -1),
             initial_ammo: section.read_int("InitialAmmo", -1),
-            // Ares 0.C TypeExt Valueable<int> readers: absent/invalid retains.
-            no_ammo_weapon: section.read_ares_int("NoAmmoWeapon", -1),
-            no_ammo_amount: section.read_ares_int("NoAmmoAmount", 0),
             // TechnoTypeClass::ReadINI71486A..7148B2, raw signed frames.
             // The retained section folds each reached pass with its current
             // member as the next default; no time conversion or clamp.
@@ -5098,7 +5076,7 @@ impl ObjectType {
             // Spawn manager pool. Constructor null; only the ordered Process
             // owner reads `Spawns=`.
             spawns: None,
-            spawns_number: section.read_int("SpawnsNumber", 0),
+            spawns_number: section.read_int("SpawnsNumber", 0).min(SPAWNS_NUMBER_LIMIT),
             spawn_regen_rate: section.read_int("SpawnRegenRate", 0).max(0) as u32,
             spawn_reload_rate: section.read_int("SpawnReloadRate", 0).max(0) as u32,
             missile_spawn: section.read_bool("MissileSpawn", false),
@@ -5830,9 +5808,9 @@ mod tests {
     /// Ares `CloningFacility=yes` buildings intentionally carry no `Factory=`
     /// (Ares bug 1616741). They still need the rally-point UI, cursor and line;
     /// MO's `[GAWEAP2]` family is exactly this shape.
-    #[cfg(feature = "ares")]
     #[test]
     fn ares_cloning_facility_has_a_rally_line_without_factory() {
+        let _ares = crate::rules::ares_switch::read_ares_way(true);
         use super::{ObjectCategory, ObjectType};
         use crate::rules::ini_parser::IniFile;
 

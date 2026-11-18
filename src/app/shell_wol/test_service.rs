@@ -97,6 +97,7 @@ fn pending(state: &AppState) -> bool {
 fn setup_requests(state: &mut AppState) -> Vec<NetworkSetupRequest> {
     if state.match_state.session_mode() != SessionMode::Wol
         || !(state.frontend.shell_route.network_setup()
+            || super::lobby::visiting(state)
             || crate::app::shell_network_setup::quick_match(state))
     {
         return Vec::new();
@@ -340,7 +341,6 @@ fn host_options(
         }
     }
     launch.selected_map_file = Some(file.clone());
-    launch.rebuild_house_roster();
     let map_metadata = crate::app::shell_network_setup::local_map_metadata(state, &file)?;
     crate::app::shell_network_setup::service_event(
         state,
@@ -382,6 +382,7 @@ fn answer(state: &mut AppState, request: WolServiceRequest) {
         }
         WolServiceRequest::Connect { .. } => WolServiceEvent::Login(Ok(WolLoginAccepted {
             motd: crate::i18n::tr(MOTD),
+            lobby_visits: true,
         })),
         WolServiceRequest::ListChannels { kind, .. } => WolServiceEvent::Channels {
             kind,
@@ -391,6 +392,22 @@ fn answer(state: &mut AppState, request: WolServiceRequest) {
                 lobbies()
             },
         },
+        // VERA: the stand-in public lobby, visited from a game room.
+        WolServiceRequest::VisitLobby => {
+            let mut members = lobby_members();
+            members.push(WolMember {
+                squad: SQUAD,
+                ..member(&nickname(state), 0)
+            });
+            let Some(mut channel) = lobbies()
+                .into_iter()
+                .find(|lobby| lobby.name == super::lobby::PUBLIC_LOBBY_NAME)
+            else {
+                return;
+            };
+            channel.users = members.len() as i32;
+            WolServiceEvent::VisitJoined(WolJoined { channel, members })
+        }
         WolServiceRequest::JoinChannel { mut channel, .. } => {
             let local = nickname(state);
             let lobby = channel.kind != GAME_CHANNEL;
@@ -547,6 +564,9 @@ fn answer(state: &mut AppState, request: WolServiceRequest) {
         | WolServiceRequest::CancelWait
         | WolServiceRequest::Chat { .. }
         | WolServiceRequest::Emote { .. }
+        | WolServiceRequest::EndVisit
+        | WolServiceRequest::VisitChat { .. }
+        | WolServiceRequest::VisitEmote { .. }
         // Server-side page/find/language enforcement is not simulated.
         | WolServiceRequest::SetLangFilter(_)
         | WolServiceRequest::SetFindPage { .. }
@@ -562,6 +582,7 @@ fn lobby_greeting(state: &mut AppState) {
     let line = |from, text: &str| WolServiceEvent::Message {
         from,
         text: text.encode_utf16().collect(),
+        localized: false,
         private: false,
         action: false,
         ansi: false,
@@ -772,6 +793,7 @@ fn match_requested(state: &mut AppState) {
     let line = |text: String, private: bool, options| WolServiceEvent::Message {
         from: member(MATCHBOT, MEMBER_OPERATOR),
         text: text.encode_utf16().collect(),
+        localized: false,
         private,
         action: false,
         ansi: true,

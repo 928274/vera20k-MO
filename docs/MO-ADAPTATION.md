@@ -41,10 +41,20 @@
 - `ares_tolerant_root_is_usable`：容忍 AI/规则根文件中的悬空引用，否则 MO 无法进入游戏。
 - `expandmo##.mix` / `thememo.ini` / `artmo` / `aimo` 根加载与根选择。
 - `SkirmishColorMode::MENTAL_OMEGA`（13 色）。
-- Sight 上限放宽（`REVEAL_RADIUS_MAX`）与八角形视野分支。
+- Sight 上限放宽（`VisionConfig::reveal_radius_max`）与八角形视野分支。
 - BGM 自动播放、CnCNet 启动链路、SHP 建筑炮塔、军衔 insignia、围墙阵营色、
-  `InitialPayload`、中立磁能球体等 MO 玩法与表现适配。
+  中立磁能球体等 MO 玩法与表现适配。
 - 三个游戏 bug 修复（矿石、建造厂、cameo / 武器动画列表）。
+
+### 已由上游运行时实现接管的旧适配
+
+以下能力不要再恢复 MO 早期的 Cargo-feature 分支，否则可能重复执行：
+
+- `Convert.Deploy`：`ares_techno_type` + `unit_simple_mission_unload`。
+- `NoAmmoWeapon` / `NoAmmoAmount`：`techno_combat().ammo()` 的运行时选择。
+- `InitialPayload`：Unlimbo/Place 后的 `create_ares_initial_payload()`。
+- `CloningFacility`：出厂尾部的 `kick_out_ares_clones()`。
+- MO `SpySatSpecial`：上游 Ares `PsychicReveal` handler 负责按点击位置揭图。
 
 ## INI 语法层：已改为只以上游为准
 
@@ -68,24 +78,25 @@
 特殊分支也一并删除（该文件其余 MO 适配保留）。本 fork 新增的 5 个 INI 相关测试
 仍保留，断言在上游实现下依然成立。
 
-**唯一行为差异**：不带 `--features ares` 的构建不再有 `+=` 兜底，会退回原版
-「同名 `+` 键只读最后一个」的原生行为。MO 必须使用 `--features ares,phobos`，
-因此不受影响。
+**当前行为**：上游已删除 Cargo `ares` feature，Ares INI 语法改由每局 Rules 的
+运行时 `ares_way()` 判定。MO 的 `profile="mo"` 会按 Ares 游戏读取规则；构建时只保留
+`phobos` feature，不能再传 `--features ares`。
 
 仍属本 fork 独有的 INI 能力在别的文件，未受影响：`ares_tolerant_root_is_usable`
 （悬空引用容忍）、`expandmo##.mix` / `thememo.ini` / `artmo` / `aimo` 根加载与根选择。
 
 ## 构建与部署
 
-必须使用 Ares + Phobos feature，且禁用默认 feature：
+必须启用 Phobos feature 并禁用默认 feature；Ares 已在所有构建中编译，由运行时 Rules
+开关选择行为：
 
 ```sh
-cargo build --release --no-default-features --features ares,phobos --bin vera20k
+cargo build --release --no-default-features --features phobos --bin vera20k
 ```
 
-Windows 上需先准备 MSVC 14.44 / Windows SDK 10.0.22621 的 `PATH` / `INCLUDE` / `LIB` /
-`CC` / `CXX` 环境变量。产物为 `target/release/vera20k.exe`，部署时复制到游戏目录
-（替换前建议备份旧 exe）。编译收尾若出现 `reg.exe` 被安全策略拦截，属于编译完成后的
+Windows 构建与部署统一使用 `bash scripts/build-mo.sh`。脚本固定 MSVC 14.44 /
+Windows SDK 10.0.26100.0 的工具链环境，产物为 `target/release/vera20k.exe`，并在替换
+游戏目录中的 exe 前保留备份。编译收尾若出现 `reg.exe` 被安全策略拦截，属于编译完成后的
 磁盘检查，不影响产物。
 
 ## 脚本化扩展层（阶段 0a → 2a）
@@ -115,12 +126,10 @@ Windows 上需先准备 MSVC 14.44 / Windows SDK 10.0.22621 的 `PATH` / `INCLUD
 
 ## 上游构建修复
 
-合并 `3a05cc27d` 后，上游新增的 Ares RMG 代码在
-`--no-default-features --features ares,phobos`（本 fork 的发布配置）下无法编译：
-`map/rmg/pipeline.rs` 引用了 `RmgConstructionOutcome`，但 `map/rmg/mod.rs` 只在
-`cfg(any(test, feature="test-support"))` 下 re-export 它。上游最新 `86b33c8be`
-仍未修复。本 fork 把该类型改为无条件 re-export（类型本身在
-`construction_trace.rs` 里就是无条件定义的），只保留 `RmgConstructionEvent` 继续 gate。
+早期 `--no-default-features --features ares,phobos` 下的 RMG re-export 问题已随上游
+构建特性调整失去现实意义：当前不存在 Cargo `ares` feature，标准 MO 构建为
+`--no-default-features --features phobos`。不要再恢复旧 feature 门控或重复实现；应由
+运行时 `ares_way()` / `RuleSet::ares()` 决定行为。
 
 ## 已知待验证项
 

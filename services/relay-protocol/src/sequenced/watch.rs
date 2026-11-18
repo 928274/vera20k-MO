@@ -25,8 +25,9 @@ pub(crate) const WATCH_SOURCE: u8 = MAX_PEERS;
 /// A watcher silent this long loses its place.
 const WATCH_SILENCE_S: u64 = 30;
 /// A room notes its stream's end this often, and keeps enough of these
-/// marks for the longest delay.
-const WATCH_MARK_MS: u64 = 1000;
+/// marks for the longest delay: a delayed watcher's stream grows by this
+/// much at a time.
+pub const WATCH_MARK_MS: u64 = 1000;
 const WATCH_MARKS: usize = MAX_WATCH_DELAY_SECONDS as usize + 2;
 /// Checksums every player reported alike, kept one per this many frames
 /// for watchers' sync check, and how many are kept.
@@ -130,7 +131,6 @@ pub(crate) struct Watcher {
     key: SecretKey,
     pub(crate) session: u32,
     pub(crate) endpoint: SocketAddrV4,
-    received: ReplayWindow,
     pub(crate) sent: u64,
     last_seen: u64,
     // For the feedback tail of its STATUS (spec §3.4).
@@ -157,7 +157,6 @@ impl Watcher {
             key: message.key.clone(),
             session,
             endpoint,
-            received: ReplayWindow::default(),
             sent: 0,
             last_seen: now,
             link: crate::link::ReaderLink::new(now_ms),
@@ -175,10 +174,9 @@ impl Watcher {
         endpoint: SocketAddrV4,
         now_ms: u64,
     ) -> Result<(), RelayError> {
-        self.received.accept(sequence)?;
+        self.link.heard(sequence, now_ms)?;
         // NAT rebinding moves the hop, as a player's (spec §6.2 "换地址").
         self.endpoint = endpoint;
-        self.link.heard(sequence, now_ms);
         Ok(())
     }
 
@@ -413,7 +411,8 @@ impl RelayServer {
         match existing {
             Some(index) if same_lease => {
                 let watcher = &room.watchers[index];
-                if message.sequence <= watcher.received.maximum && watcher.endpoint != source {
+                if message.sequence <= watcher.link.highest_received() && watcher.endpoint != source
+                {
                     return Err(RelayError::Replay);
                 }
             }
@@ -582,9 +581,13 @@ impl RelayServer {
             }]);
         }
         let feedback = watcher.link.feedback(now_ms);
-        let replies = match (request, ordering.as_mut()) {
-            (READY_REQUEST | PULL_REQUEST, None) => error(OrderError::Inactive, 0),
-            (READY_REQUEST, Some(ordering)) if payload.len() == WATCH_READY_LEN => {
+        let failure = ordering
+            .as_ref()
+            .and_then(|room| room.federation_failure_reply(now_ms));
+        let replies = match (request, ordering.as_mut(), failure) {
+            (_, _, Some(reply)) => reply,
+            (READY_REQUEST | PULL_REQUEST, None, _) => error(OrderError::Inactive, 0),
+            (READY_REQUEST, Some(ordering), _) if payload.len() == WATCH_READY_LEN => {
                 if payload[1..] != ordering.agreement {
                     error(OrderError::AgreementMismatch, 0)
                 } else {
@@ -593,7 +596,7 @@ impl RelayServer {
                     vec![ordering.watch_status(view, feedback, now_ms)]
                 }
             }
-            (PULL_REQUEST, Some(ordering)) => {
+            (PULL_REQUEST, Some(ordering), _) => {
                 // `[2][next varint]` (compaction spec §7.4).
                 let mut reader = Reader(&payload[1..]);
                 let cursor = reader.varint()?;
@@ -626,7 +629,7 @@ impl RelayServer {
                         Ok(records) => {
                             let mut replies = vec![ordering.watch_status(view, feedback, now_ms)];
                             replies.extend(
-                                pack::encode_pack_v2(&records, WATCH_PULL_PACKS)
+                                pack::encode_pack(&records, WATCH_PULL_PACKS)
                                     .into_iter()
                                     .map(|(pack, _)| pack),
                             );

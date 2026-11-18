@@ -364,12 +364,11 @@ fn test_allied_visibility_is_shared() {
 
 // -- Sight cap tests --
 
-/// Retail `RevealArea` caps `Sight` at 10. Under `ares` the cap is lifted
-/// (see `collect_reveal_cells`'s octagonal branch), so this retail assertion
-/// is skipped there.
+/// Retail `RevealArea` caps `Sight` at 10; the runtime Ares switch lifts it
+/// (see `collect_reveal_cells`'s octagonal branch).
 #[test]
-#[cfg(not(feature = "ares"))]
 fn test_sight_capped_at_max_range() {
+    let _ares = crate::rules::ares_switch::read_ares_way(false);
     let mut store = EntityStore::new();
     // Spawn with sight=15, which exceeds MAX_SIGHT_RANGE (10).
     spawn_with_vision(&mut store, 1, "Americans", 20, 20, 15);
@@ -390,12 +389,25 @@ fn test_sight_capped_at_max_range() {
 /// Ares 0.6 lifts the `Sight` cap: `Sight > 10` lights an octagonal field via
 /// a `CellSpreadEnumerator` instead of being truncated to the retail 10.
 #[test]
-#[cfg(feature = "ares")]
 fn test_sight_extends_past_ten_under_ares() {
-    let cells = collect_reveal_cells(30, 30, 15, 0, false, None, (60, 60), None);
+    let _ares = crate::rules::ares_switch::read_ares_way(true);
+    let rules = crate::rules::ruleset::RuleSet::from_ini(
+        &crate::rules::ini_parser::IniFile::from_str("[General]\n"),
+    )
+    .unwrap();
+    let config = VisionConfig::new(&rules, None, false, Vec::new());
+    assert!(
+        config.ares,
+        "the production config captures the game's Ares way"
+    );
+    let (cells, _) = config.collect_area_cells((30, 30), 15, 0, None, (60, 60));
     // Retail radius 10 admits 309 cells; an Ares radius-15 octagon admits far
     // more, and reaches cells the retail walk never touches.
-    assert!(cells.len() > 309, "expected >309 cells, got {}", cells.len());
+    assert!(
+        cells.len() > 309,
+        "expected >309 cells, got {}",
+        cells.len()
+    );
     // A cell 15 straight out along an axis is inside the octagon.
     assert!(cells.contains(&(45, 30)));
     // The octagon is centred on the source.

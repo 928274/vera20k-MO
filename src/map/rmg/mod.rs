@@ -39,9 +39,8 @@ pub use x87::{Gaussian, TruncF64};
 #[cfg(any(test, feature = "test-support"))]
 pub use crate::map::construction_trace::RmgConstructionEvent;
 // `RmgConstructionOutcome` is defined unconditionally in construction_trace
-// and is matched by the Ares production path in `pipeline.rs`, which is built
-// with --no-default-features --features ares. Leaving it gated behind
-// test-support breaks that shipping configuration.
+// and is matched by the production path in `pipeline.rs`. Leaving it gated
+// behind test-support breaks a shipping build without default features.
 pub use crate::map::construction_trace::{
     RmgConstructionOutcome, RmgConstructionPhase, RmgConstructionTrace,
 };
@@ -116,9 +115,9 @@ const DIM_MIN: [i32; 7] = [70, 70, 70, 80, 90, 100, 100];
 const DIM_MAX: [i32; 7] = [80, 80, 80, 90, 100, 110, 120];
 /// The original's `NumPlayers` ceiling; the endpoint tables cover 2..=8.
 pub const NATIVE_MAX_PLAYERS: i32 = 8;
-/// VERA extension: random maps seat up to thirty players, the network and
-/// Skirmish seat count (`skirmish_launch::NETWORK_PLAYER_SLOT_COUNT`).
-pub const MAX_PLAYERS: i32 = crate::skirmish_launch::NETWORK_PLAYER_SLOT_COUNT as i32;
+/// VERA extension: random maps seat up to the offline Skirmish row count
+/// (`skirmish_launch::SKIRMISH_MAX_SLOT_COUNT`).
+pub const MAX_PLAYERS: i32 = crate::skirmish_launch::SKIRMISH_MAX_SLOT_COUNT as i32;
 
 /// The original's largest Width/Height option ("Very Large").
 pub const NATIVE_MAX_SIZE_OPTION: i32 = 3;
@@ -133,7 +132,8 @@ pub const MAX_SIZE_OPTION: i32 = NATIVE_MAX_SIZE_OPTION + EXTENDED_SIZES.len() a
 ///
 /// 2..=8 read the original tables unchanged. Above eight (VERA extension) the
 /// eight-player endpoints grow with the square root of the player count, so
-/// each player keeps the eight-player map's area: 30 players get 193..232.
+/// each player keeps the eight-player map's area: 30 players get 193..232 and
+/// 120 players 387..464.
 /// Integer square roots keep it bit-identical on every platform.
 fn dimension_endpoints(players: i32) -> (i32, i32) {
     if players <= NATIVE_MAX_PLAYERS {
@@ -459,7 +459,7 @@ mod tests {
         assert_eq!(dims(9, 0), (106, 106));
         assert_eq!(dims(30, 0), (193, 193));
         assert_eq!(dims(30, 3), (232, 232));
-        assert_eq!(dims(99, 3), (232, 232), "clamped to thirty players");
+        assert_eq!(dims(123, 3), (464, 464), "clamped to one hundred twenty players");
     }
 
     #[test]

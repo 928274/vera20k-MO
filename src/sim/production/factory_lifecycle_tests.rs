@@ -3971,9 +3971,10 @@ fn a_yard_going_offline_refreshes_the_defense_queue_with_ares() {
 /// MO's cloning war factories carry `BuildLimit=2`. With Phobos' building
 /// queue on, a second copy must be appendable while the first is the held
 /// front build; the same two copies queue fine when both are only waiting.
-#[cfg(all(feature = "ares", feature = "phobos"))]
+#[cfg(feature = "phobos")]
 #[test]
 fn held_build_limit_two_building_accepts_a_second_queued_copy() {
+    let _ares = crate::rules::ares_switch::read_ares_way(true);
     let mut ini = manager_ini();
     ini.merge(&IniFile::from_str(
         "[General]\nBuildingProductionQueue=yes\n[GAPOWR]\nBuildLimit=2\nBuildCat=Power\n",
@@ -3993,10 +3994,9 @@ fn held_build_limit_two_building_accepts_a_second_queued_copy() {
     ));
     let type_id = sim.interner.get("GAPOWR").unwrap();
     assert_eq!(
-        sim.houses[&owner].tracking().owned_count(
-            crate::map::entities::EntityCategory::Structure,
-            type_id
-        ),
+        sim.houses[&owner]
+            .tracking()
+            .owned_count(crate::map::entities::EntityCategory::Structure, type_id),
         1,
         "the held limbo building is already in the house's owned count"
     );

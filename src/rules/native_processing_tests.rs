@@ -287,13 +287,16 @@ fn powerup_globals_preserve_raw_indices_through_save_and_type_reset() {
 }
 
 #[test]
-fn player_at_supports_thirty_slots_without_constructing_countries() {
+fn player_at_supports_one_hundred_twenty_slots_without_constructing_countries() {
     let root = IniFile::from_str("[Countries]\n0=Americans\n");
     for (token, selector) in [
         ("<Player @ I>", 0x1183),
         ("<Player @ Z>", 0x1194),
         ("<Player @ AA>", 0x1195),
         ("<Player @ AD>", 0x1198),
+        ("<Player @ AZ>", 0x11AE),
+        ("<Player @ BA>", 0x11AF),
+        ("<Player @ DP>", 0x11F2),
     ] {
         let settings = IniFile::from_str(&format!("[MultiPlayer]\nSide={token}\n"));
         let (index, trace) = read_native_multiplayer_country(
@@ -311,9 +314,13 @@ fn player_at_supports_thirty_slots_without_constructing_countries() {
             1
         );
     }
-    assert_eq!(house_type_player_at("<Player @ AE>"), None);
+    assert_eq!(house_type_player_at("<Player @ DQ>"), None);
     assert_eq!(house_type_player_at("<Player @ [>"), None);
     assert_eq!(house_type_player_at("<player @ a>"), None);
+    assert_eq!(
+        house_type_player_at_text(0x117B + 119).as_deref(),
+        Some("<Player @ DP>")
+    );
 }
 
 #[test]
@@ -1963,7 +1970,6 @@ fn map_overrides_union_type_registries_by_value() {
 /// Ares/Phobos `+=name` registry appends: every physical `+` occurrence
 /// allocates its own type in file order, next to numbered entries. A mod's
 /// custom rules file registers its custom types and art this way.
-#[cfg(any(feature = "ares", feature = "phobos"))]
 #[test]
 fn append_key_registers_every_ares_list_entry() {
     // `+=` is Ares INI syntax; with the `ares` feature gone (4019cd2a0) the
@@ -2006,9 +2012,9 @@ fn append_key_registers_every_ares_list_entry() {
 
 /// Without Ares/Phobos the native walk still sees a single `+` key, so the
 /// stock YR registry is unchanged.
-#[cfg(not(any(feature = "ares", feature = "phobos")))]
 #[test]
 fn append_key_is_inert_for_stock_registry_walk() {
+    let _ares = crate::rules::ares_switch::read_ares_way(false);
     let root = IniFile::from_str("[VehicleTypes]\n0=MTNK\n+=CUSTOM\n+=SECOND\n");
     let rules = RulesLayerStack::new(root)
         .process()
@@ -2024,9 +2030,9 @@ fn append_key_is_inert_for_stock_registry_walk() {
 /// A mod's custom rules file registers its types with `+=` and then relies
 /// on Ares/Phobos per-type keys being read for them. Before the append-key
 /// fix none of these sections reached a type reader at all.
-#[cfg(feature = "ares")]
 #[test]
 fn appended_mo_type_reads_ares_and_phobos_extensions() {
+    let _ares = crate::rules::ares_switch::read_ares_way(true);
     let root = IniFile::from_str(
         "[VehicleTypes]\n+=CUSTOM\n[InfantryTypes]\n+=LUNR_UR\n\
          [BuildingTypes]\n+=GAWEAP2\n\
@@ -2040,13 +2046,21 @@ fn appended_mo_type_reads_ares_and_phobos_extensions() {
     let processed = RulesLayerStack::new(root).process().unwrap();
     let rules = RuleSet::from_processed_rules(&processed).unwrap();
     let custom = rules.object("CUSTOM").expect("+= registered vehicle");
-    assert_eq!(custom.initial_payload, vec![("LUNR_UR".to_owned(), 3)]);
+    let (payload_types, payload_nums) = custom.techno_combat().initial_payload();
+    assert_eq!(payload_types[0].id, "LUNR_UR");
+    assert_eq!(payload_nums, [3]);
     assert_eq!(custom.passengers, 3);
     assert!(custom.open_topped);
-    assert!(!custom.cloneable, "Cloneable=no is read");
+    assert!(
+        !custom.ares_production().cloneable(),
+        "Cloneable=no is read"
+    );
     let facility = rules.object("GAWEAP2").expect("+= registered building");
-    assert!(facility.cloning_facility);
-    assert!(facility.cloneable, "Cloneable defaults to yes");
+    assert!(facility.ares_production().cloning_facility());
+    assert!(
+        facility.ares_production().cloneable(),
+        "Cloneable defaults to yes"
+    );
     #[cfg(feature = "phobos")]
     {
         assert_eq!(custom.phobos_insignia.base.images[0], ["USFLAG.shp"]);

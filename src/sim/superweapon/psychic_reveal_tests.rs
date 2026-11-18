@@ -9,7 +9,7 @@ use crate::rules::{ini_parser::IniFile, ruleset::RuleSet};
 use crate::sim::superweapon::chronosphere_tests::{
     charge_super, click, retail_rules_binding, world_with,
 };
-use crate::sim::world::SimSoundEvent;
+use crate::sim::world::{SimSoundEvent, Simulation};
 use serde_json::Value;
 use std::collections::BTreeSet;
 
@@ -196,11 +196,11 @@ fn a_launch_maps_the_native_cells_for_its_house_and_allies() {
 
 /// Mental Omega's `[SpySatSpecial]` is a stock `Type=PsychicReveal` with
 /// Ares's `Action=Custom`: the cameo arms a target cursor, and a click on the
-/// shroud must still reach case 11 with that cell, not the direct-launch
-/// (0, 0) cell, and reveal around it.
-#[cfg(feature = "ares")]
+/// shroud must reach the Ares reveal handler with that cell, not the direct-
+/// launch (0, 0) cell, and reveal around it.
 #[test]
 fn ares_custom_action_click_reveals_around_the_clicked_cell() {
+    let _ares = crate::rules::ares_switch::read_ares_way(true);
     let rules = RuleSet::from_ini(&IniFile::from_str(
         "[General]\n[CombatDamage]\nPsychicRevealRadius=3\n\
          [AudioVisual]\nPsychicRevealActivateSound=PsychicRevealActivate\n\
@@ -215,27 +215,86 @@ fn ares_custom_action_click_reveals_around_the_clicked_cell() {
             .unwrap()
             .action
             .as_deref(),
-        Some("Custom")
+        Some("PsychicReveal"),
+        "the Ares handler normalizes its finite-range action to a targeted reveal"
     );
     let target = (30, 30);
     let (rules, mut sim, owner) = world_with(rules, 64, &[]);
-    charge_super(&mut sim, owner, "SpySatSpecial");
-    OBSERVED.set(Some(Vec::new()));
+    sim.set_playfield_bounds_for_test(Some(crate::sim::cell_rect::PlayfieldBounds {
+        base: 32,
+        off_fc: -64,
+        off_100: -64,
+        off_104: 128,
+        off_108: 128,
+    }));
+    sim.set_playfield_size_height_for_test(Some(32));
+    let sw_type = charge_super(&mut sim, owner, "SpySatSpecial");
     click(&mut sim, &rules, owner, "SpySatSpecial", target);
-    let observed = OBSERVED.take().unwrap();
-    // `launch` logs its RevealArea arguments once, then calls the reveal
-    // owner twice (final 0 and final 1) with the same pair.
-    assert_eq!(observed.len(), 1, "{observed:?}");
-    let ground = crate::sim::projectile::cell_ground_coord(
-        sim.resolved_terrain.as_ref(),
-        target.0,
-        target.1,
-    );
-    assert_eq!(
-        observed[0],
-        Observed::RevealArea([ground.x, ground.y, ground.z], 3),
+    // Upstream's Ares PsychicReveal handler owns the launch. Assert its
+    // observable map result, not the stock-only RevealArea observer.
+    assert!(sim.fog.is_cell_revealed(owner, target.0, target.1));
+    assert!(sim.fog.is_cell_revealed(owner, target.0 + 1, target.1));
+    assert!(
+        !sim.fog.is_cell_revealed(owner, 0, 0),
         "a direct-launch cameo would reveal at (0, 0), not the clicked cell"
     );
-    // The cells RevealArea writes are the native-oracle test above; a
-    // headless world without playfield bounds has no map diamond to write.
+    assert_eq!(
+        sim.super_weapons[&owner][&sw_type].ares_launch_count, 1,
+        "the Ares handler must activate exactly once"
+    );
+}
+
+fn ares_scene(range: &str) -> (RuleSet, Simulation, crate::sim::intern::InternedId) {
+    let _ares = crate::rules::ares_switch::read_ares_way(true);
+    let ini = IniFile::from_str(&format!(
+        "[AudioVisual]\nPsychicRevealActivateSound=RevealCue\n[CombatDamage]\nPsychicRevealRadius=2\n[SuperWeaponTypes]\n0={REVEAL}\n\
+         [{REVEAL}]\nType=PsychicReveal\nAction=None\nSW.Range={range}\n",
+    ));
+    let rules = RuleSet::from_ini_with_fixed_art_and_sounds_for_test(
+        &ini,
+        &IniFile::empty(),
+        &["RevealCue"],
+    )
+    .unwrap();
+    let (rules, mut sim, owner) = world_with(rules, 64, &[]);
+    sim.set_playfield_bounds_for_test(Some(crate::sim::cell_rect::PlayfieldBounds {
+        base: 24,
+        off_fc: -64,
+        off_100: -64,
+        off_104: 128,
+        off_108: 128,
+    }));
+    sim.set_playfield_size_height_for_test(Some(24));
+    charge_super(&mut sim, owner, REVEAL);
+    (rules, sim, owner)
+}
+
+#[test]
+fn ares_whole_map_launch_from_the_cameo_explores_the_playable_diamond() {
+    let (rules, mut sim, owner) = ares_scene("-1");
+    assert!(rules.super_weapon(REVEAL).unwrap().action.is_none());
+    click(&mut sim, &rules, owner, REVEAL, (0, 0));
+    assert!(sim.sound_events.iter().any(|event| matches!(event, SimSoundEvent::VocAtCoord { sound_id, .. } if sound_id == "RevealCue")));
+    assert!(sim.fog.is_cell_revealed(owner, 40, 25));
+    assert!(sim.fog.is_cell_revealed(owner, 12, 18));
+    assert!(!sim.fog.is_cell_revealed(owner, 3, 3));
+}
+
+#[test]
+fn ares_authored_radius_and_rectangle_reveal_only_their_cells() {
+    let target = (25, 25);
+    let (rules, mut sim, owner) = ares_scene("12");
+    click(&mut sim, &rules, owner, REVEAL, target);
+    assert!(sim.fog.is_cell_revealed(owner, 36, 25));
+    assert!(!sim.fog.is_cell_revealed(owner, 37, 25));
+
+    let (rules, mut sim, owner) = ares_scene("6,2");
+    click(&mut sim, &rules, owner, REVEAL, target);
+    assert!(sim.fog.is_cell_revealed(owner, 22, 24));
+    assert!(!sim.fog.is_cell_revealed(owner, 25, 26));
+
+    // A positive range beyond the grid still visits only stored cells.
+    let (rules, mut sim, owner) = ares_scene("1e38");
+    click(&mut sim, &rules, owner, REVEAL, target);
+    assert!(sim.fog.is_cell_revealed(owner, 40, 25));
 }
