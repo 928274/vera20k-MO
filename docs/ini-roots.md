@@ -123,7 +123,10 @@ in place of the `expandmd` slots, then `mapsmo##.mix`, `multimo.mix`,
 The master, cache, local, language, audio, conquer and cameo archives keep their
 YR names. `yr`, `auto` and `custom` keep the YR names: Auto probes the roots
 only after the archives are mounted, so it cannot choose the archives it
-probes, and an MO folder needs an explicit `mo`. Archive verbs of the `asset`
+probes, and an MO folder needs an explicit `mo`. MO always plays its Ares
+extension set: under `Ares=Auto`, the explicit `mo` profile reads Ares INI
+syntax and Rules even when a pruned install has no `ares.mix`; `On` and `Off`
+remain explicit overrides. Archive verbs of the `asset`
 tool take `--ini-profile mo` for the same names and do not read the host
 `[ini]`. The headless `headless_scenario::load_with_launch_and_ini` still
 mounts the YR names.

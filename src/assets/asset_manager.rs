@@ -333,6 +333,9 @@ pub struct AssetManager {
     /// VERA: the player's Ares setting this game opened with
     /// (`util::ares_launch::AresSetting`).
     ares_setting: crate::util::ares_launch::AresSetting,
+    /// Startup archive family; an explicit MO launch also implies its Ares
+    /// extension set when the player's setting is Auto.
+    archive_family: ArchiveFamily,
 }
 
 /// Test fixtures open the retail install once per test process and hand each
@@ -362,6 +365,7 @@ impl Clone for AssetManager {
             ra2_dir: self.ra2_dir.clone(),
             mod_dir: self.mod_dir.clone(),
             ares_setting: self.ares_setting,
+            archive_family: self.archive_family,
         }
     }
 }
@@ -540,16 +544,20 @@ impl AssetManager {
 
     /// Whether this game is an Ares game (`rules::ares_switch`): the player's
     /// Ares setting is On, or, set to Auto, the selected mod mounted Ares's
-    /// `ares.mix`, its own copy or the installation's. With no mod selected,
-    /// Auto ignores it; Off never mounts it. Such a game's files take the
-    /// forms an Ares launch gives them: the appended audio bags and the
-    /// supplemental string tables.
+    /// `ares.mix`, its own copy or the installation's. An explicit MO profile
+    /// also selects Ares under Auto: MO always uses that extension set, even
+    /// in a pruned install without `ares.mix`. With no mod selected, a YR
+    /// launch's Auto ignores an installed archive; Off never mounts it. Such
+    /// a game's files take the forms an Ares launch gives them: the appended
+    /// audio bags and the supplemental string tables.
     pub fn ships_ares(&self) -> bool {
         use crate::util::ares_launch::AresSetting;
         match self.ares_setting {
             AresSetting::On => true,
             AresSetting::Off => false,
-            AresSetting::Auto => self.ares_mix_mounted(),
+            AresSetting::Auto => {
+                self.archive_family == ArchiveFamily::Mo || self.ares_mix_mounted()
+            }
         }
     }
 
@@ -594,6 +602,7 @@ impl AssetManager {
             ra2_dir: ra2_dir.to_path_buf(),
             mod_dir: mod_dir.map(Path::to_path_buf),
             ares_setting: Default::default(),
+            archive_family: Default::default(),
         })
     }
 
@@ -706,6 +715,7 @@ impl AssetManager {
     ) -> Result<Self, AssetError> {
         let mut manager = Self::from_roots(ra2_dir, mod_dir)?;
         manager.ares_setting = ares_setting;
+        manager.archive_family = family;
         let tag = family.tag();
 
         // WinMain registers the YR language archive before the RA2 fallback,
@@ -719,10 +729,13 @@ impl AssetManager {
         // supply it or inherit the installation's copy. Decide before any
         // mount: Ares changes source priority as well as INI parsing.
         // VERA: the player's Ares setting On mounts the installation's copy
-        // with no mod selected too, and Off mounts none.
+        // with no mod selected too, and Off mounts none. An explicit MO
+        // profile takes Ares' mount order under Auto even when a pruned
+        // install has no ares.mix; the file itself remains optional.
         let ares = match ares_setting {
             crate::util::ares_launch::AresSetting::Auto => {
-                manager.mod_selected() && manager.loose_path("ares.mix").is_some()
+                family == ArchiveFamily::Mo
+                    || (manager.mod_selected() && manager.loose_path("ares.mix").is_some())
             }
             crate::util::ares_launch::AresSetting::On => true,
             crate::util::ares_launch::AresSetting::Off => false,
@@ -2867,6 +2880,7 @@ mod tests {
             ra2_dir: PathBuf::new(),
             mod_dir: None,
             ares_setting: Default::default(),
+            archive_family: Default::default(),
         };
         manager.rebuild_indexes();
 
@@ -2952,6 +2966,7 @@ mod tests {
             ra2_dir: PathBuf::new(),
             mod_dir: None,
             ares_setting: Default::default(),
+            archive_family: Default::default(),
         };
         manager.rebuild_indexes();
         manager
@@ -3027,6 +3042,7 @@ mod tests {
             ra2_dir: PathBuf::new(),
             mod_dir: None,
             ares_setting: Default::default(),
+            archive_family: Default::default(),
         };
         manager.rebuild_indexes();
 
@@ -3070,6 +3086,7 @@ mod tests {
             ra2_dir: PathBuf::new(),
             mod_dir: None,
             ares_setting: Default::default(),
+            archive_family: Default::default(),
         };
         manager.rebuild_indexes();
         manager.catalog_named_nested_archives();
@@ -3111,6 +3128,7 @@ mod tests {
             ra2_dir: PathBuf::new(),
             mod_dir: None,
             ares_setting: Default::default(),
+            archive_family: Default::default(),
         };
         manager.rebuild_indexes();
 
@@ -3153,6 +3171,7 @@ mod tests {
             ra2_dir: PathBuf::new(),
             mod_dir: None,
             ares_setting: Default::default(),
+            archive_family: Default::default(),
         };
         manager.rebuild_indexes();
 
@@ -3190,6 +3209,7 @@ mod tests {
             ra2_dir: PathBuf::new(),
             mod_dir: None,
             ares_setting: Default::default(),
+            archive_family: Default::default(),
         };
         manager.rebuild_indexes();
 
@@ -3248,6 +3268,7 @@ mod tests {
             ra2_dir: PathBuf::new(),
             mod_dir: None,
             ares_setting: Default::default(),
+            archive_family: Default::default(),
         };
         manager.rebuild_indexes();
 

@@ -251,3 +251,27 @@ fn mo_family_mounts_spawner_renamed_archives_and_their_ini_roots() {
     }
     assert_eq!(assets.ini_roots().rules(), "rulesmo.ini");
 }
+
+/// Mental Omega always runs its Ares extension set. An explicit MO profile is
+/// therefore sufficient under Auto; a pruned install need not ship ares.mix.
+/// The explicit Off escape hatch still selects stock reads.
+#[test]
+fn mo_profile_auto_is_an_ares_game_without_ares_mix_and_off_still_wins() {
+    let directory = audio_test_install("mo-ares-setting");
+    for (setting, expected) in [
+        (crate::util::ares_launch::AresSetting::Auto, true),
+        (crate::util::ares_launch::AresSetting::On, true),
+        (crate::util::ares_launch::AresSetting::Off, false),
+    ] {
+        let assets = AssetManager::with_mod_and_ares(
+            directory.path(),
+            None,
+            MediaArchiveMode::STOCK_DIGITAL,
+            setting,
+            ArchiveFamily::Mo,
+        )
+        .unwrap();
+        assert!(!assets.ares_mix_mounted());
+        assert_eq!(assets.ships_ares(), expected, "{setting:?}");
+    }
+}

@@ -8,8 +8,10 @@
 //! map, TMCJ4F) holds a key that an Ares reader finds and no stock reader
 //! reads in that section, or when the selected mod mounts its own or the
 //! installation's `ares.mix` (Ares mounts it from `Load_Bootstrap_AresMIX`, hook
-//! `0x0053029E`). Retail data holds neither, so a retail game plays as
-//! gamemd. The player's Ares setting (`util::ares_launch::AresSetting`) can
+//! `0x0053029E`). An explicit MO profile also reads the Ares way under Auto,
+//! including a pruned install with no `ares.mix`. Retail data holds no Ares
+//! keys, so a retail game plays as gamemd. The player's Ares setting
+//! (`util::ares_launch::AresSetting`) can
 //! replace that answer for a whole launch: On makes every game an Ares game,
 //! as a mounted `ares.mix` does, and Off keeps every key from turning Ares on
 //! ([`launch_keys_off`]). Every build lets the switch turn on, the release
@@ -43,9 +45,10 @@
 //! reads (list capacities, the `[WeaponTypes]` pre-allocation, the generic
 //! prerequisites and armors), adds its own, and hooks every INI text load
 //! (its `+` keys, `[Child]:[Base]` sections, later-wins keys and
-//! `[#include]`); a game that ships `ares.mix` has its INIs loaded and its
-//! Rules processed and projected the Ares way ([`ares_way`]), any other game
-//! the stock way. With no mod selected, an installed `ares.mix` is ignored
+//! `[#include]`); a game that ships `ares.mix` or uses the explicit MO profile
+//! has its INIs loaded and its Rules processed and projected the Ares way
+//! ([`ares_way`]), any other game the stock way. With no mod selected, a YR
+//! launch's installed `ares.mix` is ignored
 //! unless the player's Ares setting is On; a selected mod can mount its own
 //! or the installation's copy, and the setting Off mounts none
 //! (`AssetManager::ships_ares`). The few Ares readers whose state only Ares

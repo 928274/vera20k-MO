@@ -1369,6 +1369,44 @@ mod tests {
         );
     }
 
+    /// An MO Auto launch reads Ares' `+=` includes even when a pruned install
+    /// has no ares.mix. This is the startup capability Country=10 checks.
+    #[test]
+    fn mo_profile_auto_reads_ares_includes_without_ares_mix() {
+        use crate::assets::asset_manager::ArchiveFamily;
+        use crate::util::ini_roots::{IniProfile, IniRootConfig};
+
+        let dir = crate::assets::asset_manager::test_support::audio_test_install("mo-ares-include");
+        std::fs::write(dir.path().join("rulesmo.ini"), b"[#include]\n+=extra.ini\n").unwrap();
+        std::fs::write(dir.path().join("extra.ini"), b"[General]\nBuildSpeed=.9\n").unwrap();
+        std::fs::write(dir.path().join("artmo.ini"), b"[General]\n").unwrap();
+        std::fs::write(dir.path().join("aimo.ini"), b"[General]\n").unwrap();
+        let config = IniRootConfig {
+            profile: IniProfile::Mo,
+            ..Default::default()
+        };
+        let assets = AssetManager::with_mod_and_ares(
+            dir.path(),
+            None,
+            MediaArchiveMode::STOCK_DIGITAL,
+            Default::default(),
+            ArchiveFamily::Mo,
+        )
+        .unwrap()
+        .with_ini_roots(&config)
+        .unwrap();
+        let mut process =
+            ProcessAssets::new_with_ini_config(MediaArchiveMode::STOCK_DIGITAL, false, config);
+        let (rules, _) = process.initialize_sources_if_needed(&assets).unwrap();
+
+        assert!(process.reads_ares_way());
+        assert_eq!(
+            rules.unwrap().production.build_speed.bits(),
+            f64::from(0.9f32).to_bits(),
+            "the MO root's Ares include must reach the projected Rules"
+        );
+    }
+
     /// MO's spawner renames BATTLEMD to BATTLEMO with the other MO roots.
     #[test]
     fn mo_profile_reads_the_mo_campaign_catalog() {

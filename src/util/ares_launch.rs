@@ -1,5 +1,6 @@
 //! Whether the game this process opened for play is an Ares game: it ships
-//! Ares's `ares.mix`, or the player's Ares setting says so.
+//! Ares's `ares.mix`, uses the explicit MO profile, or the player's Ares
+//! setting says so.
 //!
 //! Ares.dll patches a whole launch: once it is loaded, every INI text load
 //! takes its syntax and every Rules read its replacements. VERA has no DLL to
@@ -28,8 +29,8 @@ static SETTING: AtomicU8 = AtomicU8::new(AresSetting::Auto as u8);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AresSetting {
     /// The game's data decides (`rules::ares_switch`): a selected mod that
-    /// mounts `ares.mix` makes an Ares game, and Ares keys in its rules or
-    /// map turn Ares on.
+    /// mounts `ares.mix` or an explicit MO profile makes an Ares game, and
+    /// Ares keys in its rules or map turn Ares on.
     #[default]
     Auto = 0,
     /// Every game is an Ares game, as if its mod shipped `ares.mix`: its INIs
