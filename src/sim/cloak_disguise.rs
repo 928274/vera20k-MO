@@ -228,6 +228,19 @@ pub(crate) fn visual_character(
     if state == 0 || query.map_editor || is_building {
         return 0;
     }
+    // MO's `[General] CloakingStages=1` collapses the native ramp: with one
+    // stage, `progress * 256 / stages` is 0 or 256, so states 1 and 3 flip
+    // straight between opaque and hidden (character 5), with none of the
+    // retail 1..4 stages. An observer whose sensors cover the cell must keep
+    // the steady "seen as cloaked" answer (3, drawn at 50% by
+    // `DrawState::cloak_selector`) through those frames, exactly as a fully
+    // cloaked Ghost Miner does. Only the screen call takes this shortcut:
+    // the explicit `(1, house)` query used by GetFireError (T17) and by
+    // CloakingTick's own state transitions keeps its native answer, so a
+    // sensed cloaked unit stays attackable without changing the fire gates.
+    if !query.force_sensor && query.observer_senses_cell {
+        return 3;
+    }
     if state == 2 {
         return hidden_unless_sensed(owned_by_current_house, owner_present, query);
     }
@@ -394,7 +407,7 @@ impl CloakRuntime {
 
     /// Install a fixture's progress.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn set_depth_for_test(&mut self, depth: u32) {
+    pub fn set_depth_for_test(&mut self, depth: u32) {
         self.depth = depth;
     }
 
@@ -1265,6 +1278,57 @@ pub(in crate::sim) mod mirage_tests;
 #[cfg(all(test, tests_sim_c_g))]
 mod tests {
     use super::*;
+
+    /// MO sets `[General] CloakingStages=1` and `CloakDelay=0`. With a single
+    /// stage the native `scaled = progress * 256 / stages` goes straight from
+    /// 0 to 256, so a cloaking/uncloaking object has no 1..4 ramp: the screen
+    /// sees it fully opaque (state 0) or fully hidden (character 5). An
+    /// observer whose sensors cover the cell must instead keep the Ghost
+    /// Miner's steady 50% ghost (character 3) through those frames.
+    /// `DrawState::cloak_selector` maps 2 | 3 to TRANSLUCENCY_50 (opacity 0.5).
+    /// The explicit `(1, house)` query that GetFireError and CloakingTick use
+    /// is deliberately left on the native answer.
+    #[test]
+    fn mo_single_cloak_stage_keeps_a_sensed_enemy_at_ghost_opacity() {
+        let screen = |senses| {
+            VisualCharacterQuery::screen(true, true, senses, false, false, false)
+        };
+        let sensor = |senses| VisualCharacterQuery::sensor(true, senses, false);
+        for state in [1, 2, 3] {
+            assert_eq!(
+                visual_character(state, 1, 1, false, false, false, true, screen(true)),
+                3,
+                "state {state}: a sensed enemy stays a 50% ghost"
+            );
+            assert_eq!(
+                visual_character(state, 1, 1, false, false, false, true, screen(false)),
+                5,
+                "state {state}: an unsensed enemy keeps the native answer"
+            );
+        }
+        // The force-sensor query never takes the screen-only shortcut: T17's
+        // "cloaked target this house cannot sense" verdict is unchanged.
+        assert_eq!(
+            visual_character(1, 1, 1, false, false, false, true, sensor(true)),
+            5,
+            "a cloaking object's forced sensor answer stays native"
+        );
+        assert_eq!(
+            visual_character(2, 0, 1, false, false, false, true, sensor(true)),
+            3,
+            "a sensed fully cloaked object is still visible to the sensor query (T17)"
+        );
+        // A zero-stage or plain uncloaked object is unaffected.
+        assert_eq!(
+            visual_character(0, 0, 1, false, false, false, true, screen(true)),
+            0
+        );
+        assert_eq!(
+            visual_character(2, 0, 9, false, false, false, true, screen(true)),
+            3,
+            "retail nine-stage cloak keeps its steady sensed ghost too"
+        );
+    }
 
     #[test]
     fn cloak_transition_vectors() {

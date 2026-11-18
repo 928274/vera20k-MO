@@ -8,3 +8,10 @@ RUSTBIN='/c/Users/92827/.rustup/toolchains/stable-x86_64-pc-windows-msvc/bin'
 export PATH="$MSVC/bin/HostX64/x64:$SDK/bin/$SDKVER/x64:$RUSTBIN:$PATH"
 export INCLUDE='C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include;C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\ucrt;C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\um;C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\shared;C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\winrt'
 export LIB='C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\lib\x64;C:\Program Files (x86)\Windows Kits\10\Lib\10.0.26100.0\ucrt\x64;C:\Program Files (x86)\Windows Kits\10\Lib\10.0.26100.0\um\x64'
+# winresource (build.rs: the exe icon and version resource) otherwise probes
+# HKLM\SOFTWARE\Microsoft\Windows Kits\Installed Roots through `reg.exe`.
+# When reg.exe is unavailable the probe fails, compile_for() only warns, and
+# the binary silently loses its whole .rsrc section. RC_PATH is the crate's
+# documented override: it names rc.exe outright, skips the registry query and
+# derives the SDK Include root from the path above.
+export RC_PATH='C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\rc.exe'

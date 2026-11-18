@@ -212,7 +212,6 @@ impl AiFactorySlot {
 }
 
 impl HouseAiProduction {
-    #[cfg(feature = "npatch")]
     fn parallel_slot_mut(&mut self, category: ObjectCategory, naval: bool) -> &mut i32 {
         let index = match category {
             ObjectCategory::Aircraft => 0,
@@ -232,7 +231,6 @@ impl HouseAiProduction {
     /// NPSE 2.0 Factory_AI C2F07C..C2F11F reserves before naval
     /// compatibility, allocation and StartProduction. Only vehicles split
     /// on Naval. Failure and PointerExpired do not compensate this write.
-    #[cfg(feature = "npatch")]
     pub(crate) fn reserve_parallel(&mut self, category: ObjectCategory, naval: bool) -> bool {
         let counter = self.parallel_slot_mut(category, naval);
         if *counter > 0 {
@@ -246,7 +244,6 @@ impl HouseAiProduction {
     /// and AbandonProduction C2EFB4..C2F06D decrement unconditionally,
     /// then clamp signed negatives to zero. Callers own the admission phase
     /// and House identity; no per-object reservation flag changes that rule.
-    #[cfg(feature = "npatch")]
     pub(crate) fn release_parallel(&mut self, category: ObjectCategory, naval: bool) {
         let counter = self.parallel_slot_mut(category, naval);
         *counter = counter.wrapping_sub(1).max(0);
@@ -1658,7 +1655,6 @@ fn place_building(
         }
         // NPSE 2.0 building Exit_Object C2F1A3 releases only after
         // Unlimbo succeeds, including a wall that deleted its own object.
-        #[cfg(feature = "npatch")]
         if let Some(house) = sim.houses.get_mut(&owner) {
             house
                 .ai_production_mut()
@@ -1690,7 +1686,6 @@ fn place_building(
     }
     // NPSE 2.0 building Exit_Object C2F1A3 precedes slave handoff and
     // mission callbacks after successful Unlimbo; failed placement retains it.
-    #[cfg(feature = "npatch")]
     if let Some(house) = sim.houses.get_mut(&owner) {
         house
             .ai_production_mut()

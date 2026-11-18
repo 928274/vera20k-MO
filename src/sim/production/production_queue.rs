@@ -324,8 +324,11 @@ pub(in crate::sim) fn exit_produced_object(
             }
             // NPSE 2.0 C2EF95 (aircraft), C3395E/C3397F (vehicle),
             // C2F184 (infantry): release at this prefix, before later
-            // placement/FreeRadio retries can leave the object held.
-            #[cfg(feature = "npatch")]
+            // placement/FreeRadio retries can leave the object held. Ares
+            // serial queues share the counters, so this cannot be gated on
+            // `npatch`. It is a pure counter write: the Ares
+            // `CloningFacility` copy loop runs in the tails below and never
+            // reads the reservation.
             house
                 .ai_production_mut()
                 .release_parallel(product_type.category, producer_type.naval);

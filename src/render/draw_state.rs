@@ -593,6 +593,18 @@ mod tests {
     /// sensor covers its cell (`TechnoClass::IsSensorVisibleToPlayer`), the
     /// observer the capture asks.
     fn sensed_by_the_player(entity: &GameEntity) -> ObjectRecord {
+        sensed_by_the_player_with_rules(
+            entity,
+            crate::rules::ruleset::RuleSet::empty_for_test(),
+        )
+    }
+
+    /// [`sensed_by_the_player`] under caller-supplied rules, so a MO-shaped
+    /// `[General] CloakingStages=1` reaches `Seen::of`'s screen query.
+    fn sensed_by_the_player_with_rules(
+        entity: &GameEntity,
+        rules: &crate::rules::ruleset::RuleSet,
+    ) -> ObjectRecord {
         let mut sim = crate::sim::world::Simulation::new();
         *sim.interner_mut_for_test() = crate::sim::intern::test_interner();
         let viewer = sim.interner_mut_for_test().intern("SENSING-PLAYER");
@@ -604,13 +616,40 @@ mod tests {
         sim.fog_mut_for_test()
             .increment_sensor_at(viewer, cell(x), cell(y));
         sim.entities_mut_for_test().insert(entity.clone());
-        crate::app::presentation::frame::PresentationFrame::of_test(
-            &sim,
-            crate::rules::ruleset::RuleSet::empty_for_test(),
+        crate::app::presentation::frame::PresentationFrame::of_test(&sim, rules)
+            .object(entity.stable_id())
+            .cloned()
+            .expect("the object has a record")
+    }
+
+    /// MO's `[General] CloakingStages=1` + `CloakDelay=0`: a sensor-detected
+    /// enemy in the cloaking transition must still draw at the Ghost Miner's
+    /// steady 50% translucency, not flicker to fully hidden (character 5).
+    #[test]
+    fn mo_single_stage_cloak_sensed_enemy_draws_at_fifty_percent() {
+        let rules = crate::rules::ruleset::RuleSet::from_ini(
+            &crate::rules::ini_parser::IniFile::from_str(
+                "[General]\nCloakingStages=1\nCloakDelay=0\n",
+            ),
         )
-        .object(entity.stable_id())
-        .cloned()
-        .expect("the building has a record")
+        .expect("MO cloak rules");
+        assert_eq!(rules.general.cloaking_stages, 1);
+        let mut unit = entity();
+        let mut cloak = crate::sim::cloak_disguise::CloakRuntime::new(0);
+        cloak.set_state_for_test(1);
+        cloak.set_depth_for_test(1);
+        unit.cloak = Some(Box::new(cloak));
+        let record = sensed_by_the_player_with_rules(&unit, &rules);
+        assert_eq!(
+            record.seen.visual_character, 3,
+            "a sensed transition frame keeps character 3"
+        );
+        let body = DrawState::for_entity(&record, 0, 3, ObserverDrawContext::default());
+        assert!(body.visible, "the ghost is still drawn");
+        assert_eq!(
+            body.state.fx_params[0], 0.5,
+            "character 3 selects TRANSLUCENCY_50"
+        );
     }
 
     /// A fading building's body follows its GetVisualState (`0x004544A0`)

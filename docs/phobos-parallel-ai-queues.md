@@ -21,11 +21,17 @@ ForbidParallelAIQueues=false       ; boolean
 ```
 
 The tags apply unless `AllowParallelAIQueues=no`: Phobos defaults the gate to
-yes, and Ares documents `no` as the switch that stops AI cloning. With the gate
-on, the first factory building of a category claims the house's slot. A second
-building of the same category does not start its own build while that
-category's `ForbidParallelAIQueues.<Category>` is set, or while the house's
-current choice for that category (`Producing*TypeIndex`) has
+yes, and Ares documents `no` as the switch that stops AI cloning. VERA models
+that switch too: `=no` turns on Ares' serial mode, which refuses a second
+factory of the same class before any Phobos hook runs, so the forbids become
+unreachable. `=yes` restores stock clone production and lets the Phobos
+forbids narrow it. The two modes keep separate state (the NPSE five-class
+reservation versus Phobos' per-house factory pointers).
+
+With Phobos' gate on, the first factory building of a category claims the
+house's slot. A second building of the same category does not start its own
+build while that category's `ForbidParallelAIQueues.<Category>` is set, or
+while the house's current choice for that category (`Producing*TypeIndex`) has
 `ForbidParallelAIQueues=yes`. A successful exit or an abandonment of a
 forbidden category/type releases the slot, and so does the removal of the
 building that holds it (sold, destroyed or undeployed, idle or not).
@@ -43,7 +49,8 @@ removed building.
   category query.
 - `rules/phobos_switch.rs` — whether Phobos plays (`RuleSet::phobos`), which
   `RuleSet::parallel_ai_queues_act` adds to Ares' gate for every hook below.
-- `rules/ruleset.rs` — projection and configuration hash.
+- `rules/ruleset.rs` — projection, configuration hash, and
+  `RuleSet::ares_serial_ai_queues` (Ares' `=no` answer, independent of Phobos).
 - `rules/object_type.rs` — per-type `ForbidParallelAIQueues=`.
 - `sim/ai_base_building.rs` — the per-house factory slot per category.
 - `sim/production/factory_ai.rs` — the start gate and the building-exit
@@ -56,8 +63,16 @@ removed building.
 
 ## Residuals
 
-- VERA does not model Ares' serial mode for `AllowParallelAIQueues=no`: stock
-  parallel production stays, and the Phobos excludes only narrow it.
+- Ares' serial mode reuses NPSE's five-class reservation and its native
+  release points. As in NPSE, a failed start or a PointerExpired that gets no
+  native release retains the reservation; VERA does not add a compensating
+  write. The feature `npatch` only controls whether the NPSE
+  `[General] DisableParallelAIQueues=` key is read — the Ares `=no` path and
+  all release points run in every build.
+- The Ares hooks themselves (`0x4502F4`, `0x4CA07A` and the four KickOutUnit
+  hooks) are not ported hook-by-hook: the equivalent serial behaviour comes
+  from `Factory_AI`'s start gate plus the existing exit/abandon release
+  points. `ares-remaining.md` still lists those native hooks as residuals.
 - The type check reads the native `Producing*TypeIndex` choice fields. Builds
   without NPSE keep the vanilla shared Unit choice for land and naval
   factories, so a naval producer's product check uses that shared slot.

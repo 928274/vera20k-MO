@@ -11484,6 +11484,17 @@ impl RuleSet {
         self.phobos && self.parallel_ai_queues.allows_parallel()
     }
 
+    /// Ares 3.0 `[GlobalControls] AllowParallelAIQueues=no`: the computer
+    /// house's serial production mode, where only one factory of each class
+    /// may build at a time (no AI multi-factory clone). Unlike the Phobos
+    /// `ForbidParallelAIQueues` chain this needs no extension switch: Ares
+    /// reads the stock key in every build, and `=no` short-circuits before
+    /// Phobos' per-category and per-type narrowings. MO's `rulesmo.ini`
+    /// ships `no`; the "Mental AI" option overrides it to `yes`.
+    pub fn ares_serial_ai_queues(&self) -> bool {
+        !self.parallel_ai_queues.allows_parallel()
+    }
+
     /// A superweapon type's `SuperWeaponTypeClass` array index (its
     /// `[SuperWeaponTypes]` position, case-insensitive), the value
     /// `SuperWeapon=` stores (BuildingType `+0x16F0`).

@@ -555,20 +555,26 @@ fn disable_parallel_ai_queues_serializes_war_factory_production() {
     );
 }
 
-/// Phobos `ForbidParallelAIQueues`: inert under `AllowParallelAIQueues=no`;
-/// under the default gate the category forbid blocks a second war factory,
-/// and abandoning the first releases the slot.
+/// Phobos `ForbidParallelAIQueues`: Ares' `AllowParallelAIQueues=no` takes
+/// precedence over the whole Phobos chain; under the default gate the
+/// category forbid blocks a second war factory, and abandoning the first
+/// releases the slot.
 #[test]
 fn parallel_ai_queues_gate_and_category_forbid_control_a_second_factory() {
     let (mut f, weap_1, weap_2) = ai_limit_fixture(
         "\n[GlobalControls]\nAllowParallelAIQueues=no\nForbidParallelAIQueues.Vehicle=yes",
         "",
     );
+    assert!(!f.rules.parallel_ai_queues().allows_parallel());
     ai_limit_visit(&mut f, weap_1);
     ai_limit_visit(&mut f, weap_2);
     assert!(
-        ai_limit_holds(&f, weap_1) && ai_limit_holds(&f, weap_2),
-        "the gate is off, so the forbid tags do nothing"
+        ai_limit_holds(&f, weap_1),
+        "the first factory still starts in Ares serial mode"
+    );
+    assert!(
+        !ai_limit_holds(&f, weap_2),
+        "Ares serial mode stops the clone before any Phobos forbid runs"
     );
 
     let (mut f, weap_1, weap_2) =
@@ -606,6 +612,111 @@ fn parallel_ai_queues_gate_and_category_forbid_control_a_second_factory() {
     assert!(
         ai_limit_holds(&f, weap_2),
         "the abandon released the forbidden category's slot"
+    );
+}
+
+/// Ares 3.0 `[GlobalControls] AllowParallelAIQueues=no` is a serial AI mode,
+/// not merely the gate on Phobos' per-category forbids: a computer house may
+/// not clone its standing choice at a second factory of the same class, and
+/// the reservation releases through `AbandonProduction`. MO's `rulesmo.ini`
+/// ships `no`; the "Mental AI" option overrides it to `yes` to restore the
+/// cloning cheat, so both halves of that switch have to behave like Ares.
+#[test]
+fn ares_serial_queues_serialize_and_release_war_factory_production() {
+    let (mut f, weap_1, weap_2) =
+        ai_limit_fixture("\n[GlobalControls]\nAllowParallelAIQueues=no", "");
+    assert!(!f.rules.parallel_ai_queues().allows_parallel());
+    ai_limit_visit(&mut f, weap_1);
+    assert!(
+        ai_limit_holds(&f, weap_1),
+        "the first factory starts the tank"
+    );
+    ai_limit_visit(&mut f, weap_2);
+    assert!(
+        !ai_limit_holds(&f, weap_2),
+        "Ares serial mode refuses the second factory's clone"
+    );
+    abandon_production(
+        &mut f.sim,
+        &f.rules,
+        FactoryHolder::Building(weap_1),
+        f.owner,
+        crate::sim::world::FrameEffects::default(),
+    );
+    assert!(!ai_limit_holds(&f, weap_1), "the production ended");
+    // The abandon clears the standing choice; the house's chooser refills it
+    // every 8th frame and is outside this test.
+    f.sim
+        .houses
+        .get_mut(&f.owner)
+        .unwrap()
+        .ai_unit_choices_mut()
+        .set(crate::sim::ai_unit_choice::UnitChoiceKind::Unit, 0);
+    ai_limit_visit(&mut f, weap_2);
+    assert!(
+        ai_limit_holds(&f, weap_2),
+        "the abandonment releases the Ares reservation"
+    );
+}
+
+/// Ares serial mode is independent of Phobos: it claims none of Phobos'
+/// `HouseExt::Factory_*` pointers, so the two extensions cannot double-gate
+/// or leak each other's state.
+#[test]
+fn ares_serial_queues_claim_no_phobos_factory_slot() {
+    use crate::sim::ai_base_building::AiFactorySlot;
+    let (mut f, weap_1, _) =
+        ai_limit_fixture("\n[GlobalControls]\nAllowParallelAIQueues=no", "");
+    ai_limit_visit(&mut f, weap_1);
+    assert!(ai_limit_holds(&f, weap_1));
+    assert_eq!(
+        f.sim.houses[&f.owner]
+            .ai_production()
+            .parallel_factory(AiFactorySlot::Vehicle),
+        None,
+        "the Ares reservation must not write a Phobos factory pointer"
+    );
+}
+
+/// Ares serial mode reuses NPSE's five-class reservation, so one vehicle in
+/// production cannot block the infantry, aircraft or building factories, and
+/// Naval keeps its own counter (NPSE #333).
+#[test]
+fn ares_serial_queues_reserve_five_classes_independently() {
+    use crate::rules::object_type::ObjectCategory;
+    use crate::sim::ai_base_building::HouseAiProduction;
+    let mut state = HouseAiProduction::default();
+    assert!(state.reserve_parallel(ObjectCategory::Vehicle, false));
+    assert!(!state.reserve_parallel(ObjectCategory::Vehicle, false));
+    for (category, naval) in [
+        (ObjectCategory::Vehicle, true),
+        (ObjectCategory::Infantry, false),
+        (ObjectCategory::Aircraft, false),
+        (ObjectCategory::Building, false),
+    ] {
+        assert!(
+            state.reserve_parallel(category, naval),
+            "an independent class slot: naval={naval}"
+        );
+    }
+    state.release_parallel(ObjectCategory::Vehicle, false);
+    assert!(
+        state.reserve_parallel(ObjectCategory::Vehicle, false),
+        "the ground vehicle slot frees on release"
+    );
+}
+
+/// The "Mental AI" override restores stock clone production.
+#[test]
+fn ares_parallel_queues_yes_restores_clone_production() {
+    let (mut f, weap_1, weap_2) =
+        ai_limit_fixture("\n[GlobalControls]\nAllowParallelAIQueues=yes", "");
+    assert!(f.rules.parallel_ai_queues().allows_parallel());
+    ai_limit_visit(&mut f, weap_1);
+    ai_limit_visit(&mut f, weap_2);
+    assert!(
+        ai_limit_holds(&f, weap_1) && ai_limit_holds(&f, weap_2),
+        "yes keeps the stock AI cloning cheat"
     );
 }
 

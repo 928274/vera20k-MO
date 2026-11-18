@@ -425,8 +425,9 @@ pub(super) fn settle_abandoned(
 ) {
     // NPSE 2.0 AbandonProduction C2EFB4..C2F06D releases the held
     // object's House before refund, even for human factories or while the
-    // switch is off. Later choice cleanup keeps the Factory's own House.
-    #[cfg(feature = "npatch")]
+    // switch is off. Ares 3.0 `AllowParallelAIQueues=no` uses the same
+    // counters, so the release must run in every build. Later choice cleanup
+    // keeps the Factory's own House.
     if let Some((owner, category, naval)) = abandoned.entity_id.and_then(|id| {
         let entity = sim.substrate.entities.get(id)?;
         let ty = sim.entity_object_type(entity, rules)?;

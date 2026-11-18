@@ -297,10 +297,14 @@ fn start_factory(
         return;
     }
     // NPSE 2.0 Factory_AI C2F07C..C2F11F reserves the fetched type's
-    // class before naval admission, allocation and construction. The House
-    // owner retains failed-start/expired reservations until a native release.
-    #[cfg(feature = "npatch")]
-    if rules.general.disable_parallel_ai_queues
+    // class before naval admission, allocation and construction. Ares 3.0
+    // `AllowParallelAIQueues=no` is the same serial mode reached from a stock
+    // key, so it shares this five-class reservation. It is deliberately NOT
+    // gated on `npatch`: Ares reads the key in every build, and Phobos'
+    // `ForbidParallelAIQueues` narrowings are short-circuited by `=no` in
+    // `parallel_start_allowed`. The House owner retains failed-start/expired
+    // reservations until a native release.
+    if (rules.general.disable_parallel_ai_queues || rules.ares_serial_ai_queues())
         && !sim.houses.get_mut(&owner).is_some_and(|house| {
             house
                 .ai_production_mut()

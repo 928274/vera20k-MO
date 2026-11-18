@@ -2976,9 +2976,23 @@ fn local_strip_raw_place_preserves_remote_change_and_shared_hash() {
 /// This fixture is therefore also the regression guard against a second
 /// cloning pass.
 fn cloning_facility_world(cloneable_override: &str) -> (Simulation, RuleSet, InternedId, u64) {
+    cloning_facility_world_with_controls(cloneable_override, "")
+}
+
+/// The same MO-shaped pair with an optional `[GlobalControls]` body, for the
+/// Ares serial-queue regression below.
+fn cloning_facility_world_with_controls(
+    cloneable_override: &str,
+    controls: &str,
+) -> (Simulation, RuleSet, InternedId, u64) {
     let _ares = crate::rules::ares_switch::read_ares_way(true);
+    let controls = if controls.is_empty() {
+        String::new()
+    } else {
+        format!("[GlobalControls]\n{controls}\n")
+    };
     let rules = RuleSet::from_ini(&IniFile::from_str(&format!(
-        "[Countries]\n0=Americans\n[InfantryTypes]\n[VehicleTypes]\n0=MTNK\n\
+        "{controls}[Countries]\n0=Americans\n[InfantryTypes]\n[VehicleTypes]\n0=MTNK\n\
          [AircraftTypes]\n[BuildingTypes]\n0=GAWEAP\n1=GAWEAP2\n\
          [MTNK]\nCost=700\nStrength=300\nSpeed=6\nTechLevel=1\nOwner=Americans\n{cloneable_override}\n\
          [GAWEAP]\nOwner=Americans\nFactory=UnitType\nWeaponsFactory=yes\n\
@@ -3043,6 +3057,37 @@ fn ares_cloning_facility_duplicates_vehicle_output() {
         mtnk_count(&sim),
         2,
         "GAWEAP2 kicks out one free copy of the GAWEAP vehicle"
+    );
+}
+
+/// Ares' serial AI queues gate only `Factory_AI`'s *starts*; the Ares
+/// `CloningFacility` kick-out copies run in `exit_produced_object`'s tails.
+/// With `AllowParallelAIQueues=no` MO's `[GAWEAP2]` must still yield exactly
+/// one free copy. This guards the old MO double-clone regression
+/// (`a4004bea5`, "an extra vehicle stuck inside the building") against the
+/// serial-queue release path that now runs in every build.
+#[test]
+fn ares_serial_queues_keep_one_cloning_facility_copy() {
+    let (mut sim, rules, _owner, product) =
+        cloning_facility_world_with_controls("", "AllowParallelAIQueues=no");
+    assert!(
+        rules.ares_serial_ai_queues(),
+        "the fixture really is in Ares serial mode"
+    );
+    assert!(!rules.parallel_ai_queues_act());
+    let _ = super::production_queue::exit_produced_object(
+        &mut sim,
+        &rules,
+        1,
+        product,
+        (0, 0),
+        None,
+        crate::sim::world::FrameEffects::default(),
+    );
+    assert_eq!(
+        mtnk_count(&sim),
+        2,
+        "one paid vehicle and exactly one free CloningFacility copy"
     );
 }
 
