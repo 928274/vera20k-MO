@@ -768,4 +768,78 @@ mod tests {
             );
         }
     }
+
+    /// MO's `[General] CloakingStages=1` / `CloakDelay=0`: a player whose
+    /// `SensorsSight=` unit really deposits the sensor grid must see an enemy
+    /// cloak-capable unit as the Ghost Miner's steady 50% ghost on every
+    /// frame, including the state-0 frames Ares parks the unit in. Unlike the
+    /// older fixture this walks the whole chain: Unlimbo's sensor deposit, the
+    /// fog lookup in `Seen::of`, and `DrawState::for_entity`.
+    #[test]
+    fn mo_sensed_cloak_capable_enemy_draws_a_steady_ghost_from_the_real_sensor_grid() {
+        use crate::map::playfield::PlayfieldBounds;
+        use crate::rules::ini_parser::IniFile;
+        use crate::rules::ruleset::RuleSet;
+        let rules = RuleSet::from_ini(&IniFile::from_str(
+            "[General]\nCloakingStages=1\nCloakDelay=0\n\
+             [VehicleTypes]\n0=SENSOR\n1=TARGET\n\
+             [SENSOR]\nStrength=600\nSpeed=6\nSensors=yes\nSensorsSight=3\n\
+             [TARGET]\nStrength=600\nSpeed=4\nCloakable=yes\nCloakingSpeed=1\n",
+        ))
+        .unwrap();
+        let mut sim = crate::sim::world::Simulation::with_seed(0x5E45_0A00);
+        {
+            let fog = sim.fog_mut_for_test();
+            fog.set_width_for_test(64);
+            fog.set_height_for_test(64);
+        }
+        sim.set_playfield_bounds_for_test(Some(PlayfieldBounds::from_normalized_local_size(
+            64, 2, 2, 56, 52,
+        )));
+        let viewer = sim.interner_mut_for_test().intern("Americans");
+        sim.session_mut_for_test()
+            .set_current_house_for_test(Some(viewer));
+        sim.spawn_object_at_height("SENSOR", "Americans", 40, 30, 0, 0, &rules)
+            .expect("the player's sensor unit unlimbos");
+        let target = sim
+            .spawn_object_at_height("TARGET", "Soviet", 40, 30, 0, 0, &rules)
+            .expect("the enemy cloak-capable unit unlimbos");
+        assert!(
+            sim.fog().has_sensor_for_house(viewer, 40, 30),
+            "Unlimbo deposits the SensorsSight circle for the local house"
+        );
+        // State 0 is the MO single-stage flicker frame: the unit owns a cloak
+        // runtime but native GetVisualState would answer a fully opaque 0.
+        let mut cloak = crate::sim::cloak_disguise::CloakRuntime::new(0);
+        cloak.set_state_for_test(0);
+        sim.entities_mut_for_test().get_mut(target).unwrap().cloak = Some(Box::new(cloak));
+        let frame = crate::app::presentation::frame::PresentationFrame::of_test(&sim, &rules);
+        let record = frame.object(target).cloned().expect("captured object");
+        assert_eq!(record.seen.visual_character, 3, "the steady ghost character");
+        let decision = DrawState::for_entity(&record, 0, 3, ObserverDrawContext::default());
+        assert!(decision.visible, "the ghost is still drawn");
+        assert_eq!(decision.state.fx_params[0], 0.5, "TRANSLUCENCY_50");
+
+        // Without the grid the same state-0 unit keeps its opaque native body.
+        let mut plain = crate::sim::world::Simulation::with_seed(0x5E45_0A01);
+        {
+            let fog = plain.fog_mut_for_test();
+            fog.set_width_for_test(64);
+            fog.set_height_for_test(64);
+        }
+        plain.set_playfield_bounds_for_test(Some(PlayfieldBounds::from_normalized_local_size(
+            64, 2, 2, 56, 52,
+        )));
+        let viewer = plain.interner_mut_for_test().intern("Americans");
+        plain.session_mut_for_test()
+            .set_current_house_for_test(Some(viewer));
+        let alone = plain
+            .spawn_object_at_height("TARGET", "Soviet", 40, 30, 0, 0, &rules)
+            .unwrap();
+        plain.entities_mut_for_test().get_mut(alone).unwrap().cloak =
+            Some(Box::new(crate::sim::cloak_disguise::CloakRuntime::new(0)));
+        let frame = crate::app::presentation::frame::PresentationFrame::of_test(&plain, &rules);
+        let record = frame.object(alone).cloned().expect("captured object");
+        assert_eq!(record.seen.visual_character, 0, "no sensor, no ghost");
+    }
 }

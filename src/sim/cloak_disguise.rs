@@ -215,6 +215,7 @@ pub(crate) fn visual_character(
     cloaking_stages: i32,
     invisible: bool,
     is_building: bool,
+    cloak_present: bool,
     owned_by_current_house: bool,
     owner_present: bool,
     query: VisualCharacterQuery,
@@ -225,21 +226,28 @@ pub(crate) fn visual_character(
     if invisible && !query.map_editor {
         return 5;
     }
+    // MO's `[General] CloakingStages=1` and `CloakDelay=0` collapse the native
+    // ramp to two steps, and Ares' cloak admission can park a cloak-capable
+    // unit back in state 0 between two cloaked frames. A screen observer whose
+    // sensors cover the cell must still see that unit as the Ghost Miner's
+    // steady 50% ghost (3, `DrawState::cloak_selector`) on *every* frame,
+    // including those state-0 frames; otherwise it flickers between fully
+    // opaque and half-transparent instead of staying a ghost.
+    // Gated on the object actually owning a cloak runtime, so ordinary units
+    // inside a sensor circle keep their opaque body. Only the screen call
+    // takes this shortcut: the explicit `(1, house)` query used by
+    // GetFireError (T17) and by CloakingTick's state transitions keeps its
+    // native answer, so the three attack gates are unchanged.
+    if cloak_present
+        && !query.force_sensor
+        && !query.map_editor
+        && !is_building
+        && query.observer_senses_cell
+    {
+        return 3;
+    }
     if state == 0 || query.map_editor || is_building {
         return 0;
-    }
-    // MO's `[General] CloakingStages=1` collapses the native ramp: with one
-    // stage, `progress * 256 / stages` is 0 or 256, so states 1 and 3 flip
-    // straight between opaque and hidden (character 5), with none of the
-    // retail 1..4 stages. An observer whose sensors cover the cell must keep
-    // the steady "seen as cloaked" answer (3, drawn at 50% by
-    // `DrawState::cloak_selector`) through those frames, exactly as a fully
-    // cloaked Ghost Miner does. Only the screen call takes this shortcut:
-    // the explicit `(1, house)` query used by GetFireError (T17) and by
-    // CloakingTick's own state transitions keeps its native answer, so a
-    // sensed cloaked unit stays attackable without changing the fire gates.
-    if !query.force_sensor && query.observer_senses_cell {
-        return 3;
     }
     if state == 2 {
         return hidden_unless_sensed(owned_by_current_house, owner_present, query);
@@ -548,6 +556,7 @@ impl CloakRuntime {
                     facts.cloaking_stages,
                     facts.invisible,
                     facts.is_building,
+                    true,
                     facts.owned_by_current_house,
                     true,
                     VisualCharacterQuery::sensor(false, false, false),
@@ -592,6 +601,7 @@ impl CloakRuntime {
                 facts.cloaking_stages,
                 facts.invisible,
                 facts.is_building,
+                true,
                 facts.owned_by_current_house,
                 true,
                 VisualCharacterQuery::sensor(false, false, false),
@@ -1284,7 +1294,8 @@ mod tests {
     /// 0 to 256, so a cloaking/uncloaking object has no 1..4 ramp: the screen
     /// sees it fully opaque (state 0) or fully hidden (character 5). An
     /// observer whose sensors cover the cell must instead keep the Ghost
-    /// Miner's steady 50% ghost (character 3) through those frames.
+    /// Miner's steady 50% ghost (character 3) through every frame, including
+    /// the state-0 frames, without touching an object with no cloak runtime.
     /// `DrawState::cloak_selector` maps 2 | 3 to TRANSLUCENCY_50 (opacity 0.5).
     /// The explicit `(1, house)` query that GetFireError and CloakingTick use
     /// is deliberately left on the native answer.
@@ -1296,12 +1307,12 @@ mod tests {
         let sensor = |senses| VisualCharacterQuery::sensor(true, senses, false);
         for state in [1, 2, 3] {
             assert_eq!(
-                visual_character(state, 1, 1, false, false, false, true, screen(true)),
+                visual_character(state, 1, 1, false, false, true, false, true, screen(true)),
                 3,
                 "state {state}: a sensed enemy stays a 50% ghost"
             );
             assert_eq!(
-                visual_character(state, 1, 1, false, false, false, true, screen(false)),
+                visual_character(state, 1, 1, false, false, true, false, true, screen(false)),
                 5,
                 "state {state}: an unsensed enemy keeps the native answer"
             );
@@ -1309,22 +1320,30 @@ mod tests {
         // The force-sensor query never takes the screen-only shortcut: T17's
         // "cloaked target this house cannot sense" verdict is unchanged.
         assert_eq!(
-            visual_character(1, 1, 1, false, false, false, true, sensor(true)),
+            visual_character(1, 1, 1, false, false, true, false, true, sensor(true)),
             5,
             "a cloaking object's forced sensor answer stays native"
         );
         assert_eq!(
-            visual_character(2, 0, 1, false, false, false, true, sensor(true)),
+            visual_character(2, 0, 1, false, false, true, false, true, sensor(true)),
             3,
             "a sensed fully cloaked object is still visible to the sensor query (T17)"
         );
-        // A zero-stage or plain uncloaked object is unaffected.
+        // MO's single-stage cloak parks a cloak-capable unit back in state 0
+        // between cloaked frames. Under a real sensor grid it must still hold
+        // the steady ghost instead of flickering to a fully opaque body.
         assert_eq!(
-            visual_character(0, 0, 1, false, false, false, true, screen(true)),
+            visual_character(0, 0, 1, false, false, true, false, true, screen(true)),
+            3,
+            "a sensed state-0 cloak-capable unit keeps the 50% ghost"
+        );
+        // A plain object without a cloak runtime is unaffected by sensors.
+        assert_eq!(
+            visual_character(0, 0, 1, false, false, false, false, true, screen(true)),
             0
         );
         assert_eq!(
-            visual_character(2, 0, 9, false, false, false, true, screen(true)),
+            visual_character(2, 0, 9, false, false, true, false, true, screen(true)),
             3,
             "retail nine-stage cloak keeps its steady sensed ghost too"
         );

@@ -4576,3 +4576,112 @@ fn ares_country_reads_start_in_multiplayer_with_const() {
     assert!(with_const("PARENT"));
     assert!(!with_const("CHILD") && !with_const("PLAIN"));
 }
+
+/// MO's `rulesmo.ini` declares 238 custom `[ArmorTypes]` keys and binds them
+/// from ObjectType bodies (`Armor=fact`, `Armor=super2`, ...). Ares'
+/// BeforeTypeData679A15 allocates those keys before any body reads. The cold
+/// startup reads TechnoType bodies directly instead of entering Process's
+/// ReadTypeData hook, so it must open the same pass explicitly: otherwise the
+/// retained catalog holds only the 11 retail names and every custom bind
+/// logs "Unknown Ares armor" and collapses to None0.
+#[test]
+fn cold_start_allocates_custom_armor_types_before_techno_bodies() {
+    let _ares = crate::rules::ares_switch::read_ares_way(true);
+    let root = IniFile::from_str(
+        "[ArmorTypes]\nfact=wood\nsuper2=concrete_b\ntarget=0%\n\
+         [BuildingTypes]\n0=GAWEAP\n[GAWEAP]\nStrength=1000\nArmor=fact\n",
+    );
+    let trace = process_native_rules_cold_start(
+        NativeRulesRegistryState::new(true),
+        &root,
+        &IniFile::empty(),
+        None,
+        &EvaRegistry::default(),
+        &crate::rules::sound_ini::SoundRegistry::default(),
+    )
+    .unwrap();
+    let state = trace.registry_state();
+    let catalog = state.ares_armors.as_ref().expect("Ares armor catalog");
+    let fact = catalog.find("fact").expect("MO's fact armor is allocated");
+    assert!(catalog.find("super2").is_some(), "every key is allocated");
+    assert!(catalog.find("target").is_some(), "percentage defaults too");
+    assert!(
+        fact.index() >= crate::rules::armor::RETAIL_ARMOR_NAMES.len(),
+        "a custom name is not a retail index"
+    );
+    let building = &state.families[&RulesTypeFamily::Building][0];
+    assert_eq!(
+        building.armor_id, fact,
+        "the cold-start body binds Armor= to the allocated custom index"
+    );
+}
+
+/// MO declares 238 custom `[ArmorTypes]` keys, many of them inheriting from
+/// another custom armor and overridden per warhead by `Versus.<name>`. Both
+/// the cold-start prefix and the ordinary Process path must retain the same
+/// ordered catalog and bind every `Armor=` to its own index, not None0.
+#[test]
+fn cold_start_and_process_bind_all_238_custom_armors_identically() {
+    let _ares = crate::rules::ares_switch::read_ares_way(true);
+    let mut text = String::from("[General]\n[ArmorTypes]\n");
+    text.push_str("mo_base=concrete\n");
+    for index in 0..238 {
+        text.push_str(&format!("mo_armor{index}=concrete_b\n"));
+    }
+    text.push_str("[BuildingTypes]\n");
+    for index in 0..238 {
+        text.push_str(&format!("{index}=BLD{index}\n"));
+    }
+    text.push_str("[Warheads]\n0=TestWH\n[TestWH]\nVerses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%\nVersus.mo_armor237=25%\n");
+    for index in 0..238 {
+        text.push_str(&format!("[BLD{index}]\nStrength=100\nArmor=mo_armor{index}\n"));
+    }
+    let root = IniFile::from_str(&text);
+
+    let cold = process_native_rules_cold_start(
+        NativeRulesRegistryState::new(true),
+        &root,
+        &IniFile::empty(),
+        None,
+        &EvaRegistry::default(),
+        &crate::rules::sound_ini::SoundRegistry::default(),
+    )
+    .unwrap();
+    let cold_state = cold.registry_state();
+    let catalog = cold_state.ares_armors.as_ref().expect("Ares armor catalog");
+    assert_eq!(
+        catalog.len(),
+        crate::rules::armor::RETAIL_ARMOR_NAMES.len() + 239,
+        "every MO custom key is allocated once"
+    );
+    let processed = RulesLayerStack::new(root.clone()).process().unwrap();
+    let rules = RuleSet::from_processed_rules(&processed).unwrap();
+    for index in 0..238 {
+        let name = format!("mo_armor{index}");
+        let expected = catalog.find(&name).expect("custom armor in cold catalog");
+        assert_eq!(
+            cold_state.families[&RulesTypeFamily::Building][index].armor_id,
+            expected,
+            "{name}: cold-start body binds its own index"
+        );
+        assert_eq!(
+            rules.object(&format!("BLD{index}")).unwrap().armor_id(),
+            expected,
+            "{name}: the Process path binds the same index"
+        );
+    }
+    let last = catalog.find("mo_armor237").unwrap();
+    assert_eq!(
+        rules
+            .warhead("TestWH")
+            .unwrap()
+            .interaction(last)
+            .multiplier()
+            .bits(),
+        crate::util::native_x87::NativeF64Bits::from_bits(
+            crate::rules::warhead_type::verses_value("25%").to_bits(),
+        )
+        .bits(),
+        "Versus.<custom armor> still reaches the last custom index"
+    );
+}

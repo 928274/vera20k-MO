@@ -138,7 +138,7 @@ impl ArmorCatalog {
             })
     }
 
-    fn find(&self, name: &str) -> Option<ArmorId> {
+    pub(crate) fn find(&self, name: &str) -> Option<ArmorId> {
         self.armors
             .iter()
             .position(|armor| armor.name.eq_ignore_ascii_case(name))

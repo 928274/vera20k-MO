@@ -1560,6 +1560,7 @@ impl GameEntity {
             cloaking_stages,
             invisible,
             self.category == EntityCategory::Structure,
+            self.cloak.is_some(),
             owned_by_current_house,
             true,
             query,
