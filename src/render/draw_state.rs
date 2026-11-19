@@ -858,4 +858,95 @@ mod tests {
         let record = frame.object(alone).cloned().expect("captured object");
         assert_eq!(record.seen.visual_character, 0, "no sensor, no ghost");
     }
+
+    /// The other half of the anti-cloak requirement: a sensed, *fully* cloaked
+    /// enemy must also stay attackable/selectable, not just translucent.
+    /// `Evaluate_Candidate`'s G7 arm, T17's explicit sensor query, target
+    /// retention and `ProcessClickCoords` all read the same
+    /// `sensors_by_house` grid that `Seen::of` uses, so a broken deposit or a
+    /// house id mismatch would lose the ghost AND the attack order together.
+    #[test]
+    fn mo_sensed_fully_cloaked_enemy_stays_attackable_and_pickable() {
+        use crate::map::playfield::PlayfieldBounds;
+        use crate::rules::ini_parser::IniFile;
+        use crate::rules::ruleset::RuleSet;
+        let rules = RuleSet::from_ini(&IniFile::from_str(
+            "[General]\nCloakingStages=1\nCloakDelay=0\n\
+             [VehicleTypes]\n0=SENSOR\n1=TARGET\n\
+             [SENSOR]\nStrength=600\nSpeed=6\nSensors=yes\nSensorsSight=3\n\
+             [TARGET]\nStrength=600\nSpeed=4\nCloakable=yes\nCloakingSpeed=1\n",
+        ))
+        .unwrap();
+        let make_sim = |seed: u64, with_sensor: bool| {
+            let mut sim = crate::sim::world::Simulation::with_seed(seed);
+            {
+                let fog = sim.fog_mut_for_test();
+                fog.set_width_for_test(64);
+                fog.set_height_for_test(64);
+            }
+            sim.set_playfield_bounds_for_test(Some(PlayfieldBounds::from_normalized_local_size(
+                64, 2, 2, 56, 52,
+            )));
+            let viewer = sim.interner_mut_for_test().intern("Americans");
+            sim.session_mut_for_test()
+                .set_current_house_for_test(Some(viewer));
+            if with_sensor {
+                sim.spawn_object_at_height("SENSOR", "Americans", 40, 30, 0, 0, &rules)
+                    .expect("the player's sensor unit unlimbos");
+            }
+            let target = sim
+                .spawn_object_at_height("TARGET", "Soviet", 40, 30, 0, 0, &rules)
+                .expect("the enemy cloak-capable unit unlimbos");
+            let mut cloak = crate::sim::cloak_disguise::CloakRuntime::new(0);
+            cloak.set_state_for_test(2);
+            sim.entities_mut_for_test().get_mut(target).unwrap().cloak = Some(Box::new(cloak));
+            (sim, viewer, target)
+        };
+
+        let (sensed, viewer, target) = make_sim(0x5E45_0A02, true);
+        let entity = sensed.entities().get(target).expect("live target");
+        assert!(entity.cloak.as_ref().is_some_and(|c| c.is_fully_cloaked()));
+        let grid = sensed.fog().has_sensor_for_house(viewer, 40, 30);
+        assert!(grid, "the player's SensorsSight circle covers the enemy cell");
+        assert!(
+            !crate::sim::cloak_disguise::cloak_rejects_candidate(true, grid, false),
+            "Evaluate_Candidate G7 admits the fully cloaked target once sensed"
+        );
+        assert!(
+            sensed.fog().senses_object_for_house(viewer, entity),
+            "the pick and the draw read the same sensor grid"
+        );
+        assert!(
+            crate::app::input::entity_pick::pick_admits_object(
+                entity,
+                Some(sensed.fog()),
+                Some(viewer)
+            ),
+            "ProcessClickCoords still admits it for an attack order"
+        );
+        let frame = crate::app::presentation::frame::PresentationFrame::of_test(&sensed, &rules);
+        let record = frame.object(target).cloned().expect("captured object");
+        assert_eq!(record.seen.visual_character, 3, "still the 50% ghost");
+        let decision = DrawState::for_entity(&record, 0, 3, ObserverDrawContext::default());
+        assert_eq!(decision.state.fx_params[0], 0.5, "TRANSLUCENCY_50");
+
+        // Fail-before side: remove the deposit and the very same fully cloaked
+        // unit is rejected by both the attack and the click gates.
+        let (blind, blind_viewer, blind_target) = make_sim(0x5E45_0A03, false);
+        let blind_entity = blind.entities().get(blind_target).expect("live target");
+        let no_grid = blind.fog().has_sensor_for_house(blind_viewer, 40, 30);
+        assert!(!no_grid);
+        assert!(
+            crate::sim::cloak_disguise::cloak_rejects_candidate(true, no_grid, false),
+            "without the grid the same target is rejected"
+        );
+        assert!(
+            !crate::app::input::entity_pick::pick_admits_object(
+                blind_entity,
+                Some(blind.fog()),
+                Some(blind_viewer)
+            ),
+            "an unsensed fully cloaked enemy stays unpickable"
+        );
+    }
 }
