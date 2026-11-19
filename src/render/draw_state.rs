@@ -650,6 +650,16 @@ mod tests {
             body.state.fx_params[0], 0.5,
             "character 3 selects TRANSLUCENCY_50"
         );
+        assert_eq!(
+            body.state.native_selector_bits(),
+            TRANSLUCENCY_50 as u32,
+            "the native 50% blitter bits reach the compositor"
+        );
+        assert_ne!(
+            body.state.fx_flags & FX_CLOAK,
+            0,
+            "the cloak material flag reaches the SHP/voxel shader"
+        );
     }
 
     /// A fading building's body follows its GetVisualState (`0x004544A0`)
@@ -819,6 +829,12 @@ mod tests {
         let decision = DrawState::for_entity(&record, 0, 3, ObserverDrawContext::default());
         assert!(decision.visible, "the ghost is still drawn");
         assert_eq!(decision.state.fx_params[0], 0.5, "TRANSLUCENCY_50");
+        assert_eq!(
+            decision.state.native_selector_bits(),
+            TRANSLUCENCY_50 as u32,
+            "the same 50% selector the real-machine draw plan carried"
+        );
+        assert_ne!(decision.state.fx_flags & FX_CLOAK, 0, "FX_CLOAK");
 
         // Without the grid the same state-0 unit keeps its opaque native body.
         let mut plain = crate::sim::world::Simulation::with_seed(0x5E45_0A01);

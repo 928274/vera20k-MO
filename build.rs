@@ -306,8 +306,9 @@ fn mapped_ranges(font: &[u8]) -> Vec<(u32, u32)> {
 /// another host leaves them out.
 #[cfg(windows)]
 fn embed_windows_resources() {
-    // Red Alert 2's own icon: the 32-bit images of retail game.exe's icon group.
-    const ICON: &str = r".github\release\windows\vera20k.ico";
+    // The MO client's own icon, kept in-tree so a checkout on any machine
+    // can compile the resource (`MOICON.ico`, 9 images, first 32bpp 256x256).
+    const ICON: &str = r".github\release\windows\MOICON.ico";
     println!("cargo::rerun-if-changed={ICON}");
     let mut resource = winresource::WindowsResource::new();
     resource
