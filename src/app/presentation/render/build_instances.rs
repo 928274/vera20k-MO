@@ -630,6 +630,8 @@ pub(super) fn build_world_instances(
         .map(|parent| parent.parent.id)
         .collect();
     let building_status_text = build_building_status_instances(state, &building_body_opportunities);
+    #[cfg(not(test))]
+    diag_cloak_plan(state, &planned_objects);
     let object_layers = super::draw_plan_lowering::lower_object_instances(planned_objects);
     let fogged_objects = instances::build_fogged_instances(state);
 
@@ -1625,6 +1627,68 @@ fn build_radar_anim_instance(state: &AppState) -> Vec<SpriteInstance> {
         alpha: 1.0,
         ..Default::default()
     }]
+}
+
+/// Opt-in real-machine probe (`VERA20K_CLOAK_DIAG=1`): confirm a sensed
+/// ghost survives into the draw plan and carries the 50% material.
+#[cfg(not(test))]
+fn diag_cloak_plan(
+    state: &AppState,
+    planned: &[super::draw_plan_lowering::PlannedObjectInstance],
+) {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static CALLS: AtomicU32 = AtomicU32::new(0);
+    let call = CALLS.fetch_add(1, Ordering::Relaxed);
+    if !crate::app::diagnostics::cloak_probe::sample_plan(call) {
+        return;
+    }
+    let Some(frame) = state.match_state.sim_runtime.frame() else {
+        return;
+    };
+    let ghost_records: Vec<u64> = frame
+        .objects()
+        .filter(|record| record.seen.visual_character == 3)
+        .map(|record| record.stable_id())
+        .collect();
+    log::warn!(
+        "[CLOAK-PROBE] plan call={} planned={} ghost_records={} ids={:?}",
+        call,
+        planned.len(),
+        ghost_records.len(),
+        &ghost_records[..ghost_records.len().min(12)],
+    );
+    for parent in planned.iter() {
+        let id = parent.parent.id;
+        let Some(record) = frame.object(id) else { continue };
+        if record.seen.visual_character != 3 {
+            continue;
+        }
+        let pieces: Vec<String> = parent
+            .pieces
+            .iter()
+            .take(4)
+            .map(|piece| {
+                format!(
+                    "target={:?} alpha={} fx_flags={} fx0={} fx1={}",
+                    piece.target,
+                    piece.instance.alpha,
+                    piece.instance.draw_state.fx_flags,
+                    piece.instance.draw_state.fx_params[0],
+                    piece.instance.draw_state.fx_params[1],
+                )
+            })
+            .collect();
+        log::warn!(
+            "[CLOAK-PROBE] ghost id={} owner={:?} detects={} character={} pieces={} body_draw={} [{}]",
+            id,
+            record.owner(),
+            record.seen.observer.detects_cloak,
+            record.seen.visual_character,
+            parent.pieces.len(),
+            parent.body_draw.is_some(),
+            pieces.join(" | "),
+        );
+    }
 }
 
 #[cfg(all(test, tests_app_presentation_render))]

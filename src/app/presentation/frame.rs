@@ -570,6 +570,69 @@ impl Seen {
     }
 }
 
+/// Opt-in real-machine probe (`VERA20K_CLOAK_DIAG=1`). Reports the live
+/// sensor grid and every cloaked object's screen answer, so a missing ghost
+/// can be attributed to a link instead of guessed at. With the switch off
+/// this is one cached bool read and no log lines.
+#[cfg(not(test))]
+fn diag_cloak_sensor_chain(sim: &Simulation, objects: &[ObjectRecord], at: &Capture<'_>) {
+    if !crate::app::diagnostics::cloak_probe::sample_frame(at.binary_frame) {
+        return;
+    }
+    let fog = sim.fog();
+    let viewer = at.observer_id;
+    let sensor_summary: Vec<String> = fog
+        .sensors_by_house()
+        .iter()
+        .map(|(house, counts)| {
+            let positive = counts.iter().filter(|&&c| c > 0).count();
+            format!(
+                "{}={} (+{} cells)",
+                sim.interner().resolve(*house),
+                counts.len(),
+                positive
+            )
+        })
+        .collect();
+    log::warn!(
+        "[CLOAK-PROBE] frame={} viewer={:?} fog={}x{} sensor_houses=[{}]",
+        at.binary_frame,
+        viewer.map(|v| sim.interner().resolve(v)),
+        fog.width(),
+        fog.height(),
+        sensor_summary.join(", ")
+    );
+    let mut logged = 0usize;
+    for entity in sim.entities().values() {
+        if entity.cloak.is_none() || logged >= 8 {
+            continue;
+        }
+        let Some(record) = objects.iter().find(|o| o.id == entity.stable_id()) else {
+            continue;
+        };
+        let type_name = sim.interner().resolve(entity.type_ref());
+        let owner = sim.interner().resolve(entity.owner());
+        let cell = crate::sim::movement::ground_pose::object_center_xy(entity)
+            .map(|v| crate::util::lepton::lepton_to_cell(v));
+        let sensed = viewer.is_some_and(|v| fog.senses_object_for_house(v, entity));
+        log::warn!(
+            "[CLOAK-PROBE] obj id={} type={} owner={} cloak_state={} cloak_depth={} owned_by_current={} detects_cloak={} sensed={} cell={:?} visual_character={} display_layer={:?}",
+            entity.stable_id(),
+            type_name,
+            owner,
+            entity.cloak.as_ref().map_or(-1, |c| c.state() as i32),
+            entity.cloak.as_ref().map_or(0, |c| c.depth() as i32),
+            entity.discovery.owned_by_current_house(),
+            record.seen.observer.detects_cloak,
+            sensed,
+            cell,
+            record.seen.visual_character,
+            sim.display_layers().layer_of(entity.stable_id()),
+        );
+        logged += 1;
+    }
+}
+
 impl ObjectRecord {
     fn capture(entity: &GameEntity, at: &Capture<'_>) -> Self {
         let pose = RenderPose::read(entity, at.binary_frame);
@@ -1248,6 +1311,8 @@ impl PresentationFrame {
             },
         );
         let scene = scene.expect("captured beside the records");
+        #[cfg(not(test))]
+        diag_cloak_sensor_chain(sim, &objects, &at);
         let anim_coords = sim.anim_absolute_coords().collect();
         let parachute_animations = sim
             .entities()
