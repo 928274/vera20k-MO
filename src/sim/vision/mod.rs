@@ -940,6 +940,14 @@ pub struct FogState {
     /// Native signed-word SensorsOfHouses counters, row-major per house.
     #[serde(default)]
     sensors_by_house: BTreeMap<InternedId, Vec<i16>>,
+    /// MO anti-cloak: the cell where each active unit's `SensorsSight=` circle
+    /// is currently deposited. Native re-stamps a unit's circle only from
+    /// PerCell, which a Jumpjet reaches at touchdown alone, so an airborne
+    /// sensor unit would otherwise keep its circle at its unlimbo cell. This
+    /// is bookkeeping only: the signed counters above remain the authority.
+    /// Saved with a default so older saves load, never hashed.
+    #[serde(default)]
+    unit_sensor_centers: BTreeMap<u64, (u16, u16)>,
     /// MO anti-cloak: the extra houses whose sensor planes each viewer may
     /// consult ([`compute_sensor_sharing`]). Runtime-only derived data; it
     /// never enters a save or a lockstep hash, and the native counters above
@@ -1061,6 +1069,7 @@ impl FogState {
                 .collect(),
             next_fogged_object_id: self.next_fogged_object_id,
             sensors_by_house,
+            unit_sensor_centers: self.unit_sensor_centers.clone(),
             sensor_sharing: viewer
                 .and_then(|house| {
                     self.sensor_sharing
@@ -1149,6 +1158,21 @@ impl FogState {
     /// Native signed-word SensorsOfHouses counters, row-major per house.
     pub fn sensors_by_house(&self) -> &BTreeMap<InternedId, Vec<i16>> {
         &self.sensors_by_house
+    }
+
+    /// The cell this build last deposited a unit's `SensorsSight=` circle at.
+    /// `None` means the deposit predates the bookkeeping (an older save) and
+    /// the caller falls back to the native `Foot+55C` neighbour cell.
+    pub(crate) fn unit_sensor_center(&self, id: u64) -> Option<(u16, u16)> {
+        self.unit_sensor_centers.get(&id).copied()
+    }
+
+    pub(crate) fn set_unit_sensor_center(&mut self, id: u64, cell: (u16, u16)) {
+        self.unit_sensor_centers.insert(id, cell);
+    }
+
+    pub(crate) fn clear_unit_sensor_center(&mut self, id: u64) {
+        self.unit_sensor_centers.remove(&id);
     }
 
     /// Native `CellClass+0xAC[house]` disguise-detect counters.
@@ -1693,6 +1717,7 @@ impl FogState {
     pub fn reset_sensor_counts(&mut self) {
         self.note_shared_write();
         self.sensors_by_house.clear();
+        self.unit_sensor_centers.clear();
         self.disguise_detect_by_house.clear();
     }
 

@@ -581,16 +581,40 @@ fn diag_cloak_sensor_chain(sim: &Simulation, objects: &[ObjectRecord], at: &Capt
     }
     let fog = sim.fog();
     let viewer = at.observer_id;
+    let width = usize::from(fog.width());
     let sensor_summary: Vec<String> = fog
         .sensors_by_house()
         .iter()
         .map(|(house, counts)| {
-            let positive = counts.iter().filter(|&&c| c > 0).count();
+            let mut positive = 0usize;
+            let mut min_x = u16::MAX;
+            let mut max_x = 0u16;
+            let mut min_y = u16::MAX;
+            let mut max_y = 0u16;
+            if width > 0 {
+                for (index, &count) in counts.iter().enumerate() {
+                    if count > 0 {
+                        positive += 1;
+                        let x = (index % width) as u16;
+                        let y = (index / width) as u16;
+                        min_x = min_x.min(x);
+                        max_x = max_x.max(x);
+                        min_y = min_y.min(y);
+                        max_y = max_y.max(y);
+                    }
+                }
+            }
+            let bbox = if positive == 0 {
+                "none".to_owned()
+            } else {
+                format!("x{min_x}..{max_x} y{min_y}..{max_y}")
+            };
             format!(
-                "{}={} (+{} cells)",
+                "{}={} (+{} cells, bbox {})",
                 sim.interner().resolve(*house),
                 counts.len(),
-                positive
+                positive,
+                bbox
             )
         })
         .collect();
@@ -602,11 +626,49 @@ fn diag_cloak_sensor_chain(sim: &Simulation, objects: &[ObjectRecord], at: &Capt
         fog.height(),
         sensor_summary.join(", ")
     );
-    let mut logged = 0usize;
+
+    // Where the sensor-bearing units actually are: the cell a deposit reads.
+    // Comparing this with the coverage bbox above tells whether a flying /
+    // hovering unit's circle follows it or stays at its unlimbo cell.
+    let rules = at.rules();
+    let mut sources = Vec::new();
     for entity in sim.entities().values() {
-        if entity.cloak.is_none() || logged >= 8 {
+        let Some(object) = sim.interner().object_type(entity.type_ref(), rules) else {
+            continue;
+        };
+        if object.sensors_sight == 0 && !object.sensor_array {
             continue;
         }
+        if sources.len() >= 24 {
+            break;
+        }
+        sources.push(format!(
+            "{}#{}@({},{}) owner={} sight={} array={}",
+            sim.interner().resolve(entity.type_ref()),
+            entity.stable_id(),
+            entity.position.rx(),
+            entity.position.ry(),
+            sim.interner().resolve(entity.owner()),
+            object.sensors_sight,
+            object.sensor_array,
+        ));
+    }
+    log::warn!(
+        "[CLOAK-PROBE] sources frame={} [{}]",
+        at.binary_frame,
+        sources.join(" | ")
+    );
+
+    let mut total = 0usize;
+    let mut sensed_n = 0usize;
+    let mut detects_n = 0usize;
+    let mut ghost_n = 0usize;
+    let mut logged = 0usize;
+    for entity in sim.entities().values() {
+        if entity.cloak.is_none() {
+            continue;
+        }
+        total += 1;
         let Some(record) = objects.iter().find(|o| o.id == entity.stable_id()) else {
             continue;
         };
@@ -615,8 +677,32 @@ fn diag_cloak_sensor_chain(sim: &Simulation, objects: &[ObjectRecord], at: &Capt
         let cell = crate::sim::movement::ground_pose::object_center_xy(entity)
             .map(|v| crate::util::lepton::lepton_to_cell(v));
         let sensed = viewer.is_some_and(|v| fog.senses_object_for_house(v, entity));
+        sensed_n += usize::from(sensed);
+        detects_n += usize::from(record.seen.observer.detects_cloak);
+        ghost_n += usize::from(record.seen.visual_character == 3);
+        if logged >= 12 {
+            continue;
+        }
+        let cell_counts: Vec<String> = match (
+            u16::try_from(cell[0]).ok(),
+            u16::try_from(cell[1]).ok(),
+            width,
+        ) {
+            (Some(rx), Some(ry), w) if w > 0 => fog
+                .sensors_by_house()
+                .iter()
+                .map(|(house, counts)| {
+                    let value = counts
+                        .get(usize::from(ry) * w + usize::from(rx))
+                        .copied()
+                        .unwrap_or(0);
+                    format!("{}={}", sim.interner().resolve(*house), value)
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
         log::warn!(
-            "[CLOAK-PROBE] obj id={} type={} owner={} cloak_state={} cloak_depth={} owned_by_current={} detects_cloak={} sensed={} cell={:?} visual_character={} display_layer={:?}",
+            "[CLOAK-PROBE] obj id={} type={} owner={} cloak_state={} cloak_depth={} owned_by_current={} detects_cloak={} sensed={} cell={:?} sensor_at_cell=[{}] visual_character={} display_layer={:?}",
             entity.stable_id(),
             type_name,
             owner,
@@ -626,11 +712,20 @@ fn diag_cloak_sensor_chain(sim: &Simulation, objects: &[ObjectRecord], at: &Capt
             record.seen.observer.detects_cloak,
             sensed,
             cell,
+            cell_counts.join(", "),
             record.seen.visual_character,
             sim.display_layers().layer_of(entity.stable_id()),
         );
         logged += 1;
     }
+    log::warn!(
+        "[CLOAK-PROBE] summary frame={} cloaked={} sensed={} detects={} ghosts={}",
+        at.binary_frame,
+        total,
+        sensed_n,
+        detects_n,
+        ghost_n
+    );
 }
 
 impl ObjectRecord {
