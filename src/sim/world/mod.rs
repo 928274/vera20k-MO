@@ -4931,11 +4931,35 @@ impl Simulation {
     ///   world by copying only what changed since (`util::synced`); without
     ///   `reuse` they are copied whole;
     /// - its Dummy cell and its Main RNG are its own.
+    /// Recompute the MO neutral/allied sensor-sharing graph from the live
+    /// alliance graph. Called at the presentation boundary, so the live
+    /// world's fire view and the drawn copy read the same coverage; the ally
+    /// graph can change at runtime through MakeAlly/MakeEnemy. This is pure
+    /// derived state (`#[serde(skip)]`), never part of a save or lockstep hash.
+    pub fn refresh_sensor_sharing(&mut self) {
+        // Only lockstep-identical sources: the house table and the deposited
+        // sensor planes. A local `current_house` would make the derived ally
+        // graph differ between clients; neutral grids are public anyway.
+        let houses: std::collections::BTreeSet<crate::sim::intern::InternedId> = self
+            .houses
+            .keys()
+            .copied()
+            .chain(self.fog.sensors_by_house().keys().copied())
+            .collect();
+        let sharing = crate::sim::vision::compute_sensor_sharing(
+            &self.house_alliances,
+            &self.interner,
+            houses,
+        );
+        self.fog.set_sensor_sharing(sharing);
+    }
+
     pub fn presentation_copy(
         &mut self,
         viewer: Option<InternedId>,
         reuse: Option<Simulation>,
     ) -> Simulation {
+        self.refresh_sensor_sharing();
         // What the copy leaves out.
         let mut fog = std::mem::take(&mut self.fog);
         let entities = std::mem::replace(&mut self.substrate.entities, EntityStore::detached());

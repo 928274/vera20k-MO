@@ -949,4 +949,89 @@ mod tests {
             "an unsensed fully cloaked enemy stays unpickable"
         );
     }
+
+    /// MO anti-cloak, round 5. Native `CellClass::SensorsOfHouses` keeps one
+    /// counter plane per house and `IsSensorVisibleToPlayer` reads only the
+    /// viewer's own plane. A `SensorsSight=` circle deposited by a neutral or
+    /// allied unit therefore revealed nothing to the local player: the cloaked
+    /// enemy stayed `character=5`, invisible and unpickable. The client expects
+    /// such a grid to uncloak enemies as steady 50% ghosts.
+    #[test]
+    fn mo_neutral_sensor_grid_uncloaks_enemies_for_the_local_house() {
+        use crate::map::playfield::PlayfieldBounds;
+        use crate::rules::ini_parser::IniFile;
+        use crate::rules::ruleset::RuleSet;
+        let rules = RuleSet::from_ini(&IniFile::from_str(
+            "[General]\nCloakingStages=1\nCloakDelay=0\n\
+             [VehicleTypes]\n0=SENSOR\n1=TARGET\n\
+             [SENSOR]\nStrength=600\nSpeed=6\nSensors=yes\nSensorsSight=3\n\
+             [TARGET]\nStrength=600\nSpeed=4\nCloakable=yes\nCloakingSpeed=1\n",
+        ))
+        .unwrap();
+        let mut sim = crate::sim::world::Simulation::with_seed(0x5E45_0A05);
+        {
+            let fog = sim.fog_mut_for_test();
+            fog.set_width_for_test(64);
+            fog.set_height_for_test(64);
+        }
+        sim.set_playfield_bounds_for_test(Some(PlayfieldBounds::from_normalized_local_size(
+            64, 2, 2, 56, 52,
+        )));
+        let viewer = sim.interner_mut_for_test().intern("Americans");
+        sim.session_mut_for_test()
+            .set_current_house_for_test(Some(viewer));
+
+        // The local house owns no sensor at all: a neutral grid is the only
+        // deposit on the enemy's cell, and a hostile grid sits elsewhere.
+        sim.spawn_object_at_height("SENSOR", "Neutral", 40, 30, 0, 0, &rules)
+            .expect("the neutral sensor unit unlimbos");
+        sim.spawn_object_at_height("SENSOR", "Soviet", 50, 30, 0, 0, &rules)
+            .expect("the hostile sensor unit unlimbos");
+        let target = sim
+            .spawn_object_at_height("TARGET", "Soviet", 40, 30, 0, 0, &rules)
+            .expect("the enemy cloak-capable unit unlimbos");
+        let mut cloak = crate::sim::cloak_disguise::CloakRuntime::new(0);
+        cloak.set_state_for_test(2);
+        sim.entities_mut_for_test().get_mut(target).unwrap().cloak = Some(Box::new(cloak));
+
+        // The presentation boundary is where the sharing graph is refreshed,
+        // for both the live world's fire view and the drawn copy.
+        let copy = sim.presentation_copy(Some(viewer), None);
+        let shared_grid = sim.fog().has_sensor_for_house(viewer, 40, 30);
+        assert!(
+            shared_grid,
+            "the live fog shares the neutral sensor grid with the local house"
+        );
+        assert!(
+            !sim.fog().has_sensor_for_house(viewer, 50, 30),
+            "a hostile house's sensor grid is never shared"
+        );
+        assert!(
+            !crate::sim::cloak_disguise::cloak_rejects_candidate(true, shared_grid, false),
+            "Evaluate_Candidate G7 admits the fully cloaked target once sensed"
+        );
+        assert!(
+            copy.fog().has_sensor_for_house(viewer, 40, 30),
+            "the presentation copy carries the shared neutral grid"
+        );
+        // A presentation copy's entity store is detached in debug builds;
+        // its records are read through the frame, not the store. The live
+        // entity is fine to pass to a pure fog/pick query.
+        let entity = sim.entities().get(target).expect("live target");
+        assert!(
+            copy.fog().senses_object_for_house(viewer, entity),
+            "detects_cloak sees the neutral grid in the drawn copy"
+        );
+        assert!(
+            crate::app::input::entity_pick::pick_admits_object(
+                entity,
+                Some(copy.fog()),
+                Some(viewer)
+            ),
+            "the fully cloaked enemy is pickable for an attack order"
+        );
+        let frame = crate::app::presentation::frame::PresentationFrame::of_test(&sim, &rules);
+        let record = frame.object(target).cloned().expect("captured object");
+        assert_eq!(record.seen.visual_character, 3, "the 50% ghost character");
+    }
 }

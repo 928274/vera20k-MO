@@ -59,7 +59,7 @@ use shroud_knowledge::ShroudKnowledge;
 pub(crate) use shroud_knowledge::SightAdmission;
 pub(crate) use shroud_knowledge::{SightFacts, SightRefreshTimers, SightSource};
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -743,6 +743,8 @@ pub(crate) struct GapGeneratorSource {
 pub(crate) struct FireFog<'a> {
     pub(crate) alliances: &'a HouseAlliances,
     sensors_by_house: &'a BTreeMap<InternedId, Vec<i16>>,
+    sensor_sharing: &'a BTreeMap<InternedId, BTreeSet<InternedId>>,
+    global_sensor_houses: &'a BTreeSet<InternedId>,
     width: u16,
     height: u16,
 }
@@ -751,13 +753,15 @@ impl FireFog<'_> {
     /// Whether `house` holds a sensor count on cell (`rx`, `ry`)
     /// ([`FogState::has_sensor_for_house`]).
     pub(crate) fn has_sensor_for_house(&self, house: InternedId, rx: u16, ry: u16) -> bool {
-        sensor_counted(
+        sensor_covered(
             self.sensors_by_house,
             self.width,
             self.height,
             house,
             rx,
             ry,
+            self.sensor_sharing.get(&house),
+            self.global_sensor_houses,
         )
     }
 }
@@ -779,6 +783,87 @@ fn sensor_counted(
         .get(&house)
         .and_then(|counters| counters.get(index))
         .is_some_and(|count| *count > 0)
+}
+
+/// Native `IsSensorVisibleToPlayer` reads only the queried house's plane.
+/// MO's client also expects a `SensorsSight=` circle that a neutral or allied
+/// unit deposited to uncloak enemies for the local player, so both the draw
+/// and the fire views take the union over those houses. The native per-house
+/// counters themselves are never merged, so every existing producer, remove
+/// path and saved state keeps its original meaning.
+fn sensor_covered(
+    sensors_by_house: &BTreeMap<InternedId, Vec<i16>>,
+    width: u16,
+    height: u16,
+    house: InternedId,
+    rx: u16,
+    ry: u16,
+    shared: Option<&BTreeSet<InternedId>>,
+    global: &BTreeSet<InternedId>,
+) -> bool {
+    sensor_counted(sensors_by_house, width, height, house, rx, ry)
+        || shared.is_some_and(|houses| {
+            houses
+                .iter()
+                .any(|other| sensor_counted(sensors_by_house, width, height, *other, rx, ry))
+        })
+        || global
+            .iter()
+            .any(|other| sensor_counted(sensors_by_house, width, height, *other, rx, ry))
+}
+
+/// A neutral house's sensor grid is public: no alliance entry is needed for
+/// it to uncloak targets for any player. `Special`/`Civilian` are the other
+/// stock non-belligerent houses.
+fn is_neutral_sensor_house(name: &str) -> bool {
+    name.eq_ignore_ascii_case("Neutral")
+        || name.eq_ignore_ascii_case("Special")
+        || name.eq_ignore_ascii_case("Civilian")
+}
+
+/// Derived MO anti-cloak sensor-sharing graph. Pure derived state, computed
+/// from the live ally graph at the presentation boundary; never saved or
+/// hashed, and the native per-house counters are never merged.
+#[derive(Debug, Clone, Default)]
+pub struct SensorSharing {
+    /// Per-viewer allied houses (native's one-way `HouseClass::IsAlliedWith`).
+    pub by_viewer: BTreeMap<InternedId, BTreeSet<InternedId>>,
+    /// Neutral houses' sensor grids are public to every house. Kept separate
+    /// from `by_viewer` so an unregistered viewer still sees a neutral grid —
+    /// map fixtures and owner-remap windows do not always list every house.
+    pub global: BTreeSet<InternedId>,
+}
+
+/// Which houses' sensor planes each viewer may consult in addition to its
+/// own: allied houses, plus every neutral house for everyone.
+pub fn compute_sensor_sharing(
+    alliances: &HouseAlliances,
+    interner: &StringInterner,
+    houses: impl IntoIterator<Item = InternedId>,
+) -> SensorSharing {
+    let all: Vec<InternedId> = houses.into_iter().collect();
+    let global: BTreeSet<InternedId> = all
+        .iter()
+        .copied()
+        .filter(|house| is_neutral_sensor_house(interner.resolve(*house)))
+        .collect();
+    let by_viewer: BTreeMap<InternedId, BTreeSet<InternedId>> = all
+        .iter()
+        .map(|&viewer| {
+            let shared: BTreeSet<InternedId> = all
+                .iter()
+                .copied()
+                .filter(|&other| {
+                    other != viewer
+                        && !global.contains(&other)
+                        && alliances.is_allied(interner, viewer, other)
+                })
+                .collect();
+            (viewer, shared)
+        })
+        .filter(|(_, shared)| !shared.is_empty())
+        .collect();
+    SensorSharing { by_viewer, global }
 }
 
 /// Global fog/shroud state keyed by owner name.
@@ -855,6 +940,15 @@ pub struct FogState {
     /// Native signed-word SensorsOfHouses counters, row-major per house.
     #[serde(default)]
     sensors_by_house: BTreeMap<InternedId, Vec<i16>>,
+    /// MO anti-cloak: the extra houses whose sensor planes each viewer may
+    /// consult ([`compute_sensor_sharing`]). Runtime-only derived data; it
+    /// never enters a save or a lockstep hash, and the native counters above
+    /// stay strictly per-house.
+    #[serde(skip)]
+    sensor_sharing: BTreeMap<InternedId, BTreeSet<InternedId>>,
+    /// Neutral houses whose sensor grid is public to every house.
+    #[serde(skip)]
+    global_sensor_houses: BTreeSet<InternedId>,
     /// Native `CellClass+0xAC[house]` signed-word disguise-detect counters,
     /// row-major per house. Only `BuildingClass::AddDetectDisguiseAt @
     /// 0x00455A80` / `RemoveDetectDisguiseAt @ 0x00455980` write them, and
@@ -883,6 +977,16 @@ impl FogState {
     /// its cloak words and sensor and disguise counts always.
     pub(crate) fn presentation_copy(&mut self, viewer: Option<InternedId>, reuse: Self) -> Self {
         let mine = |house: &InternedId| Some(*house) == viewer;
+        // MO anti-cloak: the drawn copy must carry the neutral/allied sensor
+        // planes too, so `detects_cloak`, the pick gate and the radar all read
+        // the same shared coverage as the live world's fire view. The other
+        // per-viewer maps stay strictly the viewer's own.
+        let mut shared = viewer
+            .and_then(|house| self.sensor_sharing.get(&house))
+            .cloned()
+            .unwrap_or_default();
+        shared.extend(self.global_sensor_houses.iter().copied());
+        let sensor_mine = |house: &InternedId| mine(house) || shared.contains(house);
         let Self {
             by_owner: old,
             sensors_by_house: mut old_sensors,
@@ -893,10 +997,11 @@ impl FogState {
         // The previous copy's whole-map arrays take the new values in place
         // (`clone_from`), so a copy per tick allocates none of them again.
         let reuse_counts = |old: &mut BTreeMap<InternedId, Vec<i16>>,
-                            live: &BTreeMap<InternedId, Vec<i16>>|
+                            live: &BTreeMap<InternedId, Vec<i16>>,
+                            keep: &dyn Fn(&InternedId) -> bool|
          -> BTreeMap<InternedId, Vec<i16>> {
             live.iter()
-                .filter(|(house, _)| mine(house))
+                .filter(|(house, _)| keep(house))
                 .map(|(house, counts)| {
                     let mut kept = old.remove(house).unwrap_or_default();
                     kept.clone_from(counts);
@@ -904,9 +1009,10 @@ impl FogState {
                 })
                 .collect()
         };
-        let sensors_by_house = reuse_counts(&mut old_sensors, &self.sensors_by_house);
+        let sensors_by_house =
+            reuse_counts(&mut old_sensors, &self.sensors_by_house, &sensor_mine);
         let disguise_detect_by_house =
-            reuse_counts(&mut old_disguise, &self.disguise_detect_by_house);
+            reuse_counts(&mut old_disguise, &self.disguise_detect_by_house, &mine);
         cloaked_by_houses.clone_from(&self.cloaked_by_houses);
         let mut by_owner = Planes::default();
         if let Some(viewer) = viewer
@@ -955,6 +1061,15 @@ impl FogState {
                 .collect(),
             next_fogged_object_id: self.next_fogged_object_id,
             sensors_by_house,
+            sensor_sharing: viewer
+                .and_then(|house| {
+                    self.sensor_sharing
+                        .get(&house)
+                        .map(|allies| (house, allies.clone()))
+                })
+                .into_iter()
+                .collect(),
+            global_sensor_houses: self.global_sensor_houses.clone(),
             disguise_detect_by_house,
             cloaked_by_houses,
             ..Self::default()
@@ -1798,14 +1913,28 @@ impl FogState {
     }
 
     pub fn has_sensor_for_house(&self, house: InternedId, rx: u16, ry: u16) -> bool {
-        sensor_counted(
+        sensor_covered(
             &self.sensors_by_house,
             self.width,
             self.height,
             house,
             rx,
             ry,
+            self.sensor_sharing.get(&house),
+            &self.global_sensor_houses,
         )
+    }
+
+    /// Replace the MO neutral/allied sensor-sharing graph ([`compute_sensor_sharing`]).
+    /// Presentation calls this on the live world before taking its copy.
+    pub fn set_sensor_sharing(&mut self, sharing: SensorSharing) {
+        self.sensor_sharing = sharing.by_viewer;
+        self.global_sensor_houses = sharing.global;
+    }
+
+    /// The per-viewer allied part of the sharing graph, for diagnostics/tests.
+    pub fn sensor_sharing(&self) -> &BTreeMap<InternedId, BTreeSet<InternedId>> {
+        &self.sensor_sharing
     }
 
     /// `TechnoClass::IsSensorVisibleToPlayer @ 0x0070D420` (vt+0x328) for
@@ -1830,6 +1959,8 @@ impl FogState {
         FireFog {
             alliances,
             sensors_by_house: &self.sensors_by_house,
+            sensor_sharing: &self.sensor_sharing,
+            global_sensor_houses: &self.global_sensor_houses,
             width: self.width,
             height: self.height,
         }

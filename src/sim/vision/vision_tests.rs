@@ -2257,3 +2257,71 @@ fn a_synced_plane_copy_matches_a_clone_after_scattered_writes() {
         assert_matches(&live, &mirror);
     }
 }
+
+/// MO anti-cloak: a `SensorsSight` deposit owned by a neutral house is public
+/// to every viewer, an ally's deposit is shared, and an enemy's never is.
+/// The native counters stay per-house; only the query takes the union, which
+/// is what the draw view and the fire view both read.
+#[test]
+fn mo_neutral_and_allied_sensor_planes_are_shared_not_enemy_ones() {
+    let mut interner = intern::StringInterner::new();
+    let viewer = interner.intern("Americans");
+    let ally = interner.intern("Ally");
+    let neutral = interner.intern("Neutral");
+    let enemy = interner.intern("Soviet");
+    let mut graph = HouseAllianceMap::new();
+    // `with_house_key` uppercases both sides before the graph lookup.
+    graph.insert(
+        "AMERICANS".to_string(),
+        std::collections::BTreeSet::from(["ALLY".to_string()]),
+    );
+    let alliances = HouseAlliances::new(graph);
+
+    let sharing = compute_sensor_sharing(
+        &alliances,
+        &interner,
+        [viewer, ally, neutral, enemy],
+    );
+    assert!(sharing.global.contains(&neutral), "neutral grids are public");
+    assert!(
+        sharing
+            .by_viewer
+            .get(&viewer)
+            .is_some_and(|houses| houses.contains(&ally)),
+        "the viewer consults its ally's grid"
+    );
+    assert!(
+        !sharing
+            .by_viewer
+            .get(&viewer)
+            .is_some_and(|houses| houses.contains(&enemy)),
+        "an enemy grid is never shared"
+    );
+
+    let mut fog = FogState::new(16, 16);
+    fog.increment_sensor_at(neutral, 8, 8);
+    fog.increment_sensor_at(ally, 9, 8);
+    fog.increment_sensor_at(enemy, 10, 8);
+    // Native behaviour, before the sharing graph is installed.
+    assert!(!fog.has_sensor_for_house(viewer, 8, 8));
+    assert!(!fog.has_sensor_for_house(viewer, 9, 8));
+    assert!(!fog.has_sensor_for_house(viewer, 10, 8));
+
+    fog.set_sensor_sharing(sharing);
+    assert!(fog.has_sensor_for_house(viewer, 8, 8), "neutral uncloaks");
+    assert!(fog.has_sensor_for_house(viewer, 9, 8), "ally uncloaks");
+    assert!(
+        !fog.has_sensor_for_house(viewer, 10, 8),
+        "enemy sensor stays private"
+    );
+    assert_eq!(
+        fog.sensors_by_house().get(&viewer),
+        None,
+        "the native per-house counters are never merged"
+    );
+
+    let fire = fog.fire_view(&alliances);
+    assert!(fire.has_sensor_for_house(viewer, 8, 8));
+    assert!(fire.has_sensor_for_house(viewer, 9, 8));
+    assert!(!fire.has_sensor_for_house(viewer, 10, 8));
+}
