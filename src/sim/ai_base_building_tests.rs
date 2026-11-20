@@ -1363,7 +1363,7 @@ fn an_upgrade_takes_its_host_cell_instead_of_a_perimeter_site() {
         super::upgrade_host_site(&sim, &rules, owner, upgrade).expect("a free host slot");
     assert_eq!(host_id, host);
     assert_eq!(
-        super::building_site(&mut sim, &rules, owner, upgrade, None, None),
+        super::building_site(&mut sim, &rules, owner, upgrade, None),
         host_cell,
     );
 }
@@ -1405,7 +1405,7 @@ fn an_installed_upgrade_satisfies_its_base_plan_node() {
             product,
             host,
             &rules,
-            crate::sim::world::UninitContext::with_rules(&rules),
+            crate::sim::world::UninitContext::new(&rules),
         ),
         "the upgrade installs on its host"
     );
@@ -1456,7 +1456,7 @@ fn an_upgrade_node_is_satisfied_only_by_its_own_host() {
             product,
             host,
             &rules,
-            crate::sim::world::UninitContext::with_rules(&rules),
+            crate::sim::world::UninitContext::new(&rules),
         ),
         "the upgrade installs on the first host"
     );
@@ -1543,7 +1543,7 @@ fn ai_tail_rules(tail: &str) -> RuleSet {
 fn with_rival(mut sim: Simulation, human_buildings: i32) -> Simulation {
     let human = sim.interner.intern("HumanHouse");
     let mut house = HouseState::new(human, 1, None, true, 10_000, 10);
-    house.tracking_mut().set_buildings_for_test(human_buildings);
+    house.tracking_mut_for_test().set_buildings_for_test(human_buildings);
     sim.houses.register(house);
     sim
 }

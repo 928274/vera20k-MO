@@ -489,7 +489,7 @@ mod tests {
     use crate::map::source::test_support::TestDirectory;
 
     #[test]
-    fn mo_auto_profile_resolves_its_rules_root_inside_an_expandmo_archive() {
+    fn mo_custom_roots_resolve_its_rules_root_inside_an_expandmo_archive() {
         let dir = crate::assets::asset_manager::test_support::audio_test_install("mo-auto-root");
         dir.write_mix(
             "expandmo99.mix",
@@ -498,18 +498,31 @@ mod tests {
         );
         dir.write_mix("expandmo98.mix", "artmo.ini", b"[TECH]\nFoundation=2x3\n");
         dir.write_mix("expandmo97.mix", "aimo.ini", b"[TaskForces]\n0=TF\n");
-        let manager = crate::assets::asset_manager::AssetManager::new(
+        // v0.3.8 selects the numbered family by name; there is no MO preset
+        // left in IniProfile. A launcher's discovery (or this install's
+        // config.toml) spells the complete Custom triplet out instead.
+        let archives = crate::util::archive_names::ArchiveNames {
+            expansion_prefix: "expandmo".into(),
+            ..Default::default()
+        };
+        let manager = crate::assets::asset_manager::AssetManager::with_mod_and_ares(
             dir.path(),
+            None,
             crate::assets::asset_manager::MediaArchiveMode::STOCK_DIGITAL,
+            crate::util::ares_launch::AresSetting::Auto,
+            &archives,
         )
         .expect("startup archives");
         let config = crate::util::ini_roots::IniRootConfig {
-            profile: crate::util::ini_roots::IniProfile::Auto,
+            profile: crate::util::ini_roots::IniProfile::Custom,
+            rules: Some("rulesmo.ini".into()),
+            art: Some("artmo.ini".into()),
+            ai: Some("aimo.ini".into()),
             ..Default::default()
         };
         let manager = manager
             .with_ini_roots(&config)
-            .expect("auto selects the complete MO triplet");
+            .expect("the complete MO triplet is visible");
         assert_eq!(manager.ini_roots().rules(), "rulesmo.ini");
 
         let sources = RetailRulesSources::select(&manager).expect("MO roots selected");

@@ -530,6 +530,31 @@ pub fn mod_resources(
     Ok(resources)
 }
 
+/// MO: v0.3.8 discovers a complete numbered archive family only for a
+/// *selected* mod folder (`mod_resources`). Mental Omega is installed by
+/// copying its files straight into the game folder, with no `mod.ini` folder
+/// under `Mods/`, so that path never reaches discovery and startup would
+/// mount the stock `expandmd##.mix` family instead of `expandmo##.mix`.
+/// Inspect the install folder itself and adopt only the archive names: the
+/// host's `[ini]` roots, the client catalog and the Ares requirement stay
+/// exactly as configured. A folder without a complete family (a stock YR
+/// install) is left alone.
+pub fn install_archive_names(dir: &Path) -> Option<ArchiveNames> {
+    if dir.as_os_str().is_empty() {
+        return None;
+    }
+    match super::numbered_mod_resources::discover(dir) {
+        Ok(found) => found.map(|(_, archives)| archives),
+        Err(error) => {
+            log::warn!(
+                "Skipping install archive discovery in {}: {error}",
+                dir.display()
+            );
+            None
+        }
+    }
+}
+
 impl AssetManager {
     pub fn with_client_install(mut self, client: Option<Arc<ClientInstall>>) -> Self {
         self.client_install = client;
@@ -2353,29 +2378,44 @@ mod tests {
     };
     use super::*;
 
+    /// v0.3.8 resolves the numbered MO family by name (`ArchiveNames`);
+    /// startup no longer mounts a second, retail `expandmd##.mix` family.
+    fn mo_manager(dir: &TestDirectory) -> AssetManager {
+        let archives = crate::util::archive_names::ArchiveNames {
+            expansion_prefix: "expandmo".into(),
+            theme: "thememo.mix".into(),
+            ..Default::default()
+        };
+        AssetManager::with_mod_and_ares(
+            dir.path(),
+            None,
+            MediaArchiveMode::STOCK_DIGITAL,
+            crate::util::ares_launch::AresSetting::Auto,
+            &archives,
+        )
+        .expect("MO startup archives")
+    }
+
     #[test]
-    fn mo_expansion_archive_precedes_the_retail_expandmd_slot() {
+    fn mo_expansion_family_replaces_the_retail_expandmd_slots() {
         let dir = audio_test_install("mo-expand");
         dir.write_mix("expandmo99.mix", "rulesmo.ini", b"MO rules");
         dir.write_mix("expandmd99.mix", "rulesmo.ini", b"YR rules");
         dir.write_mix("expandmd98.mix", "retail.bin", b"retail asset");
-        let manager = AssetManager::new(dir.path(), MediaArchiveMode::STOCK_DIGITAL).unwrap();
+        let manager = mo_manager(&dir);
 
         let selected = manager
             .resolve_ref("rulesmo.ini")
             .expect("MO rules root is visible from the startup stack");
         assert_eq!(selected.bytes, b"MO rules");
         assert_eq!(selected.source_archive, "expandmo99.mix");
-        assert_eq!(
-            manager.resolve_ref("retail.bin").unwrap().bytes,
-            b"retail asset",
-            "the retail expandmd slots stay mounted"
-        );
+        let names = manager.registered_archive_names();
+        assert!(names.iter().any(|name| name == "expandmo99.mix"));
         assert!(
-            manager
-                .registered_archive_names()
+            !names
                 .iter()
-                .any(|name| name == "expandmo99.mix")
+                .any(|name| name.eq_ignore_ascii_case("expandmd99.mix")),
+            "v0.3.8's selected family replaces the retail expansion slots"
         );
     }
 
@@ -2400,7 +2440,7 @@ mod tests {
         let dir = audio_test_install("mo-theme");
         dir.write_mix("thememo.mix", "shared.wav", b"MO music");
         dir.write_mix("thememd.mix", "shared.wav", b"YR music");
-        let manager = AssetManager::new(dir.path(), MediaArchiveMode::STOCK_DIGITAL).unwrap();
+        let manager = mo_manager(&dir);
 
         let selected = manager.resolve_ref("shared.wav").expect("theme song");
         assert_eq!(selected.bytes, b"MO music");

@@ -3101,7 +3101,6 @@ fn ares_initial_payload_fills_cargo_at_construction() {
     sim.create_ares_initial_payload(
         carrier,
         &rules,
-        None,
         crate::sim::world::FrameEffects::default(),
     );
     let e1 = sim.interner.get("E1").unwrap();

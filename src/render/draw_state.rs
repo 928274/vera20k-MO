@@ -825,7 +825,7 @@ mod tests {
         // runtime but native GetVisualState would answer a fully opaque 0.
         let mut cloak = crate::sim::cloak_disguise::CloakRuntime::new(0);
         cloak.set_state_for_test(0);
-        sim.entities_mut_for_test().get_mut(target).unwrap().cloak = Some(Box::new(cloak));
+        sim.entity_mut_for_test(target).unwrap().cloak = Some(Box::new(cloak));
         let frame = crate::app::presentation::frame::PresentationFrame::of_test(&sim, &rules);
         let record = frame.object(target).cloned().expect("captured object");
         assert_eq!(record.seen.visual_character, 3, "the steady ghost character");
@@ -855,7 +855,7 @@ mod tests {
         let alone = plain
             .spawn_object_at_height("TARGET", "Soviet", 40, 30, 0, 0, &rules)
             .unwrap();
-        plain.entities_mut_for_test().get_mut(alone).unwrap().cloak =
+        plain.entity_mut_for_test(alone).unwrap().cloak =
             Some(Box::new(crate::sim::cloak_disguise::CloakRuntime::new(0)));
         let frame = crate::app::presentation::frame::PresentationFrame::of_test(&plain, &rules);
         let record = frame.object(alone).cloned().expect("captured object");
@@ -902,7 +902,7 @@ mod tests {
                 .expect("the enemy cloak-capable unit unlimbos");
             let mut cloak = crate::sim::cloak_disguise::CloakRuntime::new(0);
             cloak.set_state_for_test(2);
-            sim.entities_mut_for_test().get_mut(target).unwrap().cloak = Some(Box::new(cloak));
+            sim.entity_mut_for_test(target).unwrap().cloak = Some(Box::new(cloak));
             (sim, viewer, target)
         };
 
@@ -995,7 +995,7 @@ mod tests {
             .expect("the enemy cloak-capable unit unlimbos");
         let mut cloak = crate::sim::cloak_disguise::CloakRuntime::new(0);
         cloak.set_state_for_test(2);
-        sim.entities_mut_for_test().get_mut(target).unwrap().cloak = Some(Box::new(cloak));
+        sim.entity_mut_for_test(target).unwrap().cloak = Some(Box::new(cloak));
 
         // The presentation boundary is where the sharing graph is refreshed,
         // for both the live world's fire view and the drawn copy.

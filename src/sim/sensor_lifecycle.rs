@@ -726,7 +726,7 @@ mod tests {
         assert_eq!(sim.fog.sensors_by_house()[&owner][index(&sim, 50)], 1);
 
         // Limbo still removes the circle at the cell it now occupies.
-        sim.techno_limbo_with_rules(id, &rules, None);
+        sim.techno_limbo_with_rules(id, &rules);
         assert!(!sim.fog.has_sensor_for_house(owner, 50, 30));
     }
 

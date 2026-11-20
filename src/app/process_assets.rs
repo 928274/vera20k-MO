@@ -1458,7 +1458,10 @@ mod tests {
         std::fs::write(dir.path().join("artmo.ini"), b"[General]\n").unwrap();
         std::fs::write(dir.path().join("aimo.ini"), b"[General]\n").unwrap();
         let config = IniRootConfig {
-            profile: IniProfile::Mo,
+            profile: IniProfile::Custom,
+            rules: Some("rulesmo.ini".into()),
+            art: Some("artmo.ini".into()),
+            ai: Some("aimo.ini".into()),
             ..Default::default()
         };
         let archives = ArchiveNames {
@@ -1475,8 +1478,7 @@ mod tests {
         .unwrap()
         .with_ini_roots(&config)
         .unwrap();
-        let mut process =
-            ProcessAssets::new_with_ini_config(MediaArchiveMode::STOCK_DIGITAL, false, config);
+        let mut process = ProcessAssets::new(MediaArchiveMode::STOCK_DIGITAL, false);
         let (rules, _) = process.initialize_sources_if_needed(&assets).unwrap();
 
         assert!(process.reads_ares_way());

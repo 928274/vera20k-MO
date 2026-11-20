@@ -111,6 +111,9 @@ pub(crate) struct ActiveMod {
 #[derive(Default)]
 pub(crate) struct Mods {
     pub(crate) active: Option<ActiveMod>,
+    /// The install folder, for the numbered archive family of a mod copied
+    /// straight into it (no `Mods/` folder of its own).
+    ra2_dir: PathBuf,
     /// Why the mod asked for is not in use, or did not load: shown once the
     /// main menu is at rest.
     notice: Option<String>,
@@ -147,7 +150,12 @@ impl Mods {
         base: &IniRootConfig,
         setting: AresSetting,
     ) -> (ResourceConfig, AresSetting) {
-        match resources_for(self.active.as_ref(), base, setting) {
+        match resources_for(
+            self.active.as_ref(),
+            base,
+            setting,
+            &self.ra2_dir,
+        ) {
             Ok(selected) => selected,
             Err(error) => {
                 self.notice = Some(format!("{error}\n\nThis start uses the original game."));
@@ -155,7 +163,7 @@ impl Mods {
                 if let Some(record) = self.record.take() {
                     record.clear();
                 }
-                (ResourceConfig::from_ini(base.clone()), setting)
+                (base_resources(base, &self.ra2_dir), setting)
             }
         }
     }
@@ -348,18 +356,30 @@ pub(crate) fn launch_mod(
         .transpose()
 }
 
+/// Resources with no mod in use. MO: the install folder can itself carry a
+/// complete numbered archive family; v0.3.8's discovery otherwise only runs
+/// for a selected mod folder. Only `archives` comes from the install.
+fn base_resources(base: &IniRootConfig, ra2_dir: &Path) -> ResourceConfig {
+    let mut resources = ResourceConfig::from_ini(base.clone());
+    if let Some(archives) = crate::assets::asset_manager::install_archive_names(ra2_dir) {
+        resources.archives = archives;
+    }
+    resources
+}
+
 /// One resource decision for startup, the probe and map generation.
 pub(crate) fn resources_for(
     active: Option<&ActiveMod>,
     base: &IniRootConfig,
     setting: AresSetting,
+    ra2_dir: &Path,
 ) -> Result<(ResourceConfig, AresSetting), String> {
     let resources = match active {
         Some(active) => {
             crate::assets::asset_manager::mod_resources(&active.dir, &active.definition, base)
                 .map_err(|error| format!("{}: {error}", active.title))?
         }
-        None => ResourceConfig::from_ini(base.clone()),
+        None => base_resources(base, ra2_dir),
     };
     let setting = resources
         .effective_ares(setting)
@@ -599,6 +619,7 @@ fn claim(path: &Path, folder: &str) -> std::io::Result<Claim> {
 pub(crate) fn begin(paths: &PathsConfig, switch: Option<&ModSwitch>, hidden: bool) -> Mods {
     let mut mods = Mods {
         kept: paths.mod_name().map(str::to_owned),
+        ra2_dir: paths.ra2_dir.clone(),
         ..Mods::default()
     };
     if !hidden && HAS_FOLDER {
@@ -1145,8 +1166,13 @@ mod tests {
         assert_eq!(resources, ResourceConfig::from_ini(base.clone()));
         assert_eq!(setting, AresSetting::Off);
         let selected = launch_mod(&paths, None).unwrap();
-        let (resources, setting) =
-            resources_for(selected.as_ref(), &base, AresSetting::Auto).unwrap();
+        let (resources, setting) = resources_for(
+            selected.as_ref(),
+            &base,
+            AresSetting::Auto,
+            &paths.ra2_dir,
+        )
+        .unwrap();
         assert_eq!(setting, AresSetting::On);
         assert_eq!(
             resources.ini.sound, None,
@@ -1160,10 +1186,15 @@ mod tests {
         std::fs::write(&manifest, "[Mod]\nName=Metadata only\n").unwrap();
         let selected = launch_mod(&paths, None).unwrap();
         assert_eq!(
-            resources_for(selected.as_ref(), &base, AresSetting::Auto)
-                .unwrap()
-                .0
-                .ini,
+            resources_for(
+                selected.as_ref(),
+                &base,
+                AresSetting::Auto,
+                &paths.ra2_dir,
+            )
+            .unwrap()
+            .0
+            .ini,
             base
         );
         std::fs::write(&manifest, "[Files]\nRules=../outside.ini\n").unwrap();
@@ -1171,6 +1202,38 @@ mod tests {
         let refused = begin(&paths, None, false);
         assert!(refused.active.is_none() && refused.notice.is_some());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// MO: a mod copied straight into the install folder has no `Mods/`
+    /// folder to select. v0.3.8 only discovers a numbered archive family for
+    /// a selected mod, so `resources_for` must inspect the install folder
+    /// too. Nothing but the archive names may change in this path.
+    #[test]
+    fn an_install_copied_into_the_game_folder_keeps_its_numbered_archive_family() {
+        use crate::assets::asset_manager::test_support::TestDirectory;
+
+        let dir = TestDirectory::new("mo-install-family");
+        dir.write_mix("expandmo99.mix", "rulesmo.ini", b"[General]\n");
+        for name in ["rulesmo.ini", "artmo.ini", "aimo.ini"] {
+            std::fs::write(dir.path().join(name), b"[General]\n").unwrap();
+        }
+        let base = IniRootConfig::default();
+        let (resources, setting) =
+            resources_for(None, &base, AresSetting::Auto, dir.path()).unwrap();
+        assert_eq!(setting, AresSetting::Auto);
+        assert_eq!(resources.ini, base, "host [ini] roots stay authoritative");
+        assert_eq!(resources.archives.expansion_prefix, "expandmo");
+        assert!(resources.client_install.is_none() && !resources.requires_ares);
+
+        // A stock YR install has no complete renamed family: nothing changes.
+        let stock = TestDirectory::new("stock-install-family");
+        stock.write_mix("expandmd99.mix", "retail.bin", b"asset");
+        assert_eq!(
+            resources_for(None, &base, AresSetting::Auto, stock.path())
+                .unwrap()
+                .0,
+            ResourceConfig::from_ini(base)
+        );
     }
 
     #[test]

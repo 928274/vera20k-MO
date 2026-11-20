@@ -251,7 +251,7 @@ pub fn catalog_from_ini(ini: &IniFile) -> Vec<ThemeEntry> {
 mod tests {
     use super::*;
     use crate::map::source::test_support::TestDirectory;
-    use crate::util::ini_roots::{IniProfile, IniRootConfig};
+    use crate::util::ini_roots::IniRootConfig;
 
     /// MO keeps many YR-era tracks as AUD in other archives. They must stay
     /// in the automatic playlist even though the native catalog scan only
@@ -291,7 +291,7 @@ mod tests {
         assert_eq!(catalog.from_name("MOSONG"), -1);
 
         let roots = IniRootConfig {
-            profile: IniProfile::Mo,
+            theme: Some("thememo.ini".into()),
             ..Default::default()
         }
         .resolve(|_| true)

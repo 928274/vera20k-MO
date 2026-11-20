@@ -217,9 +217,13 @@ pub(crate) fn load_process_sources(
     Option<crate::rules::ruleset::RuleSet>,
     Option<crate::rules::ini_parser::IniFile>,
 )> {
-    let (resources, ares_setting) =
-        crate::app::mods::resources_for(active_mod.as_ref(), &config.ini, ares_setting)
-            .map_err(anyhow::Error::msg)?;
+    let (resources, ares_setting) = crate::app::mods::resources_for(
+        active_mod.as_ref(),
+        &config.ini,
+        ares_setting,
+        &config.paths.ra2_dir,
+    )
+    .map_err(anyhow::Error::msg)?;
     let mod_dir = active_mod.map(|active| active.dir);
     let mut assets = AssetManager::with_mod_and_ares(
         &config.paths.ra2_dir,

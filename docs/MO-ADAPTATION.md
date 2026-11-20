@@ -79,8 +79,16 @@
 仍保留，断言在上游实现下依然成立。
 
 **当前行为**：上游已删除 Cargo `ares` feature，Ares INI 语法改由每局 Rules 的
-运行时 `ares_way()` 判定。MO 的 `profile="mo"` 会按 Ares 游戏读取规则；构建时只保留
-`phobos` feature，不能再传 `--features ares`。
+运行时 `ares_way()` 判定；构建时只保留 `phobos` feature，不能再传 `--features ares`。
+**v0.3.8 起 `IniProfile::Mo` 已由上游删除**，只剩 `yr / auto / custom`：真机
+`config.toml` 用 `profile = "custom"` 显式写出旧 MO 预设的
+`rulesmo.ini` / `artmo.ini` / `aimo.ini` / `soundmo.ini` / `evamo.ini` /
+`theater_suffix = "mo"` / `thememo.ini` / `BATTLEMO.INI` / `MISSIONMO.INI` /
+`MAPSELMO.INI`。存档名也由上游 `ArchiveNames` 数据驱动；本 fork 在
+`assets::asset_manager::install_archive_names` 里对「没有选中 Mod、MO 直接装进
+游戏目录」的场景补跑一次 `numbered_mod_resources::discover`，只采用解析出的
+`expandmo` 存档名，不改 host 的 INI 根、客户端目录或 Ares 要求。否则 v0.3.8
+只会对 `Mods/` 下被选中的 mod 做发现，本安装会退回 `expandmd##.mix`。
 
 仍属本 fork 独有的 INI 能力在别的文件，未受影响：`ares_tolerant_root_is_usable`
 （悬空引用容忍）、`expandmo##.mix` / `thememo.ini` / `artmo` / `aimo` 根加载与根选择。
