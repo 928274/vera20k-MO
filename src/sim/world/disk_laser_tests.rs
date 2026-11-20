@@ -405,10 +405,9 @@ fn native_disk_constructor_fire_ai_expiry_and_common_drain_histories() {
                             // are not paired native RNG/ID boundaries.
                             paired = false;
                             let id = scene.role(&action["role"]).unwrap();
-                            scene.sim.notify_pointer_expired(
-                                id,
-                                UninitContext::new(rules, Some(&registry)),
-                            );
+                            scene
+                                .sim
+                                .notify_pointer_expired(id, UninitContext::new(rules));
                         }
                         kind => panic!("unexpected action {kind}"),
                     }
@@ -509,13 +508,9 @@ fn native_disk_constructor_fire_ai_expiry_and_common_drain_histories() {
                 "laser_update" => {}
                 "drain" => {
                     let begin = scene.sim.lifecycle_test_events_for_test().len();
-                    scene.sim.process_pending_delete_with(
-                        rules,
-                        Some(&registry),
-                        FrameEffects::default(),
-                        1,
-                        false,
-                    );
+                    scene
+                        .sim
+                        .process_pending_delete_with(rules, FrameEffects::default(), 1, false);
                     selected.extend(
                         scene.sim.lifecycle_test_events_for_test()[begin..]
                             .iter()
@@ -600,10 +595,9 @@ fn disk_snapshot_resumes_active_and_duplicate_pending_shots() {
         }
         if pending {
             for _ in 0..2 {
-                scene.sim.notify_pointer_expired(
-                    scene.source,
-                    UninitContext::new(rules, Some(&registry)),
-                );
+                scene
+                    .sim
+                    .notify_pointer_expired(scene.source, UninitContext::new(rules));
             }
             assert_eq!(
                 scene
@@ -674,13 +668,7 @@ fn disk_snapshot_resumes_active_and_duplicate_pending_shots() {
                         })
                         .collect();
                     let sound = sounds(sim, sound_start);
-                    sim.process_pending_delete_with(
-                        rules,
-                        Some(&registry),
-                        FrameEffects::default(),
-                        1,
-                        false,
-                    );
+                    sim.process_pending_delete_with(rules, FrameEffects::default(), 1, false);
                     (
                         lasers,
                         sound,
@@ -719,16 +707,15 @@ fn retail_disk_attack_delivers_without_ordinary_bullet_fire() {
         return;
     };
     let rules = retail.rules;
-    let registry = OverlayTypeRegistry::from_ini(&retail.processed_rules, Some(&retail.fixed_art));
     let mut sim = crate::sim::arena_fixture::rival_arena(&rules, 31);
     sim.overlay_grid = Some(crate::sim::overlay_grid::OverlayGrid::new(32, 32));
     let source = sim
-        .spawn_object_with_overlay_registry("DISK", "Americans", 10, 10, 64, &rules, &registry)
+        .spawn_object_with_map_overlays("DISK", "Americans", 10, 10, 64, &rules)
         .expect("stock DISK enters through the ordinary constructor");
     let target = sim
         // Six cells preserves this witness's unrocked source; the MTNK's
         // five-cell weapon cannot counterfire. The first RED used four cells.
-        .spawn_object_with_overlay_registry("MTNK", "Russians", 16, 10, 0, &rules, &registry)
+        .spawn_object_with_map_overlays("MTNK", "Russians", 16, 10, 0, &rules)
         .expect("full-health stock MTNK");
     sim.resolve_type_handles(&rules);
     let health = sim.substrate.entities.get(target).unwrap().health.current();
@@ -743,11 +730,7 @@ fn retail_disk_attack_delivers_without_ordinary_bullet_fire() {
     );
     let mut runtime = SimRuntime {
         simulation: sim,
-        resources: std::sync::Arc::new(SimResources {
-            rules,
-            overlay_registry: registry,
-            ..SimResources::empty()
-        }),
+        resources: std::sync::Arc::new(SimResources::new(rules)),
     };
     let mut commands = vec![command];
     for frame in 0..300 {
@@ -804,15 +787,13 @@ fn ares_disk_hit_flashes_and_plays_the_enabled_damage_anim() {
         let mut rules = retail.rules;
         // The anim's SHP binding comes from the asset loader in the game.
         rules.bind_anim_frame_count_for_test("XGRYMED1", 10);
-        let registry =
-            OverlayTypeRegistry::from_ini(&retail.processed_rules, Some(&retail.fixed_art));
         let mut sim = crate::sim::arena_fixture::rival_arena(&rules, 31);
         sim.overlay_grid = Some(crate::sim::overlay_grid::OverlayGrid::new(32, 32));
         let source = sim
-            .spawn_object_with_overlay_registry("DISK", "Americans", 10, 10, 64, &rules, &registry)
+            .spawn_object_with_map_overlays("DISK", "Americans", 10, 10, 64, &rules)
             .unwrap();
         let target = sim
-            .spawn_object_with_overlay_registry("MTNK", "Russians", 16, 10, 0, &rules, &registry)
+            .spawn_object_with_map_overlays("MTNK", "Russians", 16, 10, 0, &rules)
             .unwrap();
         sim.resolve_type_handles(&rules);
         let health = sim.substrate.entities.get(target).unwrap().health.current();
@@ -827,11 +808,7 @@ fn ares_disk_hit_flashes_and_plays_the_enabled_damage_anim() {
         );
         let mut runtime = SimRuntime {
             simulation: sim,
-            resources: std::sync::Arc::new(SimResources {
-                rules,
-                overlay_registry: registry,
-                ..SimResources::empty()
-            }),
+            resources: std::sync::Arc::new(SimResources::new(rules)),
         };
         let mut commands = vec![command];
         let mut flashed = false;

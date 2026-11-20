@@ -1003,13 +1003,11 @@ mod tests {
         };
         sim.entities_mut_for_test().insert(entity(1));
         sim.entities_mut_for_test().insert(entity(2));
-        sim.entities_mut_for_test()
-            .get_mut(2)
+        sim.entity_mut_for_test(2)
             .unwrap()
             .lifecycle
             .set_in_limbo_for_test(true);
-        sim.entities_mut_for_test()
-            .get_mut(1)
+        sim.entity_mut_for_test(1)
             .unwrap()
             .lifecycle
             .set_in_limbo_for_test(true);
@@ -1335,8 +1333,7 @@ mod tests {
             sim.entities_mut_for_test().insert(unit);
             sim.reveal(id);
         }
-        sim.entities_mut_for_test()
-            .get_mut(2)
+        sim.entity_mut_for_test(2)
             .unwrap()
             .set_unit_simple_deploy_for_test(false, true, false);
         let frame = crate::app::presentation::frame::PresentationFrame::of_test(
@@ -1401,8 +1398,7 @@ mod tests {
         let building_anchor = screen_position(&hidden_building);
         sim.entities_mut_for_test().insert(hidden_mobile);
         sim.entities_mut_for_test().insert(hidden_building);
-        sim.entities_mut_for_test()
-            .get_mut(1)
+        sim.entity_mut_for_test(1)
             .unwrap()
             .lifecycle
             .set_in_limbo_for_test(true);
@@ -1521,8 +1517,7 @@ mod tests {
         sim.reveal(1);
         // A headless Reveal commits no exact Z; lift the aircraft back to 900
         // and resubmit its display, as a takeoff does.
-        sim.entities_mut_for_test()
-            .get_mut(1)
+        sim.entity_mut_for_test(1)
             .unwrap()
             .position
             .set_exact_z_leptons_for_test(Some(900));
@@ -1533,8 +1528,7 @@ mod tests {
         // reached the ground, but the phase transaction has not resubmitted.
         // A fresh altitude classifier used to choose Ground and then lose the
         // body because NativeDisplayOrder correctly had no entry for this ID.
-        sim.entities_mut_for_test()
-            .get_mut(1)
+        sim.entity_mut_for_test(1)
             .unwrap()
             .position
             .set_exact_z_leptons_for_test(Some(0));

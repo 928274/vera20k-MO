@@ -130,7 +130,6 @@ fn a_mapless_fire_gate_takes_the_shared_range_answer() {
         crate::sim::combat::fire_error_world::FireSubject {
             world: &sim,
             rules: &rules,
-            overlay_registry: None,
             fog: None,
             firer: sim.substrate.entities.get(firer).unwrap(),
             obj: rules.object(kind).unwrap(),
@@ -182,7 +181,6 @@ fn a_tethered_low_balloon_is_illegal_to_fire_at() {
         crate::sim::combat::fire_error_world::FireSubject {
             world: sim,
             rules: &rules,
-            overlay_registry: None,
             fog: None,
             firer: sim.substrate.entities.get(1).unwrap(),
             obj: rules.object("TANK").unwrap(),
@@ -243,7 +241,6 @@ fn a_cargo_rider_is_not_bound_to_its_carrier_as_transporter() {
         crate::sim::combat::fire_error_world::FireSubject {
             world: sim,
             rules: &rules,
-            overlay_registry: None,
             fog: None,
             firer: sim.substrate.entities.get(2).unwrap(),
             obj: rules.object("RIDER").unwrap(),
@@ -253,15 +250,25 @@ fn a_cargo_rider_is_not_bound_to_its_carrier_as_transporter() {
         .fire_error(true)
     };
     use crate::sim::combat::fire_error::FireError;
-    sim.substrate.entities.get_mut(2).unwrap().passenger_role =
-        crate::sim::passenger::PassengerRole::inside_for_test(1, false);
+    sim.substrate
+        .entities
+        .get_mut(2)
+        .unwrap()
+        .set_passenger_role_for_test(crate::sim::passenger::PassengerRole::inside_for_test(
+            1, false,
+        ));
     assert_ne!(
         error(&sim),
         FireError::Illegal,
         "a garrison occupant or cargo rider stores no Transporter"
     );
-    sim.substrate.entities.get_mut(2).unwrap().passenger_role =
-        crate::sim::passenger::PassengerRole::boarded_for_test(1, false);
+    sim.substrate
+        .entities
+        .get_mut(2)
+        .unwrap()
+        .set_passenger_role_for_test(crate::sim::passenger::PassengerRole::boarded_for_test(
+            1, false,
+        ));
     assert_eq!(
         error(&sim),
         FireError::Illegal,

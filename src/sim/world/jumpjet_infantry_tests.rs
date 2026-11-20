@@ -101,7 +101,7 @@ pub(super) fn retail_dustbowl_rocketeer()
                 y,
                 64,
                 &resources.rules,
-                &resources.overlay_registry,
+                resources.rules.overlay_registry(),
             )?;
             Some((rocketeer, x, y))
         })
@@ -120,7 +120,7 @@ pub(super) fn retail_dustbowl_rocketeer()
                 crate::sim::build_site::can_place_building_at(
                     sim,
                     &resources.rules,
-                    Some(&resources.overlay_registry),
+                    Some(resources.rules.overlay_registry()),
                     plant_type,
                     (px as i16, py as i16),
                     Some(owner_id),
@@ -247,7 +247,7 @@ fn retail_rocketeer_hover_raises_its_cell_tag_on_absolute_frames_after_restore()
             loaded
                 .restore_map_authority_after_snapshot_load(
                     &resources.rules,
-                    &resources.overlay_registry,
+                    resources.rules.overlay_registry(),
                     None,
                 )
                 .unwrap();
@@ -390,7 +390,7 @@ fn retail_dustbowl_rocketeer_flies_hovers_and_fires_in_its_airborne_poses() {
             y,
             192,
             &resources.rules,
-            &resources.overlay_registry,
+            resources.rules.overlay_registry(),
         )
         .expect("conscript");
     sim.resolve_type_handles(&resources.rules);
@@ -540,7 +540,7 @@ fn retail_dustbowl_parked_rocketeer_engages_nearby_enemies() {
             y,
             192,
             &resources.rules,
-            &resources.overlay_registry,
+            resources.rules.overlay_registry(),
         )
         .expect("conscript");
     sim.resolve_type_handles(&resources.rules);
@@ -1158,7 +1158,7 @@ fn a_hovering_jumpjet_turn_infantryman_aims_his_locomotor_at_his_target() {
             .jumpjet_runtime_mut()
             .unwrap();
         *runtime = runtime.clone().with_destination_for_test(here);
-        sim.tick_jumpjet_cruise_one(1, &rules, None, crate::sim::world::FrameEffects::default())
+        sim.tick_jumpjet_cruise_one(1, &rules, crate::sim::world::FrameEffects::default())
             .unwrap();
         let frame = sim.session.binary_frame();
         let entity = sim.substrate.entities.get(1).unwrap();
@@ -1511,7 +1511,6 @@ fn a_ground_route_order_gives_a_rocketeer_his_navcom_and_move_to() {
         1,
         Some(crate::sim::components::NavTargetRef::cell(60, 52)),
         &rules,
-        None,
         crate::sim::world::FrameEffects::default(),
     )
     .unwrap();
@@ -1589,7 +1588,6 @@ fn an_object_order_flies_a_rocketeer_with_the_order() {
         1,
         Some(crate::sim::components::NavTargetRef::object(shooter)),
         &rules,
-        None,
         crate::sim::world::FrameEffects::default(),
     )
     .unwrap();
@@ -1629,7 +1627,6 @@ fn the_mission_destination_setter_flies_a_rocketeer() {
         1,
         Some(crate::sim::components::NavTargetRef::cell(60, 52)),
         &rules,
-        None,
         crate::sim::world::FrameEffects::default(),
     )
     .unwrap();
@@ -1719,7 +1716,6 @@ fn the_mission_destination_setter_reorders_a_moving_rocketeer() {
             1,
             Some(crate::sim::components::NavTargetRef::cell(cell.0, cell.1)),
             &rules,
-            None,
             crate::sim::world::FrameEffects::default(),
         )
         .unwrap();

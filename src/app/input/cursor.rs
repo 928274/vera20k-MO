@@ -130,13 +130,13 @@ pub(crate) fn answer_kept_questions(state: &AppState) {
     current_cursor_feedback_kind(state, &targets);
     crate::app::input::ferry::armed_click_accepted(state);
     crate::app::input::planning_mode::hover_node(state);
+    crate::app::input::tooltips::answer_kept_tactical_tip(state);
 }
 
 fn find_cursor_feedback_kind(
     state: &AppState,
     targets: &CursorTargets,
 ) -> Option<CursorFeedbackKind> {
-    let selected = targets.selected.as_slice();
     // State_Machine entry (`StateMachine__EnterPause` 0x00683EB0) sets the
     // normal arrow (`SetCursor(0)`) for the whole modal; the in-match 0xCF
     // shows it over the battlefield.
@@ -175,6 +175,22 @@ fn find_cursor_feedback_kind(
     {
         return Some(CursorFeedbackKind::Default);
     }
+    let runtime = state.match_state.sim_runtime.runtime();
+    let selected = runtime.map_or(
+        std::borrow::Cow::Borrowed(targets.selected.as_slice()),
+        |rt| {
+            super::context_order::projected_order_selection(
+                &rt.simulation,
+                state.rules(),
+                &targets.selected,
+                targets
+                    .hover
+                    .and_then(HoverObject::techno)
+                    .map(|target| target.stable_id),
+            )
+        },
+    );
+    let selected = selected.as_ref();
     // Superweapon targeting cursor takes precedence over building placement.
     // Sidebar/minimap hits are already short-circuited above, so the SW reticle
     // only renders on the tactical map. DetermineAction answers the armed
@@ -237,11 +253,7 @@ fn find_cursor_feedback_kind(
     if state.armed_building_type().is_some() {
         return Some(CursorFeedbackKind::Invalid);
     }
-    let sim = state
-        .match_state
-        .sim_runtime
-        .runtime()
-        .map(|rt| &rt.simulation)?;
+    let sim = &runtime?.simulation;
     // DetermineAction's no-selection path keeps Repair/Sell only when no
     // armed Super overrides it. Use the same priority as the release owner;
     // its target admission still supplies wrench/dollar or refusal feedback.
@@ -636,7 +648,6 @@ impl<'a> ActionQuery<'a> {
         empty_cell_cursor(
             self.sim,
             self.rules,
-            self.overlays,
             self.viewer,
             best_id,
             cell,
@@ -753,7 +764,6 @@ fn unforced_cell_attack_feedback(
 fn empty_cell_cursor(
     sim: &crate::sim::world::Simulation,
     rules: Option<&crate::rules::ruleset::RuleSet>,
-    registry: Option<&crate::rules::overlay_types::OverlayTypeRegistry>,
     viewer: Option<crate::sim::intern::InternedId>,
     best_id: Option<u64>,
     cell: (u16, u16),
@@ -768,9 +778,7 @@ fn empty_cell_cursor(
     {
         return CursorFeedbackKind::GuardArea;
     }
-    let action = what_action_on_cell(
-        sim, viewer, best_id, cell, modifier, rules, registry, mouse_over,
-    );
+    let action = what_action_on_cell(sim, viewer, best_id, cell, modifier, rules, mouse_over);
     match action {
         MoveAction::None => return CursorFeedbackKind::Default,
         MoveAction::NoMove => return CursorFeedbackKind::Invalid,
@@ -851,7 +859,6 @@ fn what_action_on_cell(
     cell: (u16, u16),
     modifier: crate::app::input::context_order::OrderModifier,
     rules: Option<&crate::rules::ruleset::RuleSet>,
-    registry: Option<&crate::rules::overlay_types::OverlayTypeRegistry>,
     mouse_over: bool,
 ) -> crate::sim::world::MoveAction {
     use crate::sim::world::{CellActionQuery, MoveAction};
@@ -869,7 +876,7 @@ fn what_action_on_cell(
         mouse_over,
         shift: modifier == crate::app::input::context_order::OrderModifier::Shift,
     };
-    sim.cell_move_action(viewer, id, cell, query, rules, registry)
+    sim.cell_move_action(viewer, id, cell, query, rules)
         .unwrap_or(MoveAction::Move)
 }
 
@@ -949,13 +956,15 @@ pub(super) fn capability_cursor_for_hover(
         return CursorFeedbackKind::Select;
     }
 
+    let viewer = sim.session().current_house();
+    let control = sim.control_projection();
     if let Some(kind) = unit_repair_feedback(
         sim,
         selected,
         best_id,
         hover,
         rules,
-        sim.session().current_house(),
+        viewer,
         modifier,
         force_move_key,
     ) {
@@ -969,7 +978,7 @@ pub(super) fn capability_cursor_for_hover(
     // Infantry51E462's disarm prefix precedes self post-processing too.
     if let Some(actor) = best_id.and_then(|id| sim.entities().get(id))
         && actor.category() == EntityCategory::Infantry
-        && sim.house_is_human_player(actor.owner())
+        && control.can_order(actor.owner())
         && rules
             .and_then(|rules| sim.interner().object_type(actor.type_ref(), rules))
             .is_some_and(|object| object.engineer)
@@ -990,8 +999,8 @@ pub(super) fn capability_cursor_for_hover(
     // Techno7000B9's self action precedes Ctrl/Alt. All self consumers share
     // admission with click/deploy-key, including loaded mobile transports.
     if selected == [hover.stable_id]
-        && let (Some(rules), Some(entity)) = (rules, hovered_entity)
-        && sim.session().current_house() == Some(entity.owner())
+        && let (Some(rules), Some(entity), Some(viewer)) = (rules, hovered_entity, viewer)
+        && control.can_order_from(entity.owner(), viewer)
         && !entity.berserk.is_active()
         && !entity.is_warped_out()
     {
@@ -999,7 +1008,7 @@ pub(super) fn capability_cursor_for_hover(
             sim,
             rules,
             overlay_registry,
-            entity.owner(),
+            viewer,
             selected,
             Some(hover),
             planning,
@@ -1012,7 +1021,7 @@ pub(super) fn capability_cursor_for_hover(
             sim,
             rules,
             overlay_registry,
-            entity.owner(),
+            viewer,
             selected,
             hover,
             planning,
@@ -1024,7 +1033,7 @@ pub(super) fn capability_cursor_for_hover(
         // passengers (+0x114) is 0, the arrow.
         let empty_aircraft = entity.category() == EntityCategory::Aircraft
             && entity
-                .passenger_role
+                .passenger_role()
                 .cargo()
                 .is_none_or(|cargo| cargo.count() == 0);
         return if entity.category() == EntityCategory::Structure || empty_aircraft {
@@ -1106,6 +1115,7 @@ pub(super) fn capability_cursor_for_hover(
         if rules.is_some_and(|rules| {
             super::context_order::vehicle_capture_action(
                 sim,
+                &control,
                 rules,
                 best_id,
                 hover.stable_id,
@@ -1129,25 +1139,18 @@ pub(super) fn capability_cursor_for_hover(
         //    carrier, Alt's Move included, an Aircraft's NoEnter over a
         //    UnitRepair= building and a Carryall's Tote over a Unit
         //    (`context_order::entry_action`).
-        if let Some(action) = rules
-            .filter(|_| {
-                matches!(
-                    hover.kind,
-                    HoverTargetKind::FriendlyStructure | HoverTargetKind::FriendlyUnit
-                )
-            })
-            .and_then(|rules| {
-                super::context_order::entry_action(
-                    sim,
-                    rules,
-                    best_id,
-                    hover.stable_id,
-                    modifier,
-                    force_move_key,
-                    overlay_registry,
-                )
-            })
-        {
+        if let Some(action) = rules.and_then(|rules| {
+            super::context_order::hovered_entry_action(
+                sim,
+                &control,
+                rules,
+                best_id,
+                hover,
+                modifier,
+                force_move_key,
+                overlay_registry,
+            )
+        }) {
             return match action {
                 crate::sim::world::EntryClickAction::NoEnter => CursorFeedbackKind::NoEnter,
                 crate::sim::world::EntryClickAction::Grind => CursorFeedbackKind::Grind,
@@ -2771,7 +2774,7 @@ mod tests {
         let house = sim.interner().get("Americans");
         sim.session_mut_for_test().set_current_house_for_test(house);
         // 4. Mark the SEAL as selected (mirrors clicking it in-game).
-        if let Some(e) = sim.entities_mut_for_test().get_mut(seal_id) {
+        if let Some(e) = sim.entity_mut_for_test(seal_id) {
             e.selection.set_selected_for_test(true);
         }
 
@@ -2831,7 +2834,7 @@ mod tests {
             .spawn_object("GAREFN", "Americans", 10, 10, 0, &rules)
             .expect("Refinery spawned");
 
-        if let Some(e) = sim.entities_mut_for_test().get_mut(miner_id) {
+        if let Some(e) = sim.entity_mut_for_test(miner_id) {
             e.selection.set_selected_for_test(true);
         }
         // What_Action's Enter is a human player's (House `0x0050B6F0`).
@@ -3179,15 +3182,13 @@ Verses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%
             let case = &row["input"];
             let (mut sim, rules, actor) = stationary_attack_fixture();
             if case["installed"].as_bool().unwrap() {
-                sim.entities_mut_for_test()
-                    .get_mut(actor)
+                sim.entity_mut_for_test(actor)
                     .unwrap()
                     .bunker
                     .set_bunker_link_for_test(BunkerLink::Installed(99));
             }
             // Active rearm never belongs to WhatAction's control/range gate.
-            sim.entities_mut_for_test()
-                .get_mut(actor)
+            sim.entity_mut_for_test(actor)
                 .unwrap()
                 .rearm_timer
                 .set_for_test(crate::sim::timer::CdTimer::started(0, 999));
@@ -3228,7 +3229,6 @@ Verses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%
                             Some(empty_cell_cursor(
                                 &sim,
                                 Some(&rules),
-                                None,
                                 sim.session().current_house(),
                                 Some(actor),
                                 (x, 2),
@@ -3269,15 +3269,13 @@ Verses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%
             .spawn_object_limbo_at_height("GI", "Americans", 1, 10, 0, 0, &rules)
             .unwrap();
         // Garrison fire reads BuildingClass's occupants, not transport Cargo.
-        sim.entities_mut_for_test()
-            .get_mut(house)
+        sim.entity_mut_for_test(house)
             .unwrap()
-            .passenger_role
+            .passenger_role_mut_for_test()
             .set_occupants_for_test(vec![gi], 0);
-        sim.entities_mut_for_test()
-            .get_mut(gi)
+        sim.entity_mut_for_test(gi)
             .unwrap()
-            .passenger_role = PassengerRole::inside_for_test(house, false);
+            .set_passenger_role_for_test(PassengerRole::inside_for_test(house, false));
         assert!(rules.object("HOUSE").unwrap().primary().is_none());
         for (actor, y) in [(tower, 6), (house, 10)] {
             assert_eq!(
@@ -3299,7 +3297,6 @@ Verses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%
                         Some(empty_cell_cursor(
                             &sim,
                             Some(&rules),
-                            None,
                             sim.session().current_house(),
                             Some(actor),
                             (20, y),
@@ -3352,8 +3349,7 @@ Verses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%
                 kind.deploy_fire,
                 case["deploy_fire"].as_bool().unwrap_or(false)
             );
-            sim.entities_mut_for_test()
-                .get_mut(actor)
+            sim.entity_mut_for_test(actor)
                 .unwrap()
                 .set_unit_simple_deploy_for_test(
                     case["deployed"].as_bool().unwrap_or(false),
@@ -3491,22 +3487,20 @@ Verses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%
             let target_id = sim
                 .spawn_object("TANK", "Americans", 4, 10, 0, &rules)
                 .unwrap();
-            sim.entities_mut_for_test()
-                .get_mut(house)
+            sim.entity_mut_for_test(house)
                 .unwrap()
-                .passenger_role
+                .passenger_role_mut_for_test()
                 .set_occupants_for_test(vec![gi], 0);
-            sim.entities_mut_for_test()
-                .get_mut(gi)
+            sim.entity_mut_for_test(gi)
                 .unwrap()
-                .passenger_role = PassengerRole::inside_for_test(house, false);
+                .set_passenger_role_for_test(PassengerRole::inside_for_test(house, false));
             let occupant = sim.entities().get(gi).unwrap();
             assert!(occupant.lifecycle.in_limbo());
             assert!(!occupant.lifecycle.cell_marked());
             assert!(!occupant.in_logic_vector.is_member());
             assert!(!sim.live_object_order_snapshot().contains(&gi));
             assert_eq!(
-                occupant.passenger_role.inside_transport(),
+                occupant.passenger_role().inside_transport(),
                 Some((house, false))
             );
             let target = if cell_route {
@@ -3549,7 +3543,7 @@ Verses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%
                     actor.mission_leaf,
                     actor.building_body_state(),
                     actor.queued_building_body_state(),
-                    actor.passenger_role.cargo(),
+                    actor.passenger_role().cargo(),
                     actor.rearm_timer.timer(),
                     actor.passive_scan.timer(),
                     actor.passive_scan.acquired(),
@@ -3584,7 +3578,7 @@ Verses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%
                  final GetFireError={:?}; occupant={:?}; target={:?}; trace={trace:#?}",
                 // Ask the live legality owner only after failure, so this
                 // diagnostic cannot change the exercised frame sequence.
-                sim.selected_weapon_fire_error(&rules, house, target, true, None),
+                sim.selected_weapon_fire_error(&rules, house, target, true),
                 sim.entities().get(gi),
                 sim.entities().get(target_id),
             );
@@ -3601,13 +3595,12 @@ Verses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%
         let target = sim
             .spawn_object("TANK", "Soviets", 4, 2, 0, &rules)
             .unwrap();
-        sim.entities_mut_for_test()
-            .get_mut(actor)
+        sim.entity_mut_for_test(actor)
             .unwrap()
             .bunker
             .set_bunker_link_for_test(BunkerLink::Installed(99));
         for id in [actor, target] {
-            let entity = sim.entities_mut_for_test().get_mut(id).unwrap();
+            let entity = sim.entity_mut_for_test(id).unwrap();
             entity.lifecycle.set_cell_marked_for_test(true);
             entity.position.set_exact_z_leptons_for_test(Some(900));
         }
@@ -3666,7 +3659,7 @@ Verses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%
         // Z and marked state force source +54 and target +50/+54 to read the
         // native fallback Cell rather than bypassing the query as limbo objects.
         for id in [actor_id, target_id] {
-            let entity = sim.entities_mut_for_test().get_mut(id).unwrap();
+            let entity = sim.entity_mut_for_test(id).unwrap();
             entity.position.set_exact_z_leptons_for_test(Some(900));
             entity.lifecycle.set_cell_marked_for_test(true);
         }
@@ -3777,14 +3770,13 @@ Verses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%
                 (9, 5),
                 modifier,
                 Some(&rules),
-                None,
                 true,
             )
         };
         assert_eq!(cursor(OrderModifier::Normal), MoveAction::Move);
         assert_eq!(cursor(OrderModifier::ForceMove), MoveAction::Move);
         let goal = sim
-            .cell_click_destination(owner, tank, (9, 5), false, &rules, None)
+            .cell_click_destination(owner, tank, (9, 5), false, &rules)
             .unwrap()
             .unwrap();
         assert!(goal.0 < 8, "{goal:?}");
@@ -3824,7 +3816,6 @@ Verses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%
             empty_cell_cursor(
                 &sim,
                 Some(&rules),
-                Some(&registry),
                 Some(owner),
                 Some(miner),
                 cell,
@@ -3853,7 +3844,6 @@ Verses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%
             empty_cell_cursor(
                 &sim,
                 Some(&rules),
-                None,
                 Some(owner),
                 None,
                 (9, 5),
@@ -3913,8 +3903,7 @@ Verses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%
             )
         };
         assert_eq!(best(&sim), Some(tank));
-        sim.entities_mut_for_test()
-            .get_mut(tank)
+        sim.entity_mut_for_test(tank)
             .unwrap()
             .berserk
             .set_active_for_test(true);
@@ -3969,7 +3958,7 @@ Verses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%
             .expect("far tank");
         // Nudge the far tank's sub-cell offset toward the target so that both
         // sit two cell indices away but the far one is closer in leptons.
-        if let Some(e) = sim.entities_mut_for_test().get_mut(far) {
+        if let Some(e) = sim.entity_mut_for_test(far) {
             e.position
                 .set_sub_x_for_test(crate::util::fixed_math::SimFixed::from_num(-120));
         }
@@ -4035,8 +4024,7 @@ Verses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%
                     .unwrap();
                 // A damaged friendly hut and a capturable hostile hut must
                 // still terminate this branch instead of taking those fallbacks.
-                sim.entities_mut_for_test()
-                    .get_mut(hut)
+                sim.entity_mut_for_test(hut)
                     .unwrap()
                     .health
                     .set_for_test(150);

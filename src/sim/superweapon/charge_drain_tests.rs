@@ -91,7 +91,7 @@ fn world(rules: &RuleSet) -> (Simulation, InternedId, InternedId, InternedId, u6
     sim.spawn_object("TARGET", "Russians", 20, 20, 0, rules)
         .unwrap();
     sim.assess_power_for_test(rules);
-    sim.recheck_house_tech_tree(local, rules);
+    sim.recheck_house_tech_tree(local, rules, Default::default());
     let id = sim.interner.get(SHIELD).unwrap();
     (sim, local, remote, id, provider)
 }
@@ -282,7 +282,6 @@ fn authored_drain_provider_commands_effects_and_saved_phase_follow_native_conver
         .advance_app_frame(
             &commands,
             &rules,
-            None,
             33,
             crate::sim::world::TickLane::Ordinary,
             FrameEffects::for_sound(&boundary),
@@ -499,6 +498,7 @@ fn remote_house_human_selector_and_reset_keep_drain_one_time_and_leaf_ready_guar
         let original_timer = (instance.charge_start_tick(), instance.charge_duration());
         sim.sound_events.clear_for_test();
         assert!(sim.apply_command_with_overlays(
+            None,
             "Russians",
             &Command::LaunchSuperWeapon {
                 sw_type_id: id,
@@ -522,6 +522,7 @@ fn remote_house_human_selector_and_reset_keep_drain_one_time_and_leaf_ready_guar
             );
             sim.session.set_binary_frame_for_test(4200);
             assert!(!sim.apply_command_with_overlays(
+                None,
                 "Russians",
                 &Command::LaunchSuperWeapon {
                     sw_type_id: id,
@@ -563,6 +564,7 @@ fn remote_house_human_selector_and_reset_keep_drain_one_time_and_leaf_ready_guar
         let anims = invoke_count(&sim);
         sim.sound_events.clear_for_test();
         sim.apply_command_with_overlays(
+            None,
             "Russians",
             &Command::LaunchSuperWeapon {
                 sw_type_id: id,

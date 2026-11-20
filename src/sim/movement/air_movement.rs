@@ -389,7 +389,7 @@ pub(crate) fn update_fly_height(
     let flight_level = type_flight_level(entity, rules_context);
     let has_passenger = entity.category() == crate::map::entities::EntityCategory::Aircraft
         && entity
-            .passenger_role
+            .passenger_role()
             .cargo()
             .is_some_and(|cargo| cargo.count() != 0);
     let world_z = super::ground_pose::object_world_z_leptons(entity, terrain);
@@ -507,7 +507,6 @@ pub(crate) mod tests {
             id,
             Some(crate::sim::components::NavTargetRef::cell(20, 15)),
             &rules,
-            None,
             crate::sim::world::FrameEffects::default(),
         )
         .expect("the Unit setter takes the cell");

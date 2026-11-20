@@ -50,8 +50,8 @@ impl GameEntity {
         self.emp.sparkle
     }
     /// UpdateSparkle10062FE0 holds its new sparkle, through
-    /// [`EntityStore::write_held_anim`](crate::sim::entity_store::EntityStore::write_held_anim).
-    pub(crate) fn hold_emp_sparkle(
+    /// [`EntityStore::hold_emp_sparkle`](crate::sim::entity_store::EntityStore::hold_emp_sparkle).
+    pub(in crate::sim) fn hold_emp_sparkle(
         &mut self,
         anim: u64,
         _: crate::sim::entity_store::AnimHolderAuthority,
@@ -528,9 +528,7 @@ mod receiver {
                 // Ares3.0 10062526..10062563: healing EMP raises65 then64.
                 // Natural expiry calls Disable directly and raises neither.
                 // Both calls resolve the current Tag; actions may remove it.
-                let context =
-                    crate::sim::world::UninitContext::new(rules, effects.overlay_registry())
-                        .with_effects(effects);
+                let context = crate::sim::world::UninitContext::new(rules).with_effects(effects);
                 self.dispatch_object_tag_event(target, 65, Some(target), source, context);
                 if self
                     .substrate
@@ -546,9 +544,7 @@ mod receiver {
                 //62. The generic raise has no source; retain the current Tag
                 //rather than a pre-callback attachment. Neither check skips
                 //the common threshold/sparkle tail in the native body.
-                let context =
-                    crate::sim::world::UninitContext::new(rules, effects.overlay_registry())
-                        .with_effects(effects);
+                let context = crate::sim::world::UninitContext::new(rules).with_effects(effects);
                 if self
                     .substrate
                     .entities
@@ -572,7 +568,7 @@ mod receiver {
                         target,
                         source,
                         rules,
-                        effects.overlay_registry(),
+                        Some(rules.overlay_registry()),
                         effects,
                     );
                     return EmpDelivery::Applied;
@@ -585,7 +581,7 @@ mod receiver {
                     target,
                     source,
                     rules,
-                    effects.overlay_registry(),
+                    Some(rules.overlay_registry()),
                     effects,
                 );
                 return EmpDelivery::Applied;
@@ -684,7 +680,13 @@ mod receiver {
                 .get(target)
                 .is_some_and(|entity| entity.lift.target().is_some())
             {
-                self.release_locomotor(target, true, rules, effects.overlay_registry(), effects);
+                self.release_locomotor(
+                    target,
+                    true,
+                    rules,
+                    Some(rules.overlay_registry()),
+                    effects,
+                );
             }
             if category.is_foot() {
                 self.leave_team(target, false, rules, effects);
@@ -695,33 +697,7 @@ mod receiver {
                 .get(target)
                 .is_some_and(|entity| !entity.deactivated.is_offline() && advisable(entity))
             {
-                //10062C26..57 saves only a Building's Focus across the shared
-                //Deactivate -> ResetOrdersToGuard, which normally clears it.
-                let selected = self
-                    .substrate
-                    .entities
-                    .get(target)
-                    .is_some_and(|entity| entity.selection.is_selected());
-                let focus = building.then(|| {
-                    self.substrate
-                        .entities
-                        .get(target)
-                        .unwrap()
-                        .archive_target()
-                });
-                self.techno_deactivate(target, rules, effects);
-                // A selected victim is selected again with the selection
-                // voice off (g_SelectionVoice_Enable cleared around vt+0x14C).
-                if selected && let Some(entity) = self.substrate.entities.get_mut(target) {
-                    entity.selection.select();
-                }
-                if let Some(focus) = focus {
-                    self.substrate
-                        .entities
-                        .get_mut(target)
-                        .unwrap()
-                        .set_archive_target(focus);
-                }
+                self.ares_deactivate_with_reselection(target, rules, effects);
             }
             // After Deactivate: CaptureManager FreeAll, updateSpawnManager
             //(10063070) with the firer, then the inlined SuspendWork.
@@ -731,7 +707,7 @@ mod receiver {
                 .get(target)
                 .is_some_and(|entity| entity.capture_manager.is_some())
             {
-                self.free_all_captures(target, rules, effects.overlay_registry(), effects);
+                self.free_all_captures(target, rules, Some(rules.overlay_registry()), effects);
             }
             self.ares_update_spawn_manager(target, source, rules, effects);
             if let Some(manager) = self
@@ -817,7 +793,12 @@ mod receiver {
             if line == UnderAttackLine::OreMiner {
                 self.submit_under_attack_warning(event, rules, effects);
             } else {
-                self.notify_house_under_attack(event, rules, effects.overlay_registry(), effects);
+                self.notify_house_under_attack(
+                    event,
+                    rules,
+                    Some(rules.overlay_registry()),
+                    effects,
+                );
             }
         }
         fn disable_ares_emp(&mut self, target: u64, rules: &RuleSet, effects: FrameEffects<'_>) {
@@ -1045,11 +1026,7 @@ mod receiver {
                 if building {
                     self.substrate.set_anim_z_adjust(anim, -1024);
                 }
-                self.substrate
-                    .entities
-                    .write_held_anim(target, |entity, authority| {
-                        entity.hold_emp_sparkle(anim, authority)
-                    });
+                self.substrate.entities.hold_emp_sparkle(target, anim);
             }
         }
         /// Installed BuildingClass_Mi_Selling_EMPDuration10053D60 (hook
@@ -1197,6 +1174,38 @@ mod receiver {
                 .collect()
         }
 
+        #[test]
+        fn ares_emp_reselection_raises_selected_twice_offline_only() {
+            use crate::sim::command::Command;
+            use crate::sim::scenario_session::ScenarioGameMode::{Lan, Skirmish};
+
+            let _ares = crate::rules::ares_switch::read_ares_way(true);
+            for (mode, expected) in [(Skirmish, &[33, 33, 63, 62][..]), (Lan, &[63, 62][..])] {
+                let (mut sim, rules, target, source) = tagged_emp_scene(0, 2);
+                sim.session.set_game_mode(mode);
+                sim.session
+                    .set_current_house_for_test(sim.interner.get("Americans"));
+                let select = Command::Select {
+                    entity_ids: vec![target],
+                    additive: false,
+                };
+                assert!(sim.apply_command("Americans", &select, Some(&rules)));
+                assert_eq!(
+                    sim.deliver_ares_emp(
+                        target,
+                        Some(source),
+                        rules.warhead("EMPWH").unwrap(),
+                        &rules,
+                        FrameEffects::empty(),
+                    ),
+                    EmpDelivery::Applied,
+                );
+                let victim = sim.entities().get(target).unwrap();
+                assert!(victim.deactivated.is_offline() && victim.selection.is_selected());
+                assert_eq!(emp_event_kinds(&sim), expected);
+            }
+        }
+
         /// Ares3.0 deliver100624C5..10062509 and10062526..10062563 raise
         /// house-specific events before generic events. Natural expiry does not.
         #[test]
@@ -1269,7 +1278,7 @@ mod receiver {
         fn ares_emp_tag_predicates_require_matching_kind_actor_and_live_counter() {
             let _ares = crate::rules::ares_switch::read_ares_way(true);
             let (mut sim, rules, target, source) = tagged_emp_scene(0, 2);
-            let context = crate::sim::world::UninitContext::with_rules(&rules);
+            let context = crate::sim::world::UninitContext::new(&rules);
             for kind in [62, 63] {
                 sim.dispatch_object_tag_event(target, kind, Some(target), Some(source), context);
             }
@@ -1455,7 +1464,6 @@ mod receiver {
             crate::sim::combat::fire_error_world::FireSubject {
                 world: sim,
                 rules,
-                overlay_registry: None,
                 fog: None,
                 firer,
                 obj: rules.object("TOWER").unwrap(),
@@ -1573,7 +1581,6 @@ mod receiver {
                 target,
                 Some(TargetKind::Entity(source)),
                 &rules,
-                None,
                 FrameEffects::empty(),
             )
             .unwrap();
@@ -3085,9 +3092,7 @@ mod receiver {
             );
             sim.substrate
                 .entities
-                .write_held_anim(target, |victim, authority| {
-                    victim.hold_emp_sparkle(held, authority)
-                })
+                .hold_emp_sparkle(target, held)
                 .unwrap();
             let victim = sim.substrate.entities.get_mut(target).unwrap();
             victim.emp_anim_pointer_expired(held + 1);

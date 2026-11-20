@@ -5,7 +5,6 @@
 //! Simulation retains no callback, device or input state. Tooling/replay
 //! explicitly omit client effects and consume their recorded commands.
 
-use crate::rules::overlay_types::OverlayTypeRegistry;
 use crate::rules::ruleset::RuleSet;
 use crate::sim::command::{CommandEnvelope, CommandRecord};
 
@@ -125,8 +124,8 @@ pub struct FrameEffects<'a> {
     tactical_radar: Option<&'a dyn TacticalRadarBoundary>,
     outcome_wait: Option<&'a dyn OutcomeWaitBoundary>,
     local_planning: Option<&'a dyn LocalPlanningBoundary>,
+    selection_voice_suppressed: bool,
     network_commands: Option<&'a dyn NetworkCommandBoundary>,
-    overlay_registry: Option<&'a OverlayTypeRegistry>,
     before_logic: Option<&'a dyn Fn(&Simulation)>,
     command_applied: Option<&'a dyn Fn(&Simulation, &CommandRecord, bool)>,
     bounty_text: Option<&'a dyn Fn(&Simulation, &RuleSet, crate::sim::bounty::BountyText)>,
@@ -150,8 +149,8 @@ impl<'a> FrameEffects<'a> {
             tactical_radar: None,
             outcome_wait: None,
             local_planning: None,
+            selection_voice_suppressed: false,
             network_commands: None,
-            overlay_registry: None,
             before_logic: None,
             command_applied: None,
             bounty_text: None,
@@ -163,16 +162,7 @@ impl<'a> FrameEffects<'a> {
     pub fn for_sound(sound: &'a dyn SoundBoundary) -> Self {
         Self {
             sound: Some(sound),
-            tactical_radar: None,
-            outcome_wait: None,
-            local_planning: None,
-            network_commands: None,
-            overlay_registry: None,
-            before_logic: None,
-            command_applied: None,
-            bounty_text: None,
-            production_factories: &[],
-            production_request_cleared: None,
+            ..Self::empty()
         }
     }
 
@@ -353,19 +343,17 @@ impl<'a> FrameEffects<'a> {
             .is_some_and(LocalPlanningBoundary::planning_active)
     }
 
-    /// Bind the match's OverlayTypeClass table for receivers the frame reaches
-    /// without one of their own: the radio bus hands its receivers only the
-    /// rules and these effects.
-    pub(crate) fn with_overlay_registry(self, registry: Option<&'a OverlayTypeRegistry>) -> Self {
+    /// Ares clears 0x00822CF2 around a silent Select. Its synchronous tag
+    /// actions and any Select they start inherit the same voice setting.
+    pub(crate) fn without_selection_voice(self) -> Self {
         Self {
-            overlay_registry: registry.or(self.overlay_registry),
+            selection_voice_suppressed: true,
             ..self
         }
     }
 
-    /// The overlay table [`Self::with_overlay_registry`] bound, if any.
-    pub(crate) const fn overlay_registry(self) -> Option<&'a OverlayTypeRegistry> {
-        self.overlay_registry
+    pub(super) fn selection_voice_enabled(self) -> bool {
+        !self.selection_voice_suppressed
     }
 
     /// Stop/Release must complete at their native call sites before a later

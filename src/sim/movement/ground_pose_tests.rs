@@ -1362,7 +1362,6 @@ fn set_height_on_a_marked_object_re_marks_it_at_the_head_of_its_cell() {
         1,
         30,
         crate::rules::ruleset::RuleSet::empty_for_test(),
-        None,
         crate::sim::world::FrameEffects::default(),
     );
     assert_eq!(next_in_cell(&sim, 1), Some(Entity(2)));
@@ -1399,7 +1398,6 @@ fn set_height_on_an_unmarked_object_writes_z_without_marking_it() {
         1,
         60,
         crate::rules::ruleset::RuleSet::empty_for_test(),
-        None,
         crate::sim::world::FrameEffects::default(),
     );
     let entity = sim.substrate.entities.get(1).unwrap();
@@ -1458,9 +1456,9 @@ fn foot_set_location_always_writes_but_moves_riders_only_on_a_change() {
     transport.position.set_exact_z_leptons_for_test(Some(0));
     let mut cargo = PassengerCargo::new(5, 2.0);
     cargo.board_forced_chain(&[(2, 1.0)]);
-    transport.passenger_role = PassengerRole::transport(cargo);
+    transport.set_passenger_role_for_test(PassengerRole::transport(cargo));
     let mut rider = GameEntity::test_default(2, "E1", "Americans", 3, 0);
-    rider.passenger_role = PassengerRole::inside_for_test(1, true);
+    rider.set_passenger_role_for_test(PassengerRole::inside_for_test(1, true));
     entities.insert(transport);
     entities.insert(rider);
     let interner = crate::sim::intern::test_interner();

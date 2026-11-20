@@ -19,7 +19,6 @@ use crate::map::cell_index::NativeCellIdentity;
 use crate::map::entities::EntityCategory;
 use crate::map::resolved_terrain::{NativeCellQuery, ResolvedTerrainGrid};
 use crate::rules::object_type::ObjectType;
-use crate::rules::overlay_types::OverlayTypeRegistry;
 use crate::rules::ruleset::RuleSet;
 use crate::rules::weapon_type::WeaponType;
 use crate::sim::game_entity::GameEntity;
@@ -35,7 +34,6 @@ use crate::sim::world::Simulation;
 pub(crate) struct FireSubject<'a> {
     pub world: &'a Simulation,
     pub rules: &'a RuleSet,
-    pub overlay_registry: Option<&'a OverlayTypeRegistry>,
     pub fog: Option<FireFog<'a>>,
     pub firer: &'a GameEntity,
     pub obj: &'a ObjectType,
@@ -265,7 +263,7 @@ impl<'a> FireSubject<'a> {
         // (`0x006FC57D`, `0x006FC5C7`). A garrison occupant or cargo rider
         // stores no Transporter (vera20k#3838).
         let transport = firer
-            .passenger_role
+            .passenger_role()
             .transporter()
             .and_then(|id| self.world.substrate.entities.get(id));
         // U5 reads the `+0x418` tether latch (`radio::tether`) and
@@ -292,12 +290,12 @@ impl<'a> FireSubject<'a> {
             berserk: firer.berserk.is_active(),
             falling: firer.is_falling_down(),
             sinking: firer.sinking.is_active(),
-            in_open_transport: firer.passenger_role.in_open_transport(),
+            in_open_transport: firer.passenger_role().in_open_transport(),
             // The transport being the target (T9) is [`FirerPart::facts`]'s.
             transporter: match transport {
                 None => Transporter::None,
                 Some(transport) if transport.is_warped_out() => Transporter::WarpedOut,
-                Some(transport) if transport.passenger_role.transporter().is_some() => {
+                Some(transport) if transport.passenger_role().transporter().is_some() => {
                     Transporter::Nested
                 }
                 Some(_) => Transporter::Plain,
@@ -718,7 +716,7 @@ impl FireQuery for WorldQuery<'_, '_> {
                     terrain,
                     &line_of_fire::LineOfFireInputs {
                         overlay_grid: subject.world.overlay_grid.as_ref(),
-                        overlay_registry: subject.overlay_registry,
+                        overlay_registry: Some(subject.rules.overlay_registry()),
                         alliances: subject.fog.map(|fog| fog.alliances),
                         buildings: Some(line_of_fire::CellBuildings::of(subject.world)),
                     },
@@ -746,7 +744,7 @@ impl FireQuery for WorldQuery<'_, '_> {
                     terrain,
                     &line_of_fire::LineOfFireInputs {
                         overlay_grid: subject.world.overlay_grid.as_ref(),
-                        overlay_registry: subject.overlay_registry,
+                        overlay_registry: Some(subject.rules.overlay_registry()),
                         alliances: subject.fog.map(|fog| fog.alliances),
                         buildings: Some(line_of_fire::CellBuildings::of(subject.world)),
                     },
@@ -1048,7 +1046,7 @@ impl FireQuery for WorldQuery<'_, '_> {
     /// Building vt+0x408 (`0x004581F0`), the occupant count that
     /// `BuildingClass::GetFireError` (`0x00447F10`) reads.
     fn occupants(&mut self) -> i32 {
-        self.subject.firer.passenger_role.occupants().count()
+        self.subject.firer.passenger_role().occupants().count()
     }
 
     fn operational(&mut self) -> bool {
@@ -1159,7 +1157,6 @@ mod terrain_target_tests {
         let subject = FireSubject {
             world: &world,
             rules,
-            overlay_registry: None,
             fog: None,
             firer,
             obj,

@@ -35,7 +35,7 @@ fn campaign_perimeter(
     sim.intern_rule_type_ids(&rules);
     sim.resolve_type_handles(&rules);
     sim.session
-        .initialize_campaign_startup(1, 1, None, 0, CampaignCarryOver::CLEARED)
+        .initialize_campaign_startup(1, 1, None, 0, CampaignCarryOver::CLEARED, None)
         .unwrap();
     crate::sim::scenario_bootstrap::initialize_map_roster_houses(
         &mut sim,
@@ -63,15 +63,8 @@ fn campaign_perimeter(
 }
 
 fn frame(sim: &mut Simulation, rules: &RuleSet) {
-    sim.advance_app_frame(
-        &[],
-        rules,
-        Some(rules.overlay_registry()),
-        67,
-        TickLane::Ordinary,
-        FrameEffects::default(),
-    )
-    .unwrap();
+    sim.advance_app_frame(&[], rules, 67, TickLane::Ordinary, FrameEffects::default())
+        .unwrap();
 }
 
 /// Original ChooseBuilding4FE4B0..4FE518 removes -3, expands through5082C0,

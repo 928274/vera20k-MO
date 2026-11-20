@@ -38,6 +38,9 @@ pub(crate) struct Capture<'a> {
     /// The object types the local sidebar asks
     /// ([`crate::app::sidebar_projection::SidebarTypes`]).
     pub(crate) sidebar_types: &'a crate::app::sidebar_projection::SidebarTypes,
+    /// Whether VERA's Convenience Help is on, so the observer's and its
+    /// allies' objects capture their status rows (`HudFacts::capture`).
+    pub(crate) status_rows: bool,
     /// The capture's isolated query of the live map: a miss stamps its own
     /// dummy, not the simulation's.
     pub(crate) cells: Option<crate::map::resolved_terrain::NativeCellQuery<'a>>,
@@ -109,7 +112,7 @@ pub(crate) struct ObjectRecord {
     pub(crate) tether: Tether,
     pub(crate) disguise: Option<crate::sim::cloak_disguise::DisguiseRuntime>,
     pub(crate) display_type_override: DisplayTypeOverride,
-    pub(crate) selection: crate::sim::selection::Selection,
+    pub(crate) selection: crate::sim::world::Selection,
     /// `GameEntity::foot_speed`'s applied fraction.
     pub(crate) applied_fraction: crate::util::native_x87::NativeF64Bits,
     /// The cargo a Carryall draws inside its own draw
@@ -806,7 +809,7 @@ impl ObjectRecord {
             sinking: Sinking {
                 active: entity.sinking.is_active(),
             },
-            passenger_role: PassengerRole::of(&entity.passenger_role),
+            passenger_role: PassengerRole::of(entity.passenger_role()),
             rocking: entity.rocking.as_ref().map(|_| ()),
             mission: Mission::of(&entity.mission),
             tether: Tether {
@@ -1369,6 +1372,7 @@ impl PresentationFrame {
     pub(crate) fn capture(
         runtime: &SimRuntime,
         sidebar_types: &crate::app::sidebar_projection::SidebarTypes,
+        status_rows: bool,
     ) -> Self {
         let sim = &runtime.simulation;
         let observer_id = sim.session().current_house();
@@ -1380,6 +1384,7 @@ impl PresentationFrame {
             observer,
             observer_id,
             sidebar_types,
+            status_rows,
             cells: sim
                 .resolved_terrain()
                 .map(crate::map::resolved_terrain::NativeCellQuery::isolated),
@@ -1581,7 +1586,7 @@ impl PresentationFrame {
             simulation,
             resources: std::sync::Arc::new(crate::sim::runtime::SimResources::new(rules.clone())),
         };
-        Self::capture(&runtime, &types)
+        Self::capture(&runtime, &types, false)
     }
 }
 

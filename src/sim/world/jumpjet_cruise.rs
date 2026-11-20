@@ -43,7 +43,6 @@ struct CruiseHost<'a> {
     frame: u32,
     trig: &'a TrigTable,
     rules: &'a RuleSet,
-    registry: Option<&'a OverlayTypeRegistry>,
     frame_effects: FrameEffects<'a>,
     stable_id: u64,
     touched_down: bool,
@@ -123,8 +122,7 @@ impl JumpjetFlightHost for CruiseHost<'_> {
             sim.session.current_house() == Some(owner)
         });
         for player in self.sim.jumpjet_discovery_due(id) {
-            let context = super::UninitContext::new(self.rules, self.registry)
-                .with_effects(self.frame_effects);
+            let context = super::UninitContext::new(self.rules).with_effects(self.frame_effects);
             runtime.with_owner_call(self.sim, id, |sim| {
                 sim.discover_techno(id, player, context);
             });
@@ -177,8 +175,11 @@ impl JumpjetFlightHost for CruiseHost<'_> {
                 .occupancy
                 .contains_entity(here.0, here.1, self.stable_id)
         {
-            self.sim
-                .foot_pick_up(self.stable_id, self.rules, self.registry);
+            self.sim.foot_pick_up(
+                self.stable_id,
+                self.rules,
+                Some(self.rules.overlay_registry()),
+            );
         }
         foot_set_location(
             &mut self.sim.substrate.entities,
@@ -199,7 +200,7 @@ impl JumpjetFlightHost for CruiseHost<'_> {
                 self.stable_id,
                 here,
                 self.rules,
-                self.registry,
+                Some(self.rules.overlay_registry()),
             );
         }
     }
@@ -208,7 +209,7 @@ impl JumpjetFlightHost for CruiseHost<'_> {
             self.stable_id,
             z,
             self.rules,
-            self.registry,
+            Some(self.rules.overlay_registry()),
             self.frame_effects,
         );
     }
@@ -313,7 +314,7 @@ impl JumpjetFlightHost for CruiseHost<'_> {
         };
         let id = self.stable_id;
         let rules = self.rules;
-        let registry = self.registry;
+        let registry = Some(self.rules.overlay_registry());
         let frame_effects = self.frame_effects;
         runtime.with_owner_call(self.sim, id, |sim| {
             sim.release_locomotor(holder, true, rules, registry, frame_effects);
@@ -427,7 +428,6 @@ impl JumpjetFlightHost for CruiseHost<'_> {
         let id = self.stable_id;
         let rules = self.rules;
         let frame_effects = self.frame_effects;
-        let registry = self.registry;
         runtime.with_owner_call(self.sim, id, |sim| {
             let _ = sim.assign_destination_represented(
                 id,
@@ -436,7 +436,6 @@ impl JumpjetFlightHost for CruiseHost<'_> {
                     cell.1 as u16,
                 )),
                 rules,
-                registry,
                 frame_effects,
             );
         });
@@ -448,7 +447,6 @@ impl JumpjetFlightHost for CruiseHost<'_> {
             InfantryEntryArgs::REPAIR,
             crate::sim::movement::infantry_entry::EntryQueryMode::CheckLocomotor,
             self.rules,
-            self.registry,
         );
         answer.map_or_else(
             |error| {
@@ -477,7 +475,7 @@ impl JumpjetFlightHost for CruiseHost<'_> {
     fn stop_moving(&mut self, runtime: &mut JumpjetRuntime) -> i32 {
         let id = self.stable_id;
         let rules = self.rules;
-        let registry = self.registry;
+        let registry = Some(self.rules.overlay_registry());
         let frame_effects = self.frame_effects;
         runtime.with_owner_call(self.sim, id, |sim| {
             sim.jumpjet_stop_moving(id, rules, registry, frame_effects);
@@ -505,7 +503,7 @@ impl JumpjetFlightHost for CruiseHost<'_> {
             return;
         }
         let id = self.stable_id;
-        let registry = self.registry;
+        let registry = Some(self.rules.overlay_registry());
         let frame_effects = self.frame_effects;
         runtime.with_owner_call(self.sim, id, |sim| {
             sim.jumpjet_lift_off_notify(id, rules, registry, frame_effects);
@@ -554,7 +552,7 @@ impl JumpjetFlightHost for CruiseHost<'_> {
         self.touched_down = true;
         let id = self.stable_id;
         let rules = self.rules;
-        let registry = self.registry;
+        let registry = Some(self.rules.overlay_registry());
         let frame_effects = self.frame_effects;
         let result = runtime.with_owner_call(self.sim, id, |sim| {
             let changed = sim.per_cell_process(
@@ -607,7 +605,7 @@ impl JumpjetFlightHost for CruiseHost<'_> {
         // 0x0054C9F6: CellClass::PickupCrate on the Foot's cell (vt+0x1BC)
         // after the tracker removal (0x0054C9DC); its answer is not read.
         let rules = self.rules;
-        let registry = self.registry;
+        let registry = Some(self.rules.overlay_registry());
         let frame_effects = self.frame_effects;
         // Publish phase0 before the crate's synchronous receivers, then keep
         // their runtime writes. Native does not repeat the alive gate here.
@@ -652,14 +650,14 @@ impl JumpjetFlightHost for CruiseHost<'_> {
             self.sim.foot_mark_put(
                 self.stable_id,
                 self.rules,
-                self.registry,
+                Some(self.rules.overlay_registry()),
                 self.frame_effects,
             );
         } else {
             self.sim.foot_mark_remove(
                 self.stable_id,
                 self.rules,
-                self.registry,
+                Some(self.rules.overlay_registry()),
                 self.frame_effects,
             );
         }
@@ -687,7 +685,7 @@ impl JumpjetFlightHost for CruiseHost<'_> {
     fn crush_below(&mut self, runtime: &mut JumpjetRuntime) -> bool {
         let rules = self.rules;
         let id = self.stable_id;
-        let registry = self.registry;
+        let registry = Some(self.rules.overlay_registry());
         let frame_effects = self.frame_effects;
         let impact = runtime.with_owner_call(self.sim, id, |sim| {
             sim.dropped_impact(id, rules, registry, frame_effects)
@@ -724,7 +722,7 @@ impl JumpjetFlightHost for CruiseHost<'_> {
     fn sink(&mut self, runtime: &mut JumpjetRuntime) {
         let rules = self.rules;
         let id = self.stable_id;
-        let registry = self.registry;
+        let registry = Some(self.rules.overlay_registry());
         let frame_effects = self.frame_effects;
         runtime.with_owner_call(self.sim, id, |sim| {
             sim.dropped_sink(id, rules, registry, frame_effects);
@@ -733,7 +731,7 @@ impl JumpjetFlightHost for CruiseHost<'_> {
     fn null_destination(&mut self, runtime: &mut JumpjetRuntime) {
         let id = self.stable_id;
         let rules = self.rules;
-        let registry = self.registry;
+        let registry = Some(self.rules.overlay_registry());
         let frame_effects = self.frame_effects;
         runtime.with_owner_call(self.sim, id, |sim| {
             sim.assign_null_destination(id, rules, registry, frame_effects);
@@ -843,7 +841,6 @@ impl Simulation {
                 id,
                 Some(crate::sim::components::NavTargetRef::from(archive)),
                 rules,
-                registry,
                 frame_effects,
             );
             return;
@@ -895,7 +892,6 @@ impl Simulation {
         &mut self,
         stable_id: u64,
         rules: &RuleSet,
-        registry: Option<&OverlayTypeRegistry>,
         frame_effects: FrameEffects<'_>,
     ) -> Result<Option<AirMovementTickStats>, super::FrameAdvanceError> {
         if !self
@@ -915,7 +911,6 @@ impl Simulation {
                 frame,
                 trig,
                 rules,
-                registry,
                 frame_effects,
                 stable_id,
                 touched_down: false,
@@ -1082,10 +1077,10 @@ mod tests {
             .expect("Move_To on the fixture map");
     }
 
-    fn touchdown_crate_fixture() -> (Simulation, RuleSet, OverlayTypeRegistry) {
+    fn touchdown_crate_fixture() -> (Simulation, RuleSet) {
         let mut sim = hovering_jumpjet(0x40);
         let rules = crate::sim::crates::tests::crate_ruleset("");
-        let registry = crate::sim::crates::tests::crate_registry();
+        let registry = rules.overlay_registry();
         sim.overlay_grid = Some(crate::sim::overlay_grid::OverlayGrid::new(24, 16));
         let wood = registry.id_for_name("WOOD").unwrap();
         sim.overlay_grid
@@ -1113,19 +1108,18 @@ mod tests {
             .with_destination_for_test(DriveCoord::cell(10, 10, 0));
         Simulation::aircraft_tracker_add(&sim.session, &mut sim.substrate, 1);
         sim.substrate.air_slots.set_holder((10, 10), Some(1));
-        (sim, rules, registry)
+        (sim, rules)
     }
 
     /// Supply an admitted State4 entry after Update. Owner callbacks remain
     /// production calls, including the vanished-deck DropAsBomb below.
-    fn descend_once(sim: &mut Simulation, rules: &RuleSet, registry: &OverlayTypeRegistry) -> i32 {
+    fn descend_once(sim: &mut Simulation, rules: &RuleSet) -> i32 {
         sim.with_jumpjet_process(1, |runtime, sim| {
             let mut host = CruiseHost {
                 sim,
                 frame: 0,
                 trig: TrigTable::embedded(),
                 rules,
-                registry: Some(registry),
                 frame_effects: FrameEffects::default(),
                 stable_id: 1,
                 touched_down: false,
@@ -1144,7 +1138,7 @@ mod tests {
 
     #[test]
     fn a_jumpjet_that_starts_falling_at_touchdown_does_not_finish_landing() {
-        let (mut sim, rules, registry) = touchdown_crate_fixture();
+        let (mut sim, rules) = touchdown_crate_fixture();
         let e = sim.substrate.entities.get_mut(1).unwrap();
         e.on_bridge.store(true);
         e.position
@@ -1156,7 +1150,7 @@ mod tests {
             10,
             crate::util::lepton::BRIDGE_DECK_HEIGHT_LEPTONS,
         ));
-        assert_eq!(descend_once(&mut sim, &rules, &registry), STATE_DESCEND);
+        assert_eq!(descend_once(&mut sim, &rules), STATE_DESCEND);
         let e = sim.substrate.entities.get(1).unwrap();
         assert!(
             e.is_falling_down(),
@@ -1164,7 +1158,7 @@ mod tests {
         );
         assert_eq!(
             sim.overlay_grid.as_ref().unwrap().cell(10, 10).overlay_id,
-            registry.id_for_name("WOOD"),
+            rules.overlay_registry().id_for_name("WOOD"),
             "aborted touchdown must not collect its crate"
         );
         assert!(!e.lift.may_end());
@@ -1201,7 +1195,7 @@ mod tests {
             ("healthy", false),
             ("health_zero", false),
         ] {
-            let (mut sim, rules, registry) = touchdown_crate_fixture();
+            let (mut sim, rules) = touchdown_crate_fixture();
             let e = sim.substrate.entities.get_mut(1).unwrap();
             e.crash.set_crashing_for_test(true);
             e.drop_credit.set_being_manipulated_for_test(true);
@@ -1213,7 +1207,7 @@ mod tests {
                 _ => {}
             }
             let rng = sim.scenario_rng.native_state_hex();
-            let phase = descend_once(&mut sim, &rules, &registry);
+            let phase = descend_once(&mut sim, &rules);
             let e = sim.substrate.entities.get(1).unwrap();
             let runtime = e.locomotor.as_ref().unwrap().jumpjet_runtime().unwrap();
             assert_eq!(
@@ -1330,7 +1324,7 @@ mod tests {
                 .entities
                 .get(building)
                 .unwrap()
-                .passenger_role
+                .passenger_role()
                 .occupants()
                 .ids(),
             &[id]
@@ -1895,7 +1889,7 @@ mod tests {
                     cell.1,
                     64,
                     &resources.rules,
-                    &resources.overlay_registry,
+                    resources.rules.overlay_registry(),
                 )
                 .expect("spawns on open ground");
             sim.resolve_type_handles(&resources.rules);
@@ -2012,7 +2006,7 @@ mod tests {
                     y,
                     64,
                     &resources.rules,
-                    &resources.overlay_registry,
+                    resources.rules.overlay_registry(),
                 )
                 .expect("Kirov spawns");
             let reactor = sim
@@ -2023,7 +2017,7 @@ mod tests {
                     y - 1,
                     0,
                     &resources.rules,
-                    &resources.overlay_registry,
+                    resources.rules.overlay_registry(),
                 )
                 .expect("reactor spawns");
             sim.resolve_type_handles(&resources.rules);
@@ -2105,11 +2099,7 @@ mod tests {
             // it when airborne; its return fire can also replace Hunt with
             // Attack. Keep it off-map for this stationary-target witness.
             assert_eq!(
-                sim.techno_limbo_with_rules(
-                    rocketeer,
-                    &resources.rules,
-                    Some(&resources.overlay_registry),
-                ),
+                sim.techno_limbo_with_rules(rocketeer, &resources.rules,),
                 crate::sim::world::ConcealOutcome::Concealed,
             );
             let owner = sim.interner.intern("Americans");
@@ -2124,7 +2114,7 @@ mod tests {
                     crate::sim::build_site::can_place_building_at(
                         sim,
                         &resources.rules,
-                        Some(&resources.overlay_registry),
+                        Some(resources.rules.overlay_registry()),
                         plant_type,
                         (px as i16, py as i16),
                         Some(owner),
@@ -2143,7 +2133,7 @@ mod tests {
                     y,
                     64,
                     &resources.rules,
-                    &resources.overlay_registry,
+                    resources.rules.overlay_registry(),
                 )
                 .expect("Kirov spawns");
             sim.resolve_type_handles(&resources.rules);
@@ -2229,7 +2219,7 @@ mod tests {
                     y,
                     64,
                     &resources.rules,
-                    &resources.overlay_registry,
+                    resources.rules.overlay_registry(),
                 )
                 .expect("Floating Disc spawns");
             let tank = sim
@@ -2240,7 +2230,7 @@ mod tests {
                     y,
                     0,
                     &resources.rules,
-                    &resources.overlay_registry,
+                    resources.rules.overlay_registry(),
                 )
                 .expect("tank spawns");
             sim.resolve_type_handles(&resources.rules);

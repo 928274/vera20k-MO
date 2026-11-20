@@ -806,7 +806,7 @@ pub(crate) fn range_modifier_source<'a>(
     let Some(entities) = entities else {
         return entity;
     };
-    let Some(transport_id) = entity.passenger_role.inside_transport_id() else {
+    let Some(transport_id) = entity.passenger_role().inside_transport_id() else {
         return entity;
     };
     let Some(transport) = entities.get(transport_id) else {
@@ -1538,9 +1538,10 @@ impl Simulation {
             target,
             // `HouseClass::IsControlledByHuman @ 0x0050B730`, the predicate
             // the mission list reads.
-            owner_human: self.houses.get(&entity.owner()).is_some_and(|house| {
-                house.is_controlled_by_human(self.session.game_mode_nonzero())
-            }),
+            owner_human: self
+                .houses
+                .get(&entity.owner())
+                .is_some_and(|house| house.is_controlled_by_human(self.session.rule_policy())),
         }
     }
 
@@ -1666,17 +1667,16 @@ impl Simulation {
         if entity.phobos_attach_effects().is_empty() {
             return;
         }
-        let game_mode_nonzero = self.session.game_mode_nonzero();
         let old_human = self
             .houses
             .get(&old_owner)
-            .is_some_and(|house| house.is_controlled_by_human(game_mode_nonzero));
+            .is_some_and(|house| house.is_controlled_by_human(self.session.rule_policy()));
         let new_human = self
             .houses
             .get(&new_owner)
-            .is_some_and(|house| house.is_controlled_by_human(game_mode_nonzero));
+            .is_some_and(|house| house.is_controlled_by_human(self.session.rule_policy()));
         let human_and_computer = old_human != new_human;
-        let has_transporter = entity.passenger_role.inside_transport_id().is_some();
+        let has_transporter = entity.passenger_role().inside_transport_id().is_some();
         let effects = rules.attach_effect_types().types();
         let mut list = std::mem::take(
             self.substrate
@@ -1847,7 +1847,7 @@ impl Simulation {
         // the native immobilised states VERA models.
         if entity.lifecycle.in_limbo()
             || entity.chrono_warp_latch()
-            || entity.passenger_role.inside_transport_id().is_some()
+            || entity.passenger_role().inside_transport_id().is_some()
             || entity.phobos_attach_effects().is_empty()
         {
             return;
@@ -2677,7 +2677,6 @@ impl Simulation {
         let navigation = run.finish();
         let _ = self.absorb_noncombat_damage_effects(
             rules,
-            overlay_registry,
             commit.effects,
             commit.under_attack_events,
             navigation,
@@ -3932,7 +3931,9 @@ mod tests {
             .entities
             .get_mut(rider)
             .unwrap()
-            .passenger_role = crate::sim::passenger::PassengerRole::inside_for_test(truck, true);
+            .set_passenger_role_for_test(crate::sim::passenger::PassengerRole::inside_for_test(
+                truck, true,
+            ));
         assert_eq!(
             range(&sim),
             5 * 256 * 2,
@@ -3944,7 +3945,9 @@ mod tests {
             .entities
             .get_mut(rider)
             .unwrap()
-            .passenger_role = crate::sim::passenger::PassengerRole::inside_for_test(truck, true);
+            .set_passenger_role_for_test(crate::sim::passenger::PassengerRole::inside_for_test(
+                truck, true,
+            ));
         assert_eq!(
             range(&sim),
             5 * 256 * 3,
@@ -4388,7 +4391,6 @@ mod tests {
                 target,
                 Some(crate::sim::combat::TargetKind::Cell(30, 30)),
                 &rules,
-                None,
                 crate::sim::world::FrameEffects::default(),
             )
             .is_ok()
@@ -5768,7 +5770,6 @@ AttachEffect.InitialDelays=3
             crate::sim::combat::fire_error_world::FireSubject {
                 world: &sim,
                 rules: &rules,
-                overlay_registry: None,
                 fog: None,
                 firer: sim.substrate.entities.get(attacker).unwrap(),
                 obj: rules.object("ATTACKER").unwrap(),

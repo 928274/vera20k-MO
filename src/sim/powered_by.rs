@@ -169,7 +169,13 @@ impl Simulation {
             Vec::new()
         };
         for rocket in rockets {
-            self.ares_techno_destroy(rocket, source, rules, effects.overlay_registry(), effects);
+            self.ares_techno_destroy(
+                rocket,
+                source,
+                rules,
+                Some(rules.overlay_registry()),
+                effects,
+            );
         }
         let frame = self.session.binary_frame() as i32;
         if let Some(manager) = self
@@ -405,36 +411,13 @@ impl Simulation {
             .get(id)
             .is_some_and(|entity| entity.lift.target().is_some())
         {
-            self.release_locomotor(id, true, rules, None, effects);
+            self.release_locomotor(id, true, rules, Some(rules.overlay_registry()), effects);
         }
         // A Foot in a team leaves it (LiberateMember(this, -1, false)).
         if category.is_foot() {
             self.leave_team(id, false, rules, effects);
         }
-        let selected = self
-            .substrate
-            .entities
-            .get(id)
-            .is_some_and(|entity| entity.selection.is_selected());
-        // A Building's Focus survives the shared Deactivate's Guard reset.
-        let focus = (category == EntityCategory::Structure).then(|| {
-            self.substrate
-                .entities
-                .get(id)
-                .expect("same object")
-                .archive_target()
-        });
-        self.techno_deactivate(id, rules, effects);
-        // Deactivate deselects; a selected victim is selected again with
-        // the move feedback off (no voice).
-        if selected && let Some(entity) = self.substrate.entities.get_mut(id) {
-            entity.selection.select();
-        }
-        if let Some(focus) = focus
-            && let Some(entity) = self.substrate.entities.get_mut(id)
-        {
-            entity.set_archive_target(focus);
-        }
+        self.ares_deactivate_with_reselection(id, rules, effects);
         if category.is_foot() {
             let _ = self.mission_queue_exact(
                 id,
@@ -450,7 +433,7 @@ impl Simulation {
             .get(id)
             .is_some_and(|entity| entity.capture_manager.is_some())
         {
-            self.free_all_captures(id, rules, None, effects);
+            self.free_all_captures(id, rules, Some(rules.overlay_registry()), effects);
         }
         self.ares_update_spawn_manager(id, None, rules, effects);
         if let Some(manager) = self

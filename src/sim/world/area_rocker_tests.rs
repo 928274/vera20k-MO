@@ -16,7 +16,6 @@ fn ordinary_frame(sim: &mut Simulation, rules: &RuleSet) -> Vec<super::SimFireEv
         .advance_app_frame(
             &commands,
             rules,
-            None,
             33,
             TickLane::Ordinary,
             FrameEffects::default(),
@@ -96,6 +95,7 @@ fn stock_kirov_bomb_impact_rocks_its_live_neighbor_then_rolls_it() {
         // Establish the AI's guard posture through the class receiver; this
         // fixture does not originate a player event for the computer House.
         assert!(sim.apply_command_with_overlays(
+            None,
             "Russians",
             &Command::Guard {
                 entity_id: id,

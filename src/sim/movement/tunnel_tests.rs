@@ -214,7 +214,6 @@ fn dispatched_order_reaches_the_unit_setter() {
         DIGGER,
         Some(NavTargetRef::cell(30, 10)),
         &rules,
-        None,
         FrameEffects::default(),
     )
     .expect("dispatched destination");

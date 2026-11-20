@@ -5,6 +5,8 @@
 pub(crate) mod cloak_probe;
 pub(crate) mod core_load;
 pub(crate) mod debug_overlays;
+#[cfg(feature = "perf")]
+pub(crate) mod perf_recorder;
 pub(crate) mod performance_overlay;
 pub(crate) mod shell_capture;
 pub(crate) mod state;

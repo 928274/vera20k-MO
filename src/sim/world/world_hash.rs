@@ -808,7 +808,7 @@ impl Simulation {
     /// it to select hashed overlay IDs. This reaches the state hash the start
     /// agreement compares, not the per-frame sync checksum.
     fn hash_network_mapgen(&self, hasher: &mut impl Hasher) {
-        if self.session.game_mode().is_network() {
+        if self.session.execution_topology().is_lockstep() {
             b"network-mapgen-v1".hash(hasher);
             self.mapgen_rng.hash_state(hasher);
         }
@@ -1339,7 +1339,7 @@ impl Simulation {
             }
             house.side_index().hash(hasher);
             house.is_human().hash(hasher);
-            if self.session.game_mode().is_network() {
+            if self.session.execution_topology().is_lockstep() {
                 // Lifecycle discovery projects every represented human before
                 // shared Event5 reads this notification; it is no longer a
                 // process-local cache in a network world.
@@ -1350,7 +1350,7 @@ impl Simulation {
             // that local input/EVA selector; IsHuman remains shared authority.
             // Campaign admission/initial credits still read PlayerControl.
             // Source: original gamemd.exe instructions.
-            if !self.session.game_mode().is_network() {
+            if !self.session.execution_topology().is_lockstep() {
                 house.player_control().hash(hasher);
             }
             (house.difficulty() as i32).hash(hasher);
@@ -1635,7 +1635,7 @@ impl Simulation {
     /// retain future timer behavior without mutating `OverlayGrid`.
     fn hash_crate_authority(&self, hasher: &mut impl Hasher) {
         b"crate-authority-v1".hash(hasher);
-        for slot in self.crate_authority.slots() {
+        for slot in self.crate_authority().slots() {
             slot.start_frame.hash(hasher);
             slot.aux.hash(hasher);
             slot.duration.hash(hasher);
@@ -1743,7 +1743,7 @@ impl Simulation {
     /// spread over threads in large worlds.
     fn entity_digests(&self, entities: &[&GameEntity]) -> Vec<u64> {
         let frame = self.session.binary_frame();
-        let network = self.session.game_mode().is_network();
+        let network = self.session.execution_topology().is_lockstep();
         // The visits each sleeper is owed, beside the entities: the callers
         // pass the whole store in its own order. A partial list looks each
         // one up instead.
@@ -2004,12 +2004,12 @@ fn hash_entity_owed(entity: &GameEntity, frame: u32, owed_visits: u32, hasher: &
             .wh_anim_remaining_creation_interval
             .hash_state(hasher);
     }
-    if entity.tracking_facts.naval_combatant() {
+    if entity.tracking_facts().naval_combatant() {
         // Retained across reload: later Remove_Tracking must use the same
         // Naval/Passengers admission as construction, even while in limbo.
         b"naval-tracking-eligibility-v1".hash(hasher);
     }
-    entity.tracking_facts.hash_retained_inputs(hasher);
+    entity.tracking_facts().hash_retained_inputs(hasher);
     if let Some(multiplier) = entity.ares.factory_plant_multiplier {
         b"ares-plant-multiplier-v1".hash(hasher);
         multiplier.hash(hasher);
@@ -2622,7 +2622,7 @@ fn hash_entity_owed(entity: &GameEntity, frame: u32, owed_visits: u32, hasher: &
     }
 
     // Passenger/transport state.
-    let role = &entity.passenger_role;
+    let role = entity.passenger_role();
     match role.cargo() {
         Some(cargo) => {
             1u8.hash(hasher);
@@ -3753,35 +3753,36 @@ mod state_hash_field_tests {
         {
             // Same stored difficulty, different bias: only the game-mode arm of
             // `set_difficulty` folds the country's ROF into `HouseClass+0x1A8`.
-            let hashes: Vec<u64> = [false, true]
-                .into_iter()
-                .map(|game_mode_nonzero| {
-                    let mut sim = Simulation::new();
-                    let owner = sim.interner.intern("Computer1");
-                    let mut house = HouseState::new(owner, 0, None, false, 0, 10);
-                    let mut general = crate::rules::ruleset::GeneralRules::default();
-                    general.difficulty_rows =
-                        [0.8, 1.0, 1.2].map(|rof| crate::rules::ruleset::DifficultyRules {
-                            rof,
-                            ..Default::default()
-                        });
-                    house.set_difficulty(
-                        HouseDifficulty::Hard,
-                        &general,
-                        crate::rules::ruleset::CountryDifficultyBiases {
-                            rof: crate::util::native_x87::NativeF64Bits::from_bits(
-                                0.9_f64.to_bits(),
-                            ),
-                            ..Default::default()
-                        },
-                        game_mode_nonzero,
-                        0,
-                        0,
-                    );
-                    sim.houses.register(house);
-                    sim.state_hash()
-                })
-                .collect();
+            let hashes: Vec<u64> = [
+                crate::rules::rule_policy::RulePolicy::stock_campaign(),
+                crate::rules::rule_policy::RulePolicy::stock_multiplayer(),
+            ]
+            .into_iter()
+            .map(|policy| {
+                let mut sim = Simulation::new();
+                let owner = sim.interner.intern("Computer1");
+                let mut house = HouseState::new(owner, 0, None, false, 0, 10);
+                let mut general = crate::rules::ruleset::GeneralRules::default();
+                general.difficulty_rows =
+                    [0.8, 1.0, 1.2].map(|rof| crate::rules::ruleset::DifficultyRules {
+                        rof,
+                        ..Default::default()
+                    });
+                house.set_difficulty(
+                    HouseDifficulty::Hard,
+                    &general,
+                    crate::rules::ruleset::CountryDifficultyBiases {
+                        rof: crate::util::native_x87::NativeF64Bits::from_bits(0.9_f64.to_bits()),
+                        ..Default::default()
+                    },
+                    policy,
+                    0,
+                    0,
+                );
+                sim.houses.register(house);
+                sim.state_hash()
+            })
+            .collect();
             assert_ne!(hashes[0], hashes[1]);
         }
         {
@@ -4909,7 +4910,7 @@ mod passenger_cargo_hash_tests {
         let mut cargo = PassengerCargo::new(5, 0.0);
         cargo.board_forced_chain(&[(10, first_size)]);
         cargo.board_forced_chain(&[(11, second_size)]);
-        carrier.passenger_role = PassengerRole::transport(cargo);
+        carrier.set_passenger_role_for_test(PassengerRole::transport(cargo));
         sim.substrate.entities.insert(carrier);
         sim
     }
@@ -4929,7 +4930,7 @@ mod passenger_cargo_hash_tests {
                 .entities
                 .get_mut(1)
                 .unwrap()
-                .passenger_role
+                .passenger_role_mut_for_test()
                 .set_inside_transport(20, false);
             let inside = sim.state_hash();
             assert_ne!(inside, outside);
@@ -4937,14 +4938,14 @@ mod passenger_cargo_hash_tests {
                 .entities
                 .get_mut(1)
                 .unwrap()
-                .passenger_role
+                .passenger_role_mut_for_test()
                 .set_inside_transport(21, false);
             assert_ne!(sim.state_hash(), inside);
             sim.substrate
                 .entities
                 .get_mut(1)
                 .unwrap()
-                .passenger_role
+                .passenger_role_mut_for_test()
                 .clear_carrier_relation();
             assert_eq!(sim.state_hash(), outside);
             assert_eq!(
@@ -4952,7 +4953,7 @@ mod passenger_cargo_hash_tests {
                     .entities
                     .get(1)
                     .unwrap()
-                    .passenger_role
+                    .passenger_role()
                     .cargo()
                     .unwrap()
                     .passengers(),

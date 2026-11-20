@@ -50,6 +50,7 @@ Thumbs.db
 !/docs/ares-country-presentation.md
 !/docs/ares-country-paradrop.md
 !/docs/ares-country-powerplants.md
+!/docs/skirmish-cheats.md
 !/docs/sidebar-columns.md
 !/docs/phobos.md
 !/docs/phobos-custom-radiation.md
@@ -77,6 +78,8 @@ Thumbs.db
 # time; kept in the repository as the reference copy and the test fixture.
 !/docs/scripts/
 !/docs/scripts/GBIONIonShowScript.rhai
+!/docs/convenience-help.md
+!/docs/smart-command.md
 !/docs/phobos-ai-dehardcode.md
 !/docs/phobos-parallel-ai-queues.md
 !/docs/phobos-power-surplus.md
@@ -109,6 +112,7 @@ Thumbs.db
 !/docs/dormant-stock-rules.md
 !/docs/_config.yml
 !/docs/index.md
+!/docs/menu-reference.md
 !/docs/Networking.md
 !/docs/ares-unit-delivery.md
 !/docs/ares-superweapon-building-gates.md
@@ -133,6 +137,7 @@ Thumbs.db
 !/docs/script-action-56.md
 !/docs/interface-layout.md
 !/docs/skirmish-colors.md
+!/docs/behavior-rule-engine-roadmap.md
 !/docs/examples/
 !/docs/ar/
 !/docs/de/

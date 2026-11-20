@@ -88,7 +88,6 @@ impl Simulation {
         &mut self,
         id: u64,
         rules: &RuleSet,
-        registry: Option<&OverlayTypeRegistry>,
         effects: FrameEffects<'_>,
     ) {
         // Native always has the type; a call without its rules (a fixture's
@@ -120,11 +119,11 @@ impl Simulation {
         let occupiable = building && object.can_be_occupied;
         let mut free_slots = if occupiable {
             (object.max_number_occupants as i32)
-                .wrapping_sub(entity.passenger_role.occupants().count())
+                .wrapping_sub(entity.passenger_role().occupants().count())
         } else {
             object
                 .passengers
-                .wrapping_sub(entity.passenger_role.passenger_count() as i32)
+                .wrapping_sub(entity.passenger_role().passenger_count() as i32)
         };
         let infantry_absorb = object.infantry_absorb;
         let extra_power = object.extra_power.output() > 0;
@@ -132,7 +131,7 @@ impl Simulation {
         let owner = entity.owner();
         let owner_name = self.interner.resolve(owner).to_owned();
         let location = crate::sim::movement::ground_pose::position_world_coord(&entity.position);
-        let context = UninitContext::new(rules, registry).with_effects(effects);
+        let context = UninitContext::new(rules).with_effects(effects);
         for (index, reference) in types.iter().enumerate() {
             if matches!(
                 reference.category,
@@ -163,14 +162,7 @@ impl Simulation {
                 };
                 // Remove (vt+0xD4) finds the new object in limbo already.
                 if occupiable {
-                    if let Some(holder) = self.substrate.entities.get_mut(id) {
-                        holder.passenger_role.occupants_mut().add(payload);
-                    }
-                    if let Some(occupant) = self.substrate.entities.get_mut(payload) {
-                        // VERA's occupant relation, as AddGarrisonOccupant
-                        // gives it.
-                        occupant.passenger_role.set_inside_transport(id, false);
-                    }
+                    self.substrate.attach_garrison_occupant(id, payload);
                     self.refresh_spatial_threat(id, rules, None);
                 } else if building {
                     if infantry_absorb {
@@ -199,14 +191,9 @@ impl Simulation {
                             effects,
                         );
                     }
-                    let _ = self.add_cargo_passenger_chain(
-                        id,
-                        &[(payload, payload_type.size)],
-                        context,
-                    );
+                    // A building's cargo shares VERA's carrier relation.
+                    let _ = self.add_cargo_members(id, &[(payload, payload_type.size)], context);
                     if let Some(passenger) = self.substrate.entities.get_mut(payload) {
-                        // A building's cargo shares VERA's carrier relation.
-                        passenger.passenger_role.set_inside_transport(id, false);
                         // AbortMotion (`0x004DF0D0`).
                         passenger.navigation.stop_moving();
                     }
@@ -233,7 +220,7 @@ impl Simulation {
                     .substrate
                     .entities
                     .get(id)
-                    .is_some_and(|holder| !holder.passenger_role.occupants().is_empty())
+                    .is_some_and(|holder| !holder.passenger_role().occupants().is_empty())
             {
                 self.refresh_spatial_threat(id, rules, None);
             }
@@ -265,7 +252,6 @@ impl Simulation {
         let _ = crate::sim::passenger::depart_cargo_head(
             self,
             rules,
-            registry,
             id,
             crate::sim::passenger::DepartureRoute::Hospital,
             |sim, patient| {

@@ -832,7 +832,7 @@ fn start_charge_anim(sim: &mut Simulation, id: u64, rules: &RuleSet) {
         object.strength,
         rules.general.condition_yellow,
     );
-    let garrisoned = !entity.passenger_role.occupants().is_empty();
+    let garrisoned = !entity.passenger_role().occupants().is_empty();
     let _ = sim.set_building_anim_slot(id, SPECIAL_ANIM_SLOT, damaged, garrisoned, 0, rules);
 }
 
@@ -916,15 +916,7 @@ pub(super) fn update_prism(
                 .entities
                 .get(id)
                 .and_then(|entity| entity.attack_target.target())
-                && fire_error_at(
-                    sim,
-                    rules,
-                    id,
-                    Some(target),
-                    weapon,
-                    true,
-                    ctx.overlay_registry,
-                ) == FireError::Ok
+                && fire_error_at(sim, rules, id, Some(target), weapon, true) == FireError::Ok
             {
                 *bridge_state_changed |= sim
                     .commit_fire_visit(

@@ -82,6 +82,7 @@ pub(crate) use cell_recalc::{
     LoadCellRecalcOutcome, LoadCellRecalcState, is_behind_cliff,
 };
 use cliffs::DestroyableCliffCatalog;
+pub(crate) use native_cell::SavedSharedCellDummy;
 pub(crate) use native_cell::{
     CellClassProjectionView, NativeAllocatedCellCursor, NativeLocalCellCursor,
 };
@@ -92,8 +93,9 @@ pub use saved_terrain::{SavedCellLandValues, SavedTerrainError, SavedTerrainTemp
 #[cfg(any(test, feature = "test-support"))]
 pub use tests::{
     bridge_constructor_terrain, install_bridge_batch_test_catalog,
-    install_bridge_query_test_catalog, install_no_registered_tiles_test_catalog,
-    install_ordinary_repair_test_catalog, install_tunnel_repair_test_catalog,
+    install_bridge_query_test_catalog, install_clear_test_catalog,
+    install_no_registered_tiles_test_catalog, install_ordinary_repair_test_catalog,
+    install_tunnel_repair_test_catalog, install_water_repair_test_catalog,
 };
 pub(crate) use tubes::NativeTubeRegistryBindError;
 
@@ -454,9 +456,9 @@ pub struct TerrainTileAnimation {
 /// names take the same path without a WA/TUNTOP name table in Rust.
 pub fn scheduler_anim_roots(
     rules: &RuleSet,
-    overlay_registry: &OverlayTypeRegistry,
     tile_animations: &[TerrainTileAnimation],
 ) -> Vec<String> {
+    let overlay_registry = rules.overlay_registry();
     let mut roots = BTreeSet::new();
     roots.extend(
         rules

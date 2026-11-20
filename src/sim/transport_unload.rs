@@ -250,7 +250,6 @@ fn pick_exit_octant(sim: &Simulation, entity: &GameEntity) -> Option<((u16, u16)
 fn passenger_can_enter(
     sim: &Simulation,
     rules: &RuleSet,
-    registry: Option<&crate::rules::overlay_types::OverlayTypeRegistry>,
     passenger_id: u64,
     cell: (u16, u16),
     args: InfantryEntryArgs,
@@ -260,7 +259,7 @@ fn passenger_can_enter(
     };
     let cell = crate::map::resolved_terrain::NativeCellQuery::canonical(terrain)
         .lookup((cell.0 as i16, cell.1 as i16));
-    sim.foot_can_enter(passenger_id, cell, args, rules, registry)
+    sim.foot_can_enter(passenger_id, cell, args, rules)
         .is_ok_and(|code| code == 0)
 }
 
@@ -324,13 +323,11 @@ fn eject_head_passenger(
     sim: &mut Simulation,
     rules: &RuleSet,
     transport_id: u64,
-    overlay_registry: Option<&crate::rules::overlay_types::OverlayTypeRegistry>,
     effects: FrameEffects<'_>,
 ) -> EjectOutcome {
     match depart_cargo_head(
         sim,
         rules,
-        overlay_registry,
         transport_id,
         DepartureRoute::Vehicle,
         |sim, pax_id| {
@@ -379,12 +376,10 @@ fn eject_head_passenger(
                     height,
                     previous_cell: None,
                 };
-                let beyond_ok = beyond_cell.is_some_and(|cell| {
-                    passenger_can_enter(sim, rules, overlay_registry, pax_id, cell, args)
-                });
-                let adjacent_ok = exit_cell.is_some_and(|cell| {
-                    passenger_can_enter(sim, rules, overlay_registry, pax_id, cell, args)
-                });
+                let beyond_ok = beyond_cell
+                    .is_some_and(|cell| passenger_can_enter(sim, rules, pax_id, cell, args));
+                let adjacent_ok = exit_cell
+                    .is_some_and(|cell| passenger_can_enter(sim, rules, pax_id, cell, args));
                 let accept = adjacent_ok && (beyond_ok || !strict_pass);
                 if !accept {
                     if strict_pass && i == 7 {
@@ -516,8 +511,7 @@ fn eject_head_passenger(
                         .is_some_and(|passenger| passenger.owner() != transport.owner())
             };
             if leaves_other_houses_open_transport
-                && let Err(cause) =
-                    sim.assign_target_represented(pax_id, None, rules, overlay_registry, effects)
+                && let Err(cause) = sim.assign_target_represented(pax_id, None, rules, effects)
             {
                 log::warn!("Unload target {pax_id}: {cause}");
             }
@@ -525,7 +519,7 @@ fn eject_head_passenger(
             // queues the passenger's Move directly, before class
             // destination73DC06; it does not execute a player event.
             if let Some(passenger) = sim.substrate.entities.get_mut(pax_id) {
-                passenger.passenger_role.clear_transporter();
+                passenger.passenger_role_mut().clear_transporter();
             }
             sim.queue_order_mission(pax_id, MissionType::Move, rules);
             // Ares UnitClass_Mi_Unload_Decactivated1004CF80 (hook73DBF9): a
@@ -564,7 +558,6 @@ fn eject_head_passenger(
                 pax_id,
                 Some(crate::sim::components::NavTargetRef::cell(dest.0, dest.1)),
                 rules,
-                overlay_registry,
                 effects,
             ) {
                 log::warn!("Unload destination {pax_id}: {cause}");
@@ -573,7 +566,7 @@ fn eject_head_passenger(
             // passenger into it (`Add_Member(passenger, 0)`); boarding's
             // Conceal had removed it from its own.
             if let Some((team, _)) = sim.team_script_vm.team_for_member(transport_id) {
-                sim.team_add_member(team, pax_id, false, rules, overlay_registry, effects);
+                sim.team_add_member(team, pax_id, false, rules, effects);
             }
 
             // `0x0073DC35..0x0073DC67` (PlayAtCoord `0x00750E20`, flags 0):
@@ -618,7 +611,6 @@ pub(crate) fn building_mission_unload_absorber(
     sim: &mut Simulation,
     rules: &RuleSet,
     id: u64,
-    overlay_registry: Option<&crate::rules::overlay_types::OverlayTypeRegistry>,
     effects: FrameEffects<'_>,
 ) -> i32 {
     let now = sim.session.binary_frame();
@@ -650,7 +642,6 @@ pub(crate) fn building_mission_unload_absorber(
     let _ = depart_cargo_head(
         sim,
         rules,
-        overlay_registry,
         id,
         DepartureRoute::Absorber,
         |sim, passenger_id| {
@@ -682,22 +673,15 @@ pub(crate) fn building_mission_unload_absorber(
                     // Native tests the cell two steps away before the adjacent
                     // cell. The relaxed pass calls only the adjacent cell.
                     let beyond_open = beyond.is_some_and(|cell| {
-                        passenger_can_enter(sim, rules, overlay_registry, passenger_id, cell, args)
+                        passenger_can_enter(sim, rules, passenger_id, cell, args)
                     });
                     beyond_open
                         && adjacent.is_some_and(|cell| {
-                            passenger_can_enter(
-                                sim,
-                                rules,
-                                overlay_registry,
-                                passenger_id,
-                                cell,
-                                args,
-                            )
+                            passenger_can_enter(sim, rules, passenger_id, cell, args)
                         })
                 } else {
                     adjacent.is_some_and(|cell| {
-                        passenger_can_enter(sim, rules, overlay_registry, passenger_id, cell, args)
+                        passenger_can_enter(sim, rules, passenger_id, cell, args)
                     })
                 };
                 if !accepts {
@@ -803,7 +787,6 @@ pub(crate) fn building_mission_unload_absorber(
                     destination.1,
                 )),
                 rules,
-                overlay_registry,
                 effects,
             ) {
                 log::warn!("Building Unload destination {passenger_id}: {cause}");
@@ -832,22 +815,12 @@ pub(crate) fn ares_tunnel_mission_unload(
     sim: &mut Simulation,
     rules: &RuleSet,
     id: u64,
-    overlay_registry: Option<&crate::rules::overlay_types::OverlayTypeRegistry>,
     effects: FrameEffects<'_>,
 ) -> Option<i32> {
     let tunnel = sim.ares_tunnel_type(id, rules)?;
     let owner = sim.substrate.entities.get(id)?.owner();
     let member = *sim.ares_tunnels.members(owner, tunnel).last()?;
-    ares_tunnel_unload_one(
-        sim,
-        rules,
-        id,
-        owner,
-        tunnel,
-        member,
-        overlay_registry,
-        effects,
-    );
+    ares_tunnel_unload_one(sim, rules, id, owner, tunnel, member, effects);
     Some(unload_epilogue(
         &mut sim.scenario_rng,
         &sim.substrate,
@@ -883,7 +856,6 @@ fn ares_tunnel_unload_one(
     owner: crate::sim::intern::InternedId,
     tunnel: usize,
     member: u64,
-    overlay_registry: Option<&crate::rules::overlay_types::OverlayTypeRegistry>,
     effects: FrameEffects<'_>,
 ) -> bool {
     let now = sim.session.binary_frame();
@@ -924,12 +896,9 @@ fn ares_tunnel_unload_one(
             height,
             previous_cell: None,
         };
-        let near_open = near.is_some_and(|cell| {
-            passenger_can_enter(sim, rules, overlay_registry, member, cell, args)
-        });
-        let far_open = far.is_some_and(|cell| {
-            passenger_can_enter(sim, rules, overlay_registry, member, cell, args)
-        });
+        let near_open =
+            near.is_some_and(|cell| passenger_can_enter(sim, rules, member, cell, args));
+        let far_open = far.is_some_and(|cell| passenger_can_enter(sim, rules, member, cell, args));
         if let Some(near) = near
             && near_open
             && (!need_far || far_open)
@@ -979,7 +948,7 @@ fn ares_tunnel_unload_one(
                     placement: PlacementEvidence::MarkSucceeded,
                     logic_eligible: true,
                 },
-                crate::sim::world::UninitContext::with_rules(rules)
+                crate::sim::world::UninitContext::new(rules)
                     .with_effects(effects)
                     .with_unlimbo_facing(Some((dir as u8) << 5)),
             );
@@ -1006,7 +975,6 @@ fn ares_tunnel_unload_one(
                     destination.1,
                 )),
                 rules,
-                overlay_registry,
                 effects,
             ) {
                 log::warn!("Tunnel unload destination {member}: {cause}");
@@ -1025,7 +993,6 @@ pub(crate) fn unit_mission_unload(
     sim: &mut Simulation,
     rules: &RuleSet,
     id: u64,
-    overlay_registry: Option<&crate::rules::overlay_types::OverlayTypeRegistry>,
     effects: FrameEffects<'_>,
 ) -> i32 {
     let now = sim.session.binary_frame();
@@ -1083,14 +1050,13 @@ pub(crate) fn unit_mission_unload(
                     id,
                     Some(crate::sim::components::NavTargetRef::cell(cell.0, cell.1)),
                     rules,
-                    overlay_registry,
                     effects,
                 ) {
                     log::warn!("Unload destination {id}: {cause}");
                 }
                 return WAIT_MOVING_FRAMES;
             }
-            let cargo = entity.passenger_role.passenger_count();
+            let cargo = entity.passenger_role().passenger_count();
             let pick = pick_exit_octant(sim, entity);
             if let (true, Some((_exit_cell, face_octant))) = (cargo != 0, pick) {
                 // `FUN_0070DC60` → `Type+0x808 TurretCount > 0` (`0x00717880`):
@@ -1150,9 +1116,10 @@ pub(crate) fn unit_mission_unload(
             unload_epilogue(&mut sim.scenario_rng, &sim.substrate, rules, id)
         }
         STATE_EJECT => {
-            if entity.passenger_role.passenger_count() > entity.transport_unload_keep_count.count()
+            if entity.passenger_role().passenger_count()
+                > entity.transport_unload_keep_count.count()
             {
-                let _ = eject_head_passenger(sim, rules, id, overlay_registry, effects);
+                let _ = eject_head_passenger(sim, rules, id, effects);
             } else if let Some(entity) = sim.substrate.entities.get_mut(id) {
                 entity.mission.set_handler_state(STATE_DONE);
             }
@@ -1295,14 +1262,8 @@ pub(crate) fn mission_unload(
             unload_epilogue(&mut sim.scenario_rng, &sim.substrate, rules, id)
         }
         AIR_STATE_EJECT => {
-            if entity.passenger_role.passenger_count() == 0 {
-                crate::sim::aircraft::enter_idle_mode_for(
-                    sim,
-                    id,
-                    rules,
-                    overlay_registry,
-                    effects,
-                );
+            if entity.passenger_role().passenger_count() == 0 {
+                crate::sim::aircraft::enter_idle_mode_for(sim, id, rules, effects);
             } else if sim.is_carryall(id, rules) {
                 // `0x004154E7..0x00415500`: a Carryall sets its cargo down
                 // between its Mark(UP) and Mark(DOWN).
@@ -1320,7 +1281,7 @@ pub(crate) fn mission_unload(
                     // refusal arm re-adds the passenger and enters idle mode,
                     // as VERA's escape below does in every game.
                     if rules.ares_form() {
-                        pax.passenger_role.clear_transporter();
+                        pax.passenger_role_mut().clear_transporter();
                     }
                 }
                 // `0x0041556A..0x00415587`: a passenger that kept a team joins
@@ -1336,13 +1297,13 @@ pub(crate) fn mission_unload(
                     && sim.team_script_vm.team_for_member(pax_id).is_some()
                     && let Some((team, _)) = sim.team_script_vm.team_for_member(id)
                 {
-                    sim.team_add_member(team, pax_id, false, rules, overlay_registry, effects);
+                    sim.team_add_member(team, pax_id, false, rules, effects);
                 }
                 let hold_empty = sim
                     .substrate
                     .entities
                     .get(id)
-                    .is_some_and(|entity| entity.passenger_role.passenger_count() == 0);
+                    .is_some_and(|entity| entity.passenger_role().passenger_count() == 0);
                 // `ejected` empty: VERA's bounded escape from a refused
                 // ejection (native loses the passenger and keeps ejecting the
                 // rest; see [`eject_from_aircraft`]). The hold keeps the
@@ -1350,13 +1311,7 @@ pub(crate) fn mission_unload(
                 // empty-hold exit, so this dispatch's epilogue draw is the
                 // last one.
                 if hold_empty || ejected.is_none() {
-                    crate::sim::aircraft::enter_idle_mode_for(
-                        sim,
-                        id,
-                        rules,
-                        overlay_registry,
-                        effects,
-                    );
+                    crate::sim::aircraft::enter_idle_mode_for(sim, id, rules, effects);
                 }
             }
             unload_epilogue(&mut sim.scenario_rng, &sim.substrate, rules, id)
@@ -1424,7 +1379,6 @@ fn eject_from_aircraft(
     let ejected = depart_cargo_head(
         sim,
         rules,
-        overlay_registry,
         aircraft_id,
         DepartureRoute::LandedAircraft,
         |sim, pax_id| {
@@ -1453,9 +1407,8 @@ fn eject_from_aircraft(
             for (i, &octant) in AIRCRAFT_EXIT_SCAN[..8].iter().enumerate() {
                 let candidate = cell_from(cell, DIRECTION_DELTAS[octant & 7]);
                 scan_cell = candidate;
-                if candidate.is_some_and(|cell| {
-                    passenger_can_enter(sim, rules, overlay_registry, pax_id, cell, args)
-                }) {
+                if candidate.is_some_and(|cell| passenger_can_enter(sim, rules, pax_id, cell, args))
+                {
                     index = i;
                     break;
                 }
@@ -1465,13 +1418,9 @@ fn eject_from_aircraft(
             // No A8E7AC is raised here: the class Unlimbo places an
             // infantryman from the aircraft's coordinate, and Object's class
             // +1AC query judges every passenger.
-            let Some((position, placement)) = sim.unlimbo_class_entry(
-                pax_id,
-                location,
-                PlacementEvidence::EvaluateMark,
-                rules,
-                overlay_registry,
-            ) else {
+            let Some((position, placement)) =
+                sim.unlimbo_class_entry(pax_id, location, PlacementEvidence::EvaluateMark, rules)
+            else {
                 return Err(DepartureFailure::Placement);
             };
             if let Some(passenger) = sim.substrate.entities.get_mut(pax_id)
@@ -1499,7 +1448,6 @@ fn eject_from_aircraft(
                     pax_id,
                     Some(crate::sim::components::NavTargetRef::cell(dest.0, dest.1)),
                     rules,
-                    overlay_registry,
                     effects,
                 )
             {

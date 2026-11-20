@@ -731,7 +731,7 @@ impl crate::sim::world::Simulation {
             // 0x00718C7A..0x00718C80: every class but Infantry takes the Unit
             // arm; the latched one returned above.
             if !infantry {
-                return self.teleport_unit_marked(id, requested, deck, marked, rules, registry);
+                return self.teleport_unit_marked(id, requested, deck, marked, rules);
             }
             // Original718C90 Ready ->718C9F Commence follows the release and
             // deck lookup, before effective-mission reads/Cell481180. Use the
@@ -806,7 +806,6 @@ impl crate::sim::world::Simulation {
                     previous_cell: None,
                 },
                 rules,
-                registry,
             )?;
             let resolved = if answer.is_nonzero() { None } else { resolved };
             if resolved.is_some() {
@@ -1034,7 +1033,6 @@ impl crate::sim::world::Simulation {
         deck: bool,
         marked: Option<DriveCoord>,
         rules: &crate::rules::ruleset::RuleSet,
-        registry: Option<&crate::rules::overlay_types::OverlayTypeRegistry>,
     ) -> Result<Option<DriveCoord>, String> {
         use crate::map::resolved_terrain::NativeCellQuery;
         use crate::sim::find_nearby_cell::{NearbyArgs, NearbyFootprint, PassabilityArgs};
@@ -1053,7 +1051,6 @@ impl crate::sim::world::Simulation {
                 },
                 EntryQueryMode::CheckLocomotor,
                 rules,
-                registry,
             )?;
             if code != 0 {
                 let object = self
@@ -1320,7 +1317,13 @@ impl crate::sim::world::Simulation {
         {
             self.shorten_passive_scan_timer(id);
             if !crate::sim::world::passive_target_acquire(self, id, rules, ctx) {
-                crate::sim::world::enter_idle_mode(self, id, rules, None, ctx.effects);
+                crate::sim::world::enter_idle_mode(
+                    self,
+                    id,
+                    rules,
+                    Some(rules.overlay_registry()),
+                    ctx.effects,
+                );
             }
         }
         if chrono
@@ -1510,8 +1513,9 @@ mod tests {
                 .lifecycle
                 .set_in_limbo_for_test(input["in_limbo"].as_bool().unwrap());
             if input["in_open_transport"].as_bool().unwrap() {
-                actor.passenger_role =
-                    crate::sim::passenger::PassengerRole::inside_for_test(3, true);
+                actor.set_passenger_role_for_test(
+                    crate::sim::passenger::PassengerRole::inside_for_test(3, true),
+                );
             }
             // Like the native control, a non-null TarCom avoids the separate
             // scan/idle callback path. Production boarding tests cover it.

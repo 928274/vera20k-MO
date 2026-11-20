@@ -24,8 +24,7 @@ use crate::app::loading::init_helpers::{
 use crate::app::match_bootstrap::LoadingStartup;
 use crate::sim::scenario_bootstrap::{
     FreshScenarioPrefix, ScenarioBootstrapRng, StockOfflinePrefixProjection,
-    apply_pre_fill_scenario_prefix_launch_session_with_overlay_registry,
-    initialize_skirmish_launch_houses,
+    apply_pre_fill_scenario_prefix_launch_session, initialize_skirmish_launch_houses,
 };
 
 #[cfg(test)]
@@ -63,6 +62,7 @@ use crate::rules::effect_asset_catalog::resolved_overlay_shp_ids;
 #[cfg(test)]
 use crate::rules::ini_parser::IniFile;
 use crate::rules::overlay_types::OverlayTypeRegistry;
+use crate::rules::rule_policy::{BootstrapRuleProfile, RulePolicy};
 use crate::rules::ruleset::RuleSet;
 use crate::sim::world::Simulation;
 
@@ -317,7 +317,7 @@ mod map_wall_owner_candidate_tests {
                 }
             }
         }
-        let registry = &scene.runtime.resources.overlay_registry;
+        let registry = scene.runtime.resources.rules.overlay_registry();
         let wall = sim.overlay_grid().unwrap().cell(90, 44);
         assert_eq!(wall.overlay_id, registry.id_for_name("GAWALL"));
         assert_eq!(wall.overlay_data & 0xF0, 0x10, "authored damaged wall");
@@ -1191,7 +1191,7 @@ mod map_wall_owner_candidate_tests {
             crate::sim::combat::FatalLifecycleStage::BeforeBuildingDestruction,
             id,
             EntityCategory::Structure,
-            crate::sim::world::UninitContext::with_rules(rules),
+            crate::sim::world::UninitContext::new(rules),
         );
     }
 
@@ -1458,8 +1458,6 @@ pub struct ScenarioLoadInputs {
     pub overlays: Vec<OverlayEntry>,
     /// Terrain objects for per-frame instance generation.
     pub terrain_objects: Vec<TerrainObject>,
-    /// Overlay type registry — kept so wall placement can look up overlay_id by name.
-    pub overlay_registry: OverlayTypeRegistry,
     pub house_roster: HouseRoster,
     /// Parsed rules.ini data — kept for combat system weapon/warhead lookups.
     pub rules: Option<RuleSet>,
@@ -1597,7 +1595,7 @@ fn prepare_scenario_rules(
     prefix: crate::rules::process_owner::NativeScenarioRulesPrefix<'_>,
     map_ini: &crate::rules::ini_parser::IniFile,
     tmcj4f: Option<&crate::rules::ini_parser::IniFile>,
-    game_mode_nonzero: bool,
+    rule_policy: RulePolicy,
 ) -> Result<PreparedScenarioRules> {
     let (native, team_ai_registry, rules_at_ai_read) = if let Some(tmcj4f) = tmcj4f {
         let (loaded, (ai, rules_at_read)) = owner
@@ -1606,7 +1604,7 @@ fn prepare_scenario_rules(
                     crate::rules::team_ai_ini::TeamAiIniRegistry::load_retail(
                         assets,
                         map_ini,
-                        game_mode_nonzero,
+                        rule_policy,
                     ),
                     rules_at_read,
                 )
@@ -1617,12 +1615,9 @@ fn prepare_scenario_rules(
         let loaded = owner
             .load_scenario(prefix, map_ini)
             .map_err(|error| anyhow::anyhow!("failed native scenario rules rebuild: {error}"))?;
-        let ai = crate::rules::team_ai_ini::TeamAiIniRegistry::load_retail(
-            assets,
-            map_ini,
-            game_mode_nonzero,
-        )
-        .map_err(anyhow::Error::msg)?;
+        let ai =
+            crate::rules::team_ai_ini::TeamAiIniRegistry::load_retail(assets, map_ini, rule_policy)
+                .map_err(anyhow::Error::msg)?;
         (loaded, ai, None)
     };
     Ok(PreparedScenarioRules {
@@ -1658,12 +1653,12 @@ impl MapLoadInitial {
         &mut self,
         retention: &mut crate::app::shell_random_map::RandomMapGenerationRetention,
         mut resident: Option<&mut crate::sim::world::Simulation>,
-        session_mode: crate::sim::scenario_session::ScenarioGameMode,
+        topology: crate::sim::scenario_session::ExecutionTopology,
     ) {
         self.retained_campaign_special_flags = resident
             .as_deref()
             .map(crate::sim::world::Simulation::retained_campaign_special_flags);
-        self.retained_local_variables = if session_mode.is_network() {
+        self.retained_local_variables = if topology.is_lockstep() {
             None
         } else {
             resident
@@ -1810,7 +1805,11 @@ mod fresh_transport_tests {
         );
         let before = resident.state_hash();
         let mut initial = MapLoadInitial::from_test_map_source(map, source);
-        initial.retain_process_state(&mut Default::default(), Some(&mut resident), mode);
+        initial.retain_process_state(
+            &mut Default::default(),
+            Some(&mut resident),
+            mode.execution_topology(),
+        );
         assert_eq!(resident.state_hash(), before, "preparation is read-only");
         let mut staged = Simulation::new();
         if let Some(prior) = initial.retained_local_variables {
@@ -1947,27 +1946,35 @@ mod fresh_transport_tests {
     }
 }
 
-/// Snapshot the active Scenario multiplayer-start table into the live session.
-///
-/// Authored loads retain their parsed waypoint table. Accepted RMG loads have
-/// already copied setup staging into the active Scenario array before `.SED`
-/// regeneration, so the prefix plan—not regenerated map content—owns these
-/// start entries for loading markers, save/restore, and deterministic hashing.
-/// Installs the startup's GameMode into the scenario session, with the
-/// admitted MaxAhead for a network start. The frame tail's `Queue_AI` route
-/// reads this mode, so a LAN/WOL start must arrive as LAN/WOL.
+/// Installs the startup's live rules and exact GameMode, with the admitted
+/// MaxAhead for a network start. A replay can have a live policy distinct
+/// from its authored map's construction policy.
 pub(super) fn install_startup_session_mode(
     simulation: &mut crate::sim::world::Simulation,
     startup: &LoadingStartup,
 ) {
-    simulation.install_session_mode(startup.session_mode());
+    simulation.install_session_admission(
+        startup.session_mode(),
+        startup.launch_session().map(|launch| launch.mode.class),
+        startup.match_spec().rules(),
+    );
     if let LoadingStartup::Network(accepted) = startup {
         simulation.install_network_timing(accepted.max_ahead_frames());
         let wol = accepted.wol_start();
         simulation.install_wol_start(wol.tournament, wol.squad_lists.clone());
+    } else if let LoadingStartup::Replay { launch, .. } = startup
+        && let Some(network) = launch.network_start()
+    {
+        network.install(simulation);
     }
 }
 
+/// Project the active Scenario multiplayer-start table into the launch descriptor.
+///
+/// Authored loads retain their parsed waypoint table. Accepted RMG loads have
+/// already copied setup staging into the active Scenario array before `.SED`
+/// regeneration, so the prefix plan owns these start entries for loading
+/// markers, save/restore, and deterministic hashing.
 pub(crate) fn scenario_start_waypoints_for_load(
     map_data: &MapFile,
     projection: Option<&StockOfflinePrefixProjection>,
@@ -2192,7 +2199,6 @@ impl MapLoadInitial {
             .native
             .into_parts();
         rules.install_art_data(ArtRegistry::from_ini(&art_ini));
-        let overlay_registry = rules.overlay_registry().clone();
         // Stage the one Simulation before terrain Fill, as the match load does:
         // the prefix cursors, Fill and every later load constructor mutate the
         // identity that reaches gameplay.
@@ -2206,6 +2212,7 @@ impl MapLoadInitial {
                 .expect("map Size produces a fresh cell array");
         let scenario_cell_extent = native_start_bounds.min_rx + native_start_bounds.width;
         let lighting_profiles = lighting::parse_lighting_profiles(&map_data.ini);
+        let rule_policy = RulePolicy::stock_multiplayer();
         let scenario_descriptor = crate::sim::scenario_session::ScenarioDescriptor {
             seed: match_seed,
             map_name: match_launch_descriptor
@@ -2215,7 +2222,7 @@ impl MapLoadInitial {
                 .or_else(|| map_data.basic.name.clone())
                 .unwrap_or_default(),
             theater: map_data.header.theater.clone(),
-            game_mode_nonzero: true,
+            rule_policy,
             no_damage: false,
             // Same nonzero-mode replacement as the match load: the launch
             // session's Harvester Truce byte, not the map's key.
@@ -2231,8 +2238,8 @@ impl MapLoadInitial {
             vein_growth_enabled: map_data.basic.vein_growth_enabled,
             // Skirmish start forces `TiberiumGrows|TiberiumSpreads` (`OR 0xC0`
             // at `0x005E74CD`), copied into the scenario at `0x00687C23`.
-            tiberium_grows_flag: true,
-            tiberium_spreads_flag: true,
+            tiberium_grows_flag: rule_policy.uses_room_options(),
+            tiberium_spreads_flag: rule_policy.uses_room_options(),
             // Native Resize constructs a square cell-array extent of SizeW+SizeH.
             map_width: scenario_cell_extent,
             map_height: scenario_cell_extent,
@@ -2262,7 +2269,7 @@ impl MapLoadInitial {
                 theater_result.as_ref(),
                 Some(asset_manager),
                 Some(&rules.terrain_rules),
-                Some(&overlay_registry),
+                Some(rules.overlay_registry()),
                 Some(&rules.terrain_object_types),
                 true,
                 rules.general.cliff_back_impassability,
@@ -2276,11 +2283,7 @@ impl MapLoadInitial {
             || theater_ext_for(&map_data.header.theater),
             |td| td.extension,
         );
-        let scheduler_roots = scheduler_anim_roots(
-            &rules,
-            &overlay_registry,
-            resolved_terrain.tile_animations(),
-        );
+        let scheduler_roots = scheduler_anim_roots(&rules, resolved_terrain.tile_animations());
         rules.bind_scheduler_anim_assets(
             &scheduler_roots,
             asset_manager,
@@ -2341,7 +2344,7 @@ impl MapLoadInitial {
         let scenario_after_trace = simulation.rng_state().scenario;
 
         let overlay_grid =
-            generated_overlay_grid(&map_data, &mut resolved_terrain, &overlay_registry)
+            generated_overlay_grid(&map_data, &mut resolved_terrain, rules.overlay_registry())
                 .expect("random-map snapshot precedes authored pack consumption");
         let house_roster =
             houses::parse_house_roster(&map_data.ini, &rules.color_schemes, Some(&rules));
@@ -2363,7 +2366,6 @@ impl MapLoadInitial {
             &resolved_terrain,
             &map_data.header.theater,
             &rules,
-            &overlay_registry,
             overlay_grid,
             bridge_destroyability_mode,
             &scenario_descriptor,
@@ -2405,27 +2407,27 @@ impl MapLoadInitial {
             .collect();
         simulation.intern_rule_type_ids(&rules);
         simulation.resolve_type_handles(&rules);
-        let _ = apply_pre_fill_scenario_prefix_launch_session_with_overlay_registry(
+        let _ = apply_pre_fill_scenario_prefix_launch_session(
             &mut simulation,
             &map_data,
             &house_roster,
             &rules,
             &resolved_terrain,
             &match_launch_descriptor,
-            &overlay_registry,
             &scenario_prefix_projection,
         );
         let post_map_output = crate::sim::runtime::finalize_constructed_scenario(
             &mut simulation,
             &map_data,
             &rules,
-            &overlay_registry,
             &house_roster,
+            rule_policy,
             Some(&match_launch_descriptor),
+            None,
         )
         .expect("generated scenario post-map initialization");
         let crate_name_id =
-            |name: Option<&str>| name.and_then(|name| overlay_registry.id_for_name(name));
+            |name: Option<&str>| name.and_then(|name| rules.overlay_registry().id_for_name(name));
         let mut presented = Vec::new();
         connect_startup_crate_overlays(&mut presented, &simulation);
         let startup_crate = RandomMapStartupCrateProjection {
@@ -2524,18 +2526,17 @@ fn generated_full_init_ini(
         .map(|(id, _)| id)
         .ok_or_else(|| anyhow::anyhow!("RMG Full_Init requires the current first Country"))?;
     let geometry = crate::map::rmg::MapGeometry::from_options(options);
+    let (width, height) = geometry.map_size();
+    let [left, top, local_width, local_height] = geometry.local_size();
     let mut map = IniSection::new("Map".into());
     map.set(
         "Theater",
         crate::map::rmg::emit::theater_name(options.theater),
     );
-    map.set(
-        "Size",
-        &format!("0,0,{},{}", geometry.map_w, geometry.map_h),
-    );
+    map.set("Size", &format!("0,0,{width},{height}"));
     map.set(
         "LocalSize",
-        &format!("2,5,{},{}", geometry.gen_w, geometry.gen_h),
+        &format!("{left},{top},{local_width},{local_height}"),
     );
     map.set("Level", "4");
     let mut ini = IniFile::from_sections([map]);
@@ -2663,7 +2664,7 @@ pub(crate) fn load_map_initial_with_assets(
             crate::rules::process_owner::NativeScenarioRulesPrefix::RandomMap(mode_rules.as_ref()),
             &synthetic_ini,
             tmcj4f.as_ref(),
-            full_init_entry_mode != crate::app::match_runtime::session::SessionMode::Campaign,
+            full_init_entry_mode.stock_rule_policy(None),
         )?;
         let terrain_rules = &generated_rules.native.rules().terrain_rules;
         let resolved = crate::map::rmg::build::ResolvedTheaterInputs::from_theater(
@@ -2739,9 +2740,9 @@ pub(crate) fn load_map_initial_with_assets(
         } else {
             crate::map::rmg::build::GenerationObjects::tech(&tech_types, ares)
         };
-        let mut generated =
+        let run =
             crate::map::rmg::build::generate_map(&options, &settings, &resolved, &blocks, &objects);
-        generated.map_file.ini = synthetic_ini;
+        let generated = run.map();
         log::info!(
             "Random map generated: theater={}, {}x{}, seed={}, players={}",
             generated.map_file.header.theater,
@@ -2761,7 +2762,8 @@ pub(crate) fn load_map_initial_with_assets(
         }
 
         progress.milestone(8)?;
-        let mapgen_rng_continuation = generated.take_mapgen_continuation();
+        let (mut generated, mapgen_rng_continuation) = run.into_parts();
+        generated.map_file.ini = synthetic_ini;
         let generated_construction_trace = generated.construction_trace;
         return Ok(MapLoadInitial {
             map_data: generated.map_file,
@@ -3090,8 +3092,18 @@ fn load_map_first_step(
         mapgen_rng_continuation.is_some(),
         generated_construction_trace.is_some(),
     )?;
-    let game_mode_nonzero = campaign.is_none();
-    if !game_mode_nonzero {
+    // Fresh construction follows the admitted scenario family. A replay's
+    // recorded session mode is installed later for the simulation.
+    let construction_profile = if campaign.is_some() {
+        BootstrapRuleProfile::Campaign
+    } else {
+        BootstrapRuleProfile::Multiplayer
+    };
+    let rule_policy = startup
+        .match_spec_for_construction(construction_profile)
+        .rules();
+    let bootstrap_rule_profile = rule_policy.bootstrap();
+    if bootstrap_rule_profile == BootstrapRuleProfile::Campaign {
         map_data
             .special_flags
             .resolve_campaign_defaults(retained_campaign_special_flags.as_ref());
@@ -3175,7 +3187,7 @@ fn load_map_first_step(
                     full_init_entry_mode,
                     services.the_team_enabled,
                 )?;
-                let rules_prefix = if game_mode_nonzero {
+                let rules_prefix = if bootstrap_rule_profile.uses_multiplayer_rules() {
                     if let Some(preparation) = prepared_prefix {
                         crate::rules::process_owner::NativeScenarioRulesPrefix::PreparedNonCampaign {
                             preparation,
@@ -3187,10 +3199,10 @@ fn load_map_first_step(
                         )
                     }
                 } else {
-                    assert!(
-                        prepared_prefix.is_none(),
-                        "campaign loading cannot consume an ordinary prefix"
-                    );
+                    if let Some(preparation) = prepared_prefix {
+                        native_rules_owner.cancel_prepared_noncampaign_scenario_prefix(preparation);
+                        anyhow::bail!("campaign loading cannot consume an ordinary prefix");
+                    }
                     crate::rules::process_owner::NativeScenarioRulesPrefix::Campaign(
                         campaign_named_ini.as_ref(),
                     )
@@ -3201,7 +3213,7 @@ fn load_map_first_step(
                     rules_prefix,
                     &map_data.ini,
                     tmcj4f_ini.as_ref(),
-                    game_mode_nonzero,
+                    rule_policy,
                 )?
             };
             let (
@@ -3240,7 +3252,6 @@ fn load_map_first_step(
                                 .as_ref()
                                 .map(|launch| launch.session());
                             let csf = Some(load_csf(services.asset_manager)?);
-                            let overlay_registry = rules.overlay_registry().clone();
                             // Campaign House construction and its map reads precede Map Resize/Fill.
                             // The same roster later supplies presentation and post-load consumers.
                             let house_roster = houses::parse_house_roster(
@@ -3296,6 +3307,7 @@ fn load_map_first_step(
                                     .as_ref()
                                     .expect("campaign admission supplies its startup");
                                 FreshScenarioPrefix::Campaign {
+                                    network: None,
                                     native_rules_receipt,
                                     rules: &rules,
                                     map_data: &map_data,
@@ -3321,24 +3333,7 @@ fn load_map_first_step(
                             .or_else(|| map_data.basic.name.clone())
                             .unwrap_or_default(),
                         theater: map_data.header.theater.clone(),
-                        game_mode_nonzero,
-                        // Campaign/editor reads `[SpecialFlags] Inert=`. Nonzero game modes
-                        // replace active SpecialFlags from session staging.
-                        no_damage: !game_mode_nonzero
-                            && map_data.special_flags.inert.unwrap_or(false),
-                        // Scenario bit 0x800: campaign reads the map's `[SpecialFlags]
-                        // HarvesterImmune=`; a nonzero game mode replaces the map's flags
-                        // with the session staging word (`0x00687C16..0x00687C29`), whose
-                        // PregameSetup arm stores the session's Harvester Truce byte
-                        // (`0x00A8B31D`) in the bit (`0x005E7495..0x005E74D4`). The skirmish
-                        // lobby never sets the truce (`0x006AD89D` clears it), so every
-                        // skirmish leaves the bit off.
-                        harvester_immune: if game_mode_nonzero {
-                            skirmish_launch_session
-                                .is_some_and(|launch| launch.options.harvester_truce)
-                        } else {
-                            map_data.special_flags.harvester_immune.unwrap_or(false)
-                        },
+                        rule_policy,
                         free_radar: map_data.basic.free_radar.unwrap_or(false),
                         ignore_global_ai_triggers: map_data
                             .basic
@@ -3351,12 +3346,6 @@ fn load_map_first_step(
                         truck_crate: map_data.basic.truck_crate.unwrap_or(false),
                         ice_growth_enabled: map_data.basic.ice_growth_enabled,
                         vein_growth_enabled: map_data.basic.vein_growth_enabled,
-                        // Skirmish start forces `TiberiumGrows|TiberiumSpreads` (`OR 0xC0`
-                        // at `0x005E74CD`), copied into the scenario at `0x00687C23`.
-                        tiberium_grows_flag: game_mode_nonzero
-                            || map_data.special_flags.tiberium_grows.unwrap_or(false),
-                        tiberium_spreads_flag: game_mode_nonzero
-                            || map_data.special_flags.tiberium_spreads.unwrap_or(true),
                         // Native Resize constructs a square cell-array extent of SizeW+SizeH.
                         map_width: scenario_cell_extent,
                         map_height: scenario_cell_extent,
@@ -3373,7 +3362,13 @@ fn load_map_first_step(
                         lighting: crate::sim::scenario_session::ScenarioLightingState::from_map(
                             &lighting_profiles,
                         ),
-                    };
+                        ..Default::default()
+                    }
+                    .with_authored_special_flags(
+                        &map_data.special_flags,
+                        skirmish_launch_session
+                            .is_some_and(|launch| launch.options.harvester_truce),
+                    );
                             log::info!("Match seed: 0x{:08X}", scenario_descriptor.seed);
                             // Consume the paired RNG/native-ID prefix here: Fill and every later load
                             // constructor now mutate the same Simulation identity that reaches gameplay.
@@ -3422,7 +3417,7 @@ fn load_map_first_step(
                     theater_result.as_ref(),
                     Some(services.asset_manager),
                     Some(&rules.terrain_rules),
-                    Some(&overlay_registry),
+                    Some(rules.overlay_registry()),
                     lat_enabled,
                     cliff_back,
                     &mut scenario_fill_ranged,
@@ -3438,7 +3433,7 @@ fn load_map_first_step(
                                     theater_result.as_ref(),
                                     Some(services.asset_manager),
                                     Some(&rules.terrain_rules),
-                                    Some(&overlay_registry),
+                                    Some(rules.overlay_registry()),
                                     Some(&rules.terrain_object_types),
                                     lat_enabled,
                                     cliff_back,
@@ -3480,7 +3475,6 @@ fn load_map_first_step(
                             // name no AnimType holds becomes an unread type that draws nothing.
                             let roots = scheduler_anim_roots(
                                 &rules,
-                                &overlay_registry,
                                 resolved_terrain
                                     .as_ref()
                                     .map_or(&[], |terrain| terrain.tile_animations()),
@@ -3494,7 +3488,6 @@ fn load_map_first_step(
                                 .extend(team_ai_registry.script_anim_class_roots(&rules));
                             crate::app::loading::init_helpers::bind_rules_asset_closure(
                                 &mut rules,
-                                &overlay_registry,
                                 &roots,
                                 &authored_anim_roots,
                                 services.asset_manager,
@@ -3599,7 +3592,7 @@ fn load_map_first_step(
                                         "authored materialization retained its pending Fill owner",
                                     );
                                             let overlay_shp_ids = resolved_overlay_shp_ids(
-                                                &overlay_registry,
+                                                rules.overlay_registry(),
                                                 services.asset_manager,
                                                 theater_ext,
                                                 &map_data.header.theater,
@@ -3612,7 +3605,6 @@ fn load_map_first_step(
                 services.asset_manager,
                 &mut rules,
                 services.native_rules_owner,
-                &overlay_registry,
                 &overlay_shp_ids,
                 signed_new_ini_format,
                 lat_enabled,
@@ -3636,7 +3628,7 @@ fn load_map_first_step(
                                             let overlay_grid = generated_overlay_grid(
                                                 &map_data,
                                                 resolved_terrain,
-                                                &overlay_registry,
+                                                rules.overlay_registry(),
                                             )?;
                                             crate::sim::runtime::populate_staged_generated_scenario(
                 &mut staged_simulation,
@@ -3644,7 +3636,6 @@ fn load_map_first_step(
                 resolved_terrain,
                 &map_data.header.theater,
                 &rules,
-                &overlay_registry,
                 overlay_grid,
                 bridge_destroyability_mode,
                 &scenario_descriptor,
@@ -3755,14 +3746,13 @@ fn load_map_first_step(
                                                             match_launch_descriptor.as_ref(),
                                                             scenario_prefix_projection.as_ref(),
                                                         ) {
-                                                            apply_pre_fill_scenario_prefix_launch_session_with_overlay_registry(
+                                                            apply_pre_fill_scenario_prefix_launch_session(
             &mut staged_simulation,
             &map_data,
             &house_roster,
             &rules,
             &resolved_terrain,
             launch,
-            &overlay_registry,
             projection,
         );
                                                         }
@@ -3832,14 +3822,13 @@ fn load_map_first_step(
                                                                         break;
                                                                     };
                                                                     if let Some(id) = staged_simulation
-                                                            .spawn_object_with_overlay_registry(
+                                                            .spawn_object_with_map_overlays(
                                                                 type_id,
                                                                 &owner,
                                                                 rx,
                                                                 ry,
                                                                 64,
                                                                 ruleset,
-                                                                &overlay_registry,
                                                             )
                                                         {
                                                             placed += 1;
@@ -3930,7 +3919,6 @@ fn load_map_first_step(
         theater_ext,
         &map_data.header.theater,
         Some(&rules),
-        &overlay_registry,
         &house_color_map,
         unit_palette.as_ref(),
         overlay_iso_palette.as_ref(),
@@ -3981,7 +3969,6 @@ fn load_map_first_step(
                                                                 theater_ext,
                                                                 &map_data.header.theater,
                                                                 &rules,
-                                                                &overlay_registry,
                                                                 overlay_iso_palette.as_ref(),
                                                                 unit_palette.as_ref(),
                                                                 overlay_tiberium_palette.as_ref(),
@@ -4005,9 +3992,10 @@ fn load_map_first_step(
             sim,
             &map_data,
             rules_for_post_map,
-            &overlay_registry,
             &house_roster,
+            rule_policy,
             match_launch_descriptor.as_ref(),
+            None,
         )?;
                                                                             if !output.navigation_published {
             log::error!("Initial navigation rebuild failed: resolved terrain is unavailable");
@@ -4110,7 +4098,6 @@ fn load_map_first_step(
             simulation,
             overlays: overlays_connected,
             terrain_objects: map_data.terrain_objects,
-            overlay_registry,
             house_roster,
             rules: Some(rules),
             map_lighting_config: lighting_config,

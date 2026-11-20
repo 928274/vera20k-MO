@@ -467,8 +467,13 @@ fn native_update_corpus() {
                 set_elite(&mut sim, id);
             }
             if attacker.open_topped == 1 {
-                sim.substrate.entities.get_mut(id).unwrap().passenger_role =
-                    crate::sim::passenger::PassengerRole::inside_for_test(transport, true);
+                sim.substrate
+                    .entities
+                    .get_mut(id)
+                    .unwrap()
+                    .set_passenger_role_for_test(
+                        crate::sim::passenger::PassengerRole::inside_for_test(transport, true),
+                    );
             }
             if let Some(coords) = attacker.coords {
                 place(&mut sim, id, coords);
@@ -1186,7 +1191,6 @@ fn house_cleanup_leaves_a_warped_bridge_hut_offline_when_it_survives_c4() {
         crate::sim::combat::fire_error_world::FireSubject {
             world: &sim,
             rules: &rules,
-            overlay_registry: None,
             fog: None,
             firer: entity(&sim, cleg),
             obj: rules.object("CLEG").unwrap(),
@@ -2291,6 +2295,7 @@ fn stop_retains_the_legionnaires_victim_until_attack_dispatch() {
         .remaining_if_pending(sim.session.binary_frame())
         .expect("the first shot precedes the next Attack dispatch");
     assert!(sim.apply_command_with_overlays(
+        None,
         "Russians",
         &Command::Stop { entity_id: cleg },
         &rules,
@@ -2611,10 +2616,10 @@ fn a_warped_transport_admits_no_one() {
     let cleg2 = spawn(&mut sim, &rules, "CLEG", "Russians", 10, 12);
     for carrier in [fortress, reactor] {
         let entity = sim.substrate.entities.get_mut(carrier).unwrap();
-        if entity.passenger_role.cargo().is_none() {
-            entity.passenger_role = crate::sim::passenger::PassengerRole::transport(
+        if entity.passenger_role().cargo().is_none() {
+            entity.set_passenger_role_for_test(crate::sim::passenger::PassengerRole::transport(
                 crate::sim::passenger::PassengerCargo::new(5, 0.0),
-            );
+            ));
         }
     }
     let admits = |sim: &Simulation, carrier: u64| {
@@ -2676,11 +2681,11 @@ struct NativeWarpCase {
 /// victim even when the new warp is refused or has no Techno, the victim's
 /// own release, the harvester and building notices and the building going
 /// offline. VERA emits the harvester notice for every house and the app keeps
-/// the local owner's; VERA always has a player, so Deselect is compared only
-/// where the case has one; the gattling case's UpdateGattlingStage(1) on the
-/// victim is compared through its effect (one RateDown step and the loop's
-/// release). The spawn kill and FreeAll (read: both run before
-/// CanWarpTarget) and Mark are not compared.
+/// the local owner's; each case runs with its own current House, so Deselect
+/// is compared with and without one; the gattling case's
+/// UpdateGattlingStage(1) on the victim is compared through its effect (one
+/// RateDown step and the loop's release). The spawn kill and FreeAll (read:
+/// both run before CanWarpTarget) and Mark are not compared.
 #[test]
 fn native_initiate_warp_corpus() {
     let cases: Vec<NativeWarpCase> = serde_json::from_str(crate::test_fixture::text(
@@ -2735,6 +2740,10 @@ fn native_initiate_warp_corpus() {
         let rules = rules_from(&text, &art_text);
 
         let mut sim = sim(27);
+        // The case's player (`0x00A83D4C`): the local Americans, or none.
+        let player = (input["player"].as_bool() != Some(false))
+            .then(|| sim.interner.get("Americans").unwrap());
+        sim.session.set_current_house_for_test(player);
         let owner = if flag("local") {
             "Americans"
         } else {
@@ -2756,15 +2765,14 @@ fn native_initiate_warp_corpus() {
                 // Relocation must migrate its actual Mark lists as well as pose.
                 assert!(sim.unmark_entity_remove(
                     factory_id,
-                    crate::sim::world::UninitContext::with_rules(&rules)
+                    crate::sim::world::UninitContext::new(&rules)
                 ));
                 let building = sim.substrate.entities.get_mut(factory_id).unwrap();
                 building.position.set_rx_for_test(19);
                 building.position.set_ry_for_test(19);
-                assert!(sim.mark_entity_put(
-                    factory_id,
-                    crate::sim::world::UninitContext::with_rules(&rules)
-                ));
+                assert!(
+                    sim.mark_entity_put(factory_id, crate::sim::world::UninitContext::new(&rules))
+                );
             }
             let contacts = &mut sim
                 .substrate
@@ -2916,13 +2924,11 @@ fn native_initiate_warp_corpus() {
                 .all(|event| event[1] == "target" && event[2] == 1),
             "{name}: the original decays the victim by one tick"
         );
-        if input["player"].as_bool() != Some(false) {
-            assert_eq!(
-                !entity(&sim, target).selection.is_selected(),
-                native("deselect"),
-                "{name}: Deselect"
-            );
-        }
+        assert_eq!(
+            !entity(&sim, target).selection.is_selected(),
+            native("deselect"),
+            "{name}: Deselect"
+        );
         if rtti == 6 {
             assert_eq!(
                 !entity(&sim, target).building_online(),

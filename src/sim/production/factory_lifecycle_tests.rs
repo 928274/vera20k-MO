@@ -129,10 +129,7 @@ fn paid_destroyer_runs_shipyard_production_animation_through_idle_recovery() {
     let cost = sim.cost_of(owner, rules.object("DEST").unwrap(), &rules);
     let mut runtime = SimRuntime {
         simulation: sim,
-        resources: std::sync::Arc::new(SimResources {
-            rules,
-            ..SimResources::empty()
-        }),
+        resources: std::sync::Arc::new(SimResources::new(rules)),
     };
     for _ in 0..8 {
         runtime
@@ -690,10 +687,7 @@ pub(super) fn retail_barracks_sale_runtime(
     Some((
         SimRuntime {
             simulation: sim,
-            resources: std::sync::Arc::new(SimResources {
-                rules,
-                ..SimResources::empty()
-            }),
+            resources: std::sync::Arc::new(SimResources::new(rules)),
         },
         owner,
         2,
@@ -761,7 +755,7 @@ fn offline_backup_preserves_paid_infantry_with_system_hold() {
     let wallet = sim.houses[&owner].economy().credits();
     let spent = sim.houses[&owner].economy().spent_credits();
 
-    sim.techno_limbo_with_rules(barracks, &runtime.resources.rules, None);
+    sim.techno_limbo_with_rules(barracks, &runtime.resources.rules);
 
     let held = sim.production.factories().view(owner, category).unwrap();
     assert!(
@@ -775,7 +769,7 @@ fn offline_backup_preserves_paid_infantry_with_system_hold() {
     for offset in 1..=12 {
         let sim = &mut runtime.simulation;
         sim.production
-            .factories_mut()
+            .edit_factories()
             .step_all(&mut sim.houses, sim.session.binary_frame() + offset);
     }
     let sim = &runtime.simulation;
@@ -824,7 +818,7 @@ fn offline_backup_recovery_distinguishes_saved_system_and_user_holds() {
         }
         sim.temporal_initiate_warp(attacker, Some(backup), rules, None, FrameEffects::default());
         assert!(!sim.entities().get(backup).unwrap().building_online());
-        sim.techno_limbo_with_rules(barracks, rules, None);
+        sim.techno_limbo_with_rules(barracks, rules);
         Simulation::temporal_let_go(
             &mut sim.substrate,
             &mut sim.houses,
@@ -1063,10 +1057,7 @@ fn selling_last_retail_barracks_keeps_paid_head_before_map_exit() {
         );
         let mut restored = crate::sim::runtime::SimRuntime {
             simulation: restored,
-            resources: std::sync::Arc::new(crate::sim::runtime::SimResources {
-                rules: rules.clone(),
-                ..crate::sim::runtime::SimResources::empty()
-            }),
+            resources: std::sync::Arc::new(crate::sim::runtime::SimResources::new(rules.clone())),
         };
         let spent_at_sale = runtime.simulation.houses[&owner].economy().spent_credits();
         let mut sale_visits = 0;
@@ -1318,7 +1309,7 @@ fn retail_barracks_sale_callbacks_reject_successor_or_keep_surviving_producer() 
         assert_eq!(row["rng"]["raw_advance_count"], 0);
         assert_eq!(row["rng"]["unchanged"], true);
         assert_eq!(row["rng"]["before_sha256"], row["rng"]["after_sha256"]);
-        let context = UninitContext::with_rules(&runtime.resources.rules);
+        let context = UninitContext::new(&runtime.resources.rules);
         sim.techno_limbo_with_context(barracks, context);
         assert_eq!(
             sim.next_stable_object_id(),
@@ -1459,10 +1450,7 @@ fn paid_boris_delivery_requests_its_creation_cue_once_at_the_delivered_location(
     assert!(cost > 0);
     let mut runtime = SimRuntime {
         simulation: sim,
-        resources: std::sync::Arc::new(SimResources {
-            rules,
-            ..SimResources::empty()
-        }),
+        resources: std::sync::Arc::new(SimResources::new(rules)),
     };
     let mut product = None;
     let mut cues = Vec::new();
@@ -2476,9 +2464,7 @@ fn a_produced_slave_miner_leaves_tethered_without_hunting_yet() {
     );
     let grid = crate::sim::pathfinding::PathGrid::new(64, 64);
     sim.install_fixture_path_grid(Some(&grid));
-    assert!(dispatch_production_changes_for_tests(
-        &mut sim, &rules, None
-    ));
+    assert!(dispatch_production_changes_for_tests(&mut sim, &rules));
     let entity = sim.substrate.entities.get(produced).unwrap();
     assert!(!entity.lifecycle.in_limbo(), "SMIN delivered");
     assert_eq!(entity.tether.partner(), Some(1));
@@ -2521,9 +2507,7 @@ fn produced_infantry_retains_its_barracks_rally_until_exit_handoff() {
     );
     let grid = crate::sim::pathfinding::PathGrid::new(64, 64);
     sim.install_fixture_path_grid(Some(&grid));
-    assert!(dispatch_production_changes_for_tests(
-        &mut sim, &rules, None
-    ));
+    assert!(dispatch_production_changes_for_tests(&mut sim, &rules));
     let entity = sim.substrate.entities.get(produced).unwrap();
     assert!(!entity.lifecycle.in_limbo(), "E1 delivered");
     // Nonzero rally: TechnoUnlimbo's InfIdle establishes Nav, then Exit
@@ -2654,8 +2638,8 @@ fn ready_manager_is_refunded_and_disposed_by_another_buildings_produce() {
     );
 }
 
-/// The same fixture with Phobos `[General] BuildingProductionQueue=yes`.
-#[cfg(feature = "phobos")]
+/// The same fixture with `[General] BuildingProductionQueue=yes`, which every
+/// build reads: Phobos' key, and what VERA's Options box sets.
 fn world_with_building_queue(seed: u64) -> (Simulation, RuleSet, InternedId) {
     let mut ini = manager_ini();
     ini.merge(&IniFile::from_str(
@@ -2667,7 +2651,6 @@ fn world_with_building_queue(seed: u64) -> (Simulation, RuleSet, InternedId) {
     )
 }
 
-#[cfg(feature = "phobos")]
 #[test]
 fn building_queue_switch_queues_and_starts_the_next_after_placement() {
     use crate::sim::production::ProductionCancellation;
@@ -2717,7 +2700,7 @@ fn building_queue_switch_queues_and_starts_the_next_after_placement() {
             .factories_mut()
             .test_arm_ready(owner, ProductionCategory::Building)
     );
-    sim.production.factories_mut().complete_production(
+    sim.production.edit_factories().complete_production(
         owner,
         ProductionCategory::Building,
         sim.session.binary_frame(),
@@ -2752,7 +2735,6 @@ fn building_queue_switch_queues_and_starts_the_next_after_placement() {
 /// `FactoryClass_QueueProduction_ForceCheckBuilding 0x4C9C7B`: with the
 /// switch on, a building PRODUCE no longer abandons a held product, so the
 /// request waits in the queue while the held building stays suspended.
-#[cfg(feature = "phobos")]
 #[test]
 fn building_queue_switch_keeps_a_suspended_held_building() {
     use crate::sim::world::FrameEffects;
@@ -3035,9 +3017,11 @@ pub(crate) fn prerequisite_loss_cancellation_fixture(
     receiver.session.set_current_house_for_test(Some(other));
     let held = held_id(&sender, owner, ProductionCategory::Vehicle);
     let rng = sender.rng_state();
-    let events = sender.recheck_house_tech_tree(owner, &rules);
+    let events = sender.recheck_house_tech_tree(owner, &rules, Default::default());
     assert!(
-        receiver.recheck_house_tech_tree(owner, &rules).is_empty(),
+        receiver
+            .recheck_house_tech_tree(owner, &rules, Default::default())
+            .is_empty(),
         "a remote human clears its recheck without publishing another strip"
     );
     assert!(!sender.houses[&owner].tech_recheck_pending());
@@ -3090,7 +3074,6 @@ pub(crate) fn prerequisite_loss_cancellation_fixture(
                 &[],
                 &rules,
                 tick,
-                None,
                 FrameEffects::default().with_network_commands(&checksums),
             )
             .0,
@@ -3236,7 +3219,7 @@ fn missing_barracks_retains_completed_infantry_and_queued_successor() {
     sim.houses
         .get_mut(&owner)
         .unwrap()
-        .tracking_mut()
+        .tracking_mut_for_test()
         .set_buildings_for_test(0);
     let credits = sim.houses[&owner].economy().credits();
     let rng = (
@@ -3245,9 +3228,7 @@ fn missing_barracks_retains_completed_infantry_and_queued_successor() {
         sim.mapgen_rng.logical_state(),
     );
     let allocated = sim.next_stable_object_id();
-    assert!(!dispatch_production_changes_for_tests(
-        &mut sim, &rules, None
-    ));
+    assert!(!dispatch_production_changes_for_tests(&mut sim, &rules));
     assert_eq!(held_id(&sim, owner, ProductionCategory::Infantry), held);
     let factory = sim
         .production
@@ -3571,9 +3552,7 @@ fn occupied_barracks_radio_refunds_discards_and_promotes_one_gi() {
             .factories_mut()
             .test_arm_ready(owner, category)
     );
-    assert!(dispatch_production_changes_for_tests(
-        &mut sim, &rules, None
-    ));
+    assert!(dispatch_production_changes_for_tests(&mut sim, &rules));
     assert!(sim.pending_command_snapshot().is_empty());
     let first_entity = sim.substrate.entities.get(first).unwrap();
     assert!(!first_entity.lifecycle.in_limbo() && first_entity.in_logic_vector.is_member());
@@ -3678,9 +3657,7 @@ fn occupied_barracks_radio_refunds_discards_and_promotes_one_gi() {
     let mapgen = sim.mapgen_rng.logical_state();
     let mut expected_scenario = sim.scenario_rng.clone();
 
-    assert!(!dispatch_production_changes_for_tests(
-        &mut sim, &rules, None
-    ));
+    assert!(!dispatch_production_changes_for_tests(&mut sim, &rules));
     assert!(sim.pending_command_snapshot().is_empty());
     assert!(
         !sim.substrate.entities.contains(refused),

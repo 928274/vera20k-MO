@@ -20,7 +20,6 @@ impl Simulation {
         &mut self,
         target: u64,
         rules: &RuleSet,
-        registry: Option<&OverlayTypeRegistry>,
         effects: FrameEffects<'_>,
     ) {
         use crate::sim::mission::{MissionId, MissionType};
@@ -33,8 +32,8 @@ impl Simulation {
         {
             return;
         }
-        let _ = self.assign_target_represented(target, None, rules, registry, effects);
-        let _ = self.assign_destination_represented(target, None, rules, registry, effects);
+        let _ = self.assign_target_represented(target, None, rules, effects);
+        let _ = self.assign_destination_represented(target, None, rules, effects);
         let _ = self.mission_queue_exact(
             target,
             MissionId::from_known(MissionType::Harmless),
@@ -358,7 +357,7 @@ impl Simulation {
         if actor.owner() == owner {
             return false;
         }
-        let context = UninitContext::new(rules, registry).with_effects(effects);
+        let context = UninitContext::new(rules).with_effects(effects);
         let operator = self
             .substrate
             .entities
@@ -370,7 +369,7 @@ impl Simulation {
             .substrate
             .entities
             .get(target)
-            .and_then(|actor| actor.passenger_role.cargo())
+            .and_then(|actor| actor.passenger_role().cargo())
             .map(|cargo| cargo.passengers().to_vec())
             .unwrap_or_default();
         match operator {
@@ -379,7 +378,6 @@ impl Simulation {
                 let _ = depart_cargo_head(
                     self,
                     rules,
-                    registry,
                     target,
                     DepartureRoute::DeathEscape,
                     |sim, id| {
@@ -417,12 +415,11 @@ impl Simulation {
             .substrate
             .entities
             .get(target)
-            .map_or(0, |actor| actor.passenger_role.passenger_count());
+            .map_or(0, |actor| actor.passenger_role().passenger_count());
         for _ in 0..count {
             let result = depart_cargo_head(
                 self,
                 rules,
-                registry,
                 target,
                 DepartureRoute::DeathEscape,
                 |sim, id| {
@@ -467,7 +464,7 @@ impl Simulation {
         self.free_all_captures(target, rules, registry, effects);
         self.leave_team(target, false, rules, effects);
         crate::sim::spawn_manager::kill_all_spawns_with_context(self, target, context);
-        crate::sim::spawn_manager::clear_all_spawn_targets(self, target, rules, registry, effects);
+        crate::sim::spawn_manager::clear_all_spawn_targets(self, target, rules, effects);
         self.free_slaves_for_driver_change(target, invoker, passive, rules, registry, effects);
         self.change_owner_with_rules(target, owner, rules, registry, effects);
         if passive {
@@ -481,9 +478,9 @@ impl Simulation {
                 &crate::sim::mission::authority::LiveReadyInputProvider { rules },
             );
         }
-        let _ = self.assign_target_represented(target, None, rules, registry, effects);
+        let _ = self.assign_target_represented(target, None, rules, effects);
         // ReplaceDriver10045995 passes mode 0; the later AI enforcement uses 1.
-        let _ = self.assign_destination_keeping_queue(target, None, rules, registry, effects);
+        let _ = self.assign_destination_keeping_queue(target, None, rules, effects);
         self.dispatch_object_tag_event(target, 68, Some(target), invoker, context);
         if self
             .substrate
@@ -577,7 +574,6 @@ mod tests {
             host,
             Some(crate::sim::combat::TargetKind::Entity(invoker)),
             &rules,
-            Some(&overlays),
             Default::default(),
         )
         .unwrap();
@@ -585,7 +581,6 @@ mod tests {
             host,
             Some(crate::sim::components::NavTargetRef::cell(18, 15)),
             &rules,
-            Some(&overlays),
             Default::default(),
         )
         .unwrap();
@@ -630,7 +625,7 @@ mod tests {
         assert!(vehicle.driver_killed());
         assert!(vehicle.attack_target.target().is_none());
         assert!(vehicle.navigation.nav_com().is_none());
-        assert_eq!(vehicle.passenger_role.passenger_count(), 0);
+        assert_eq!(vehicle.passenger_role().passenger_count(), 0);
         assert_eq!(vehicle.veterancy.raw(), NativeF32Bits::from_bits(0));
         assert!(
             sim.entities()
@@ -640,7 +635,7 @@ mod tests {
         );
         let passenger = sim.entities().get(rider).unwrap();
         assert!(
-            !passenger.lifecycle.in_limbo() && !passenger.passenger_role.is_inside_transport(),
+            !passenger.lifecycle.in_limbo() && !passenger.passenger_role().is_inside_transport(),
             "{operator_rule} ejects the other matching passenger alive"
         );
         assert!(!sim.can_capture(controller, host, &rules));
@@ -656,7 +651,7 @@ mod tests {
             0,
         );
         assert_eq!(actor.mission.queued(), crate::sim::mission::MissionId::NONE);
-        sim.update_ares_driver_killed_mission(host, &rules, Some(&overlays), Default::default());
+        sim.update_ares_driver_killed_mission(host, &rules, Default::default());
         assert_eq!(
             sim.entities().get(host).unwrap().mission.current().known(),
             Some(crate::sim::mission::MissionType::Harmless)
@@ -676,7 +671,7 @@ mod tests {
         let vehicle = sim.entities().get(host).unwrap();
         assert_eq!(sim.interner.resolve(vehicle.owner()), "Americans");
         assert!(!vehicle.driver_killed());
-        assert_eq!(vehicle.passenger_role.passenger_count(), 1);
+        assert_eq!(vehicle.passenger_role().passenger_count(), 1);
         assert!(sim.entities().get(driver).unwrap().lifecycle.in_limbo());
         assert!(sim.can_capture(controller, host, &rules));
         assert!(sim.can_be_perma_mind_controlled(host, &rules));
@@ -803,7 +798,7 @@ mod tests {
         sim.initialize_trigger_definitions(&map, &Default::default(), None, None, None);
         sim.attach_object_trigger_tag(host, Some("TAG"));
 
-        let context = UninitContext::new(&rules, None);
+        let context = UninitContext::new(&rules);
         for (kind, source) in [
             (68, Some(invoker)),
             (67, None),

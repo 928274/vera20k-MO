@@ -832,7 +832,6 @@ fn a_computer_building_guards_without_a_fate_roll() {
         yuri,
         plant,
         &rules,
-        None,
         crate::sim::world::FrameEffects::default(),
     );
     let entity = sim.substrate.entities.get(plant).unwrap();
@@ -927,7 +926,6 @@ fn native_decide_unit_fate_corpus() {
             yuri,
             unit,
             rules,
-            None,
             crate::sim::world::FrameEffects::default(),
         );
 
@@ -2012,8 +2010,8 @@ fn a_controlled_mcv_cannot_deploy_and_a_controlled_yard_cannot_repack() {
         crate::sim::world::FrameEffects::default()
     ));
     assert_eq!(owner(&sim, stolen), "Americans");
-    assert!(!sim.can_undeploy_building_runtime(stolen, &rules));
-    assert!(sim.can_undeploy_building_runtime(own, &rules));
+    assert!(!sim.can_undeploy_building_runtime(stolen, false, &rules));
+    assert!(sim.can_undeploy_building_runtime(own, false, &rules));
 }
 
 /// Selling a Psychic Tower frees its captives first: native Selling ends
@@ -2217,7 +2215,7 @@ fn a_captive_boarding_an_absorber_is_freed_first() {
     let entity = sim.substrate.entities.get(gi).unwrap();
     assert!(!entity.mind_control.is_mind_controlled());
     assert_eq!(owner(&sim, gi), "Americans");
-    assert!(entity.passenger_role.is_inside_transport());
+    assert!(entity.passenger_role().is_inside_transport());
     assert!(victims(&sim, yuri).is_empty());
     assert_eq!(voc_sounds(&sim), ["MindCleared"]);
 }
@@ -2571,7 +2569,7 @@ fn control_link_timer_selection_ports_cleanup_and_snapshot_share_the_manager() {
     assert_eq!(sim.capture_link_coordinates(controller, &rules).len(), 2);
     sim.free_unit(controller, first, &rules, None, FrameEffects::default());
     assert_eq!(sim.capture_link_coordinates(controller, &rules).len(), 1);
-    sim.uninit_with_context(second, UninitContext::new(&rules, None));
+    sim.uninit_with_context(second, UninitContext::new(&rules));
     assert!(sim.capture_link_coordinates(controller, &rules).is_empty());
 }
 
