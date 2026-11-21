@@ -227,26 +227,32 @@ pub(crate) fn visual_character(
         return 5;
     }
     // MO's `[General] CloakingStages=1` collapses the native fade ramp, so a
-    // cloak-capable unit that is cloaking, cloaked or uncloaking (states
-    // 1..3) would flicker between opaque and hidden on the screen. While a
-    // screen observer's sensors cover the cell, keep it at the Ghost Miner's
-    // steady 50% ghost (3, `DrawState::cloak_selector`) instead. Fully
-    // cloaked state 2 needs no shortcut: `hidden_unless_sensed` already
-    // answers 3 for a sensed cell; the shortcut only stabilises the
-    // transition frames.
-    // State 0 is NOT cloaked. A unit that decloaks to fire (including one
-    // that only gained cloak at elite rank) is fully visible and attackable
-    // through the force-sensor path, and native `GetVisualState` answers an
-    // opaque 0. Keeping state 0 on this shortcut drew a decloaked unit as a
-    // 50% ghost indefinitely (real-machine report 2026-11-22), so the
-    // shortcut is limited to the active cloak states.
-    // Gated on the object actually owning a cloak runtime, so ordinary units
-    // inside a sensor circle keep their opaque body. Only the screen call
-    // takes this shortcut: the explicit `(1, house)` query used by
-    // GetFireError (T17) and by CloakingTick's state transitions keeps its
-    // native answer, so the three attack gates are unchanged.
+    // cloak-capable unit mid-transition would flicker between opaque and
+    // hidden on the screen. While a screen observer's sensors cover the cell,
+    // hold an ACTIVE transition frame at the Ghost Miner's steady 50% ghost
+    // (3, `DrawState::cloak_selector`). Fully cloaked state 2 needs no
+    // shortcut: `hidden_unless_sensed` already answers 3 for a sensed cell.
+    //
+    // Two windows must stay opaque, because native `GetVisualState` answers 0
+    // there and a sensed unit is fully visible/attackable in both:
+    //   * state 0 - decloaked to fire (including a unit that only gained
+    //     cloak at elite rank). 2026-11-22 real-machine report.
+    //   * progress 0 inside states 1/3 - `StartCloaking`/`StartUncloaking`
+    //     seed depth 0 and `CloakingSpeed` holds it there for that many
+    //     frames before the first step lands. With `[General]
+    //     CloakingStages=1` and a type's `CloakingSpeed=150`, this is a
+    //     150-frame opaque window after attacking. Painting it as a ghost
+    //     made the unit look translucent immediately after firing and made
+    //     `CloakingSpeed` appear to be ignored. 2026-11-22 follow-up.
+    // Gated on the object actually owning a cloak runtime and on a real
+    // progress step, so ordinary units and not-yet-cloaked bodies inside a
+    // sensor circle keep their opaque body. Only the screen call takes this
+    // shortcut: the explicit `(1, house)` query used by GetFireError (T17)
+    // and by CloakingTick's state transitions keeps its native answer, so
+    // the three attack gates are unchanged.
     if cloak_present
         && state != 0
+        && progress > 0
         && !query.force_sensor
         && !query.map_editor
         && !is_building
@@ -1326,15 +1332,112 @@ mod tests {
         }
     }
 
+    /// Real-machine report (2026-11-22, follow-up): a custom unit type has
+    /// `CloakingSpeed=150`, `[General] CloakingStages=1` and `CloakDelay=0`.
+    /// After firing, `StartUncloaking` reaches state 0 and `StartCloaking`
+    /// immediately reopens state 1 with depth 0; the step timer then holds
+    /// `progress == 0` for all 150 frames of `CloakingSpeed`. Native
+    /// `GetVisualState` answers an opaque 0 at progress 0, but the
+    /// screen-only ghost shortcut used to key on `state != 0` alone and
+    /// painted the whole visible window as a steady 50% ghost. The player
+    /// saw the unit turn translucent immediately after attacking and stay
+    /// that way, as if `CloakingSpeed` were ignored.
+    #[test]
+    fn mo_cloaking_speed_window_is_opaque_until_a_progress_step_lands() {
+        let screen =
+            |senses| VisualCharacterQuery::screen(true, true, senses, false, false, false);
+        // state 1 (cloaking) and state 3 (uncloaking) at progress 0: still
+        // fully opaque even though the observer's sensors cover the cell.
+        for state in [1, 3] {
+            assert_eq!(
+                visual_character(state, 0, 1, false, false, true, false, true, screen(true)),
+                0,
+                "state {state} at progress 0 is opaque (the CloakingSpeed window)"
+            );
+        }
+        // Once a real progress step has landed, the sensed 50% ghost remains:
+        // the anti-cloak behaviour the player already confirmed is untouched.
+        for state in [1, 3] {
+            assert_eq!(
+                visual_character(state, 1, 1, false, false, true, false, true, screen(true)),
+                3,
+                "state {state} at progress 1 keeps the sensed 50% ghost"
+            );
+        }
+        // state 2 (fully cloaked) is answered by hidden_unless_sensed, not by
+        // the shortcut, and must stay a ghost under the sensor grid.
+        assert_eq!(
+            visual_character(2, 0, 1, false, false, true, false, true, screen(true)),
+            3,
+            "a fully cloaked sensed unit stays a 50% ghost"
+        );
+    }
+
+    /// Drives the real state machine with the reported INI values
+    /// (`CloakingSpeed=150`, `[General] CloakingStages=1`, `CloakDelay=0`)
+    /// and checks the SCREEN answer on every frame. Attack completes the
+    /// uncloak in one frame (single stage), then `StartCloaking` opens
+    /// state 1 with depth 0; `CloakingSpeed` holds depth 0 for 150 frames
+    /// before the first step lands and state 2 is reached. That whole
+    /// window must render an opaque body, not the 50% ghost.
+    #[test]
+    fn mo_cloaking_speed_150_window_renders_opaque_until_state_2() {
+        let mut cloak = CloakRuntime::new(0);
+        let mut rng = SimRng::new(1);
+        let screen = |senses| {
+            VisualCharacterQuery::screen(true, true, senses, false, false, false)
+        };
+        let facts = |frame, can_auto| CloakTickFacts {
+            current_frame: frame,
+            state_zero_head_allows: true,
+            can_auto_cloak: can_auto,
+            should_uncloak: false,
+            health_above_red: true,
+            cloaking_speed: 150,
+            cloak_delay_frames: 0,
+            cloaking_stages: 1,
+            invisible: false,
+            owned_by_current_house: false,
+            is_building: false,
+        };
+        let body = |c: &CloakRuntime| {
+            visual_character(c.state(), c.depth() as i32, 1, false, false, true, false, true, screen(true))
+        };
+        cloak.establish_unlimbo_fully_cloaked();
+        assert_eq!(cloak.state(), 2);
+        assert_eq!(body(&cloak), 3, "a fully cloaked sensed unit is a ghost");
+        assert!(cloak.start_uncloaking(0, 150, 1, false).transitioned);
+        cloak.tick(facts(1, false), &mut rng);
+        assert_eq!(cloak.state(), 0, "single-stage uncloak completes in one frame");
+        assert_eq!(body(&cloak), 0, "decloaked to fire: opaque");
+        // Stop firing and let auto-cloak be admitted at frame 2.
+        cloak.tick(facts(2, true), &mut rng);
+        assert_eq!(cloak.state(), 1);
+        assert_eq!(cloak.depth(), 0);
+        // The full CloakingSpeed window: still depth 0, still opaque.
+        for frame in 3..152 {
+            cloak.tick(facts(frame, true), &mut rng);
+            assert_eq!(cloak.state(), 1, "frame {frame}: still cloaking");
+            assert_eq!(cloak.depth(), 0, "frame {frame}: no step yet");
+            assert_eq!(body(&cloak), 0, "frame {frame}: opaque under sensors");
+        }
+        // The first step lands: state 2, and only now the 50% ghost returns.
+        cloak.tick(facts(152, true), &mut rng);
+        assert_eq!(cloak.state(), 2, "cloak completed after 150 frames");
+        assert_eq!(body(&cloak), 3, "completed cloak is a sensed ghost again");
+    }
+
     /// MO sets `[General] CloakingStages=1` and `CloakDelay=0`. With a single
     /// stage the native `scaled = progress * 256 / stages` has no 1..4 ramp,
-    /// so a sensed cloak-capable unit in states 1..3 must be held at the
-    /// Ghost Miner's steady 50% ghost (character 3) instead of flickering to
-    /// opaque/hidden. `DrawState::cloak_selector` maps 2 | 3 to
-    /// TRANSLUCENCY_50 (opacity 0.5). State 0 is fully decloaked and stays
-    /// opaque (see `mo_decloaked_unit_under_sensors_draws_opaque_body`). The
-    /// explicit `(1, house)` query that GetFireError and CloakingTick use is
-    /// deliberately left on the native answer.
+    /// so a sensed cloak-capable unit with a real progress step (states 1..3)
+    /// must be held at the Ghost Miner's steady 50% ghost (character 3)
+    /// instead of flickering to opaque/hidden. `DrawState::cloak_selector`
+    /// maps 2 | 3 to TRANSLUCENCY_50 (opacity 0.5). State 0 and progress 0
+    /// are fully visible and stay opaque (see
+    /// `mo_decloaked_unit_under_sensors_draws_opaque_body` and
+    /// `mo_cloaking_speed_window_is_opaque_until_a_progress_step_lands`).
+    /// The explicit `(1, house)` query that GetFireError and CloakingTick use
+    /// is deliberately left on the native answer.
     #[test]
     fn mo_single_cloak_stage_keeps_a_sensed_enemy_at_ghost_opacity() {
         let screen = |senses| {

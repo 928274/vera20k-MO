@@ -782,6 +782,47 @@ mod tests {
         }
     }
 
+    /// Real-machine follow-up (2026-11-22): `[General] CloakingStages=1`
+    /// plus a type's `CloakingSpeed=150` hold state 1 at depth 0 for 150
+    /// frames after firing. Under a real sensor grid that window must draw
+    /// a fully opaque body, not the 50% ghost; only the completed state 2
+    /// may become the ghost. Walks `Seen::of` through `DrawState`.
+    #[test]
+    fn mo_cloaking_speed_window_draws_opaque_under_the_real_sensor_grid() {
+        let rules = crate::rules::ruleset::RuleSet::from_ini(
+            &crate::rules::ini_parser::IniFile::from_str(
+                "[General]\nCloakingStages=1\nCloakDelay=0\n",
+            ),
+        )
+        .expect("MO cloak rules");
+        let mut unit = entity();
+        let mut cloak = crate::sim::cloak_disguise::CloakRuntime::new(0);
+        cloak.set_state_for_test(1);
+        cloak.set_depth_for_test(0);
+        unit.cloak = Some(Box::new(cloak));
+        let record = sensed_by_the_player_with_rules(&unit, &rules);
+        assert_eq!(
+            record.seen.visual_character, 0,
+            "state 1 / depth 0 is opaque during the CloakingSpeed window"
+        );
+        let body = DrawState::for_entity(&record, 0, 3, ObserverDrawContext::default());
+        assert!(body.visible, "the opaque body is drawn");
+        assert_eq!(body.state.fx_params[0], 1.0, "no TRANSLUCENCY_50");
+        assert_eq!(body.state.fx_flags & FX_CLOAK, 0, "no FX_CLOAK");
+
+        // Control: once a progress step has landed, the same sensed cell
+        // still draws the confirmed 50% ghost.
+        let mut unit = entity();
+        let mut cloak = crate::sim::cloak_disguise::CloakRuntime::new(0);
+        cloak.set_state_for_test(1);
+        cloak.set_depth_for_test(1);
+        unit.cloak = Some(Box::new(cloak));
+        let record = sensed_by_the_player_with_rules(&unit, &rules);
+        assert_eq!(record.seen.visual_character, 3, "progress 1 keeps the ghost");
+        let body = DrawState::for_entity(&record, 0, 3, ObserverDrawContext::default());
+        assert_eq!(body.state.fx_params[0], 0.5, "TRANSLUCENCY_50 restored");
+    }
+
     /// MO's `[General] CloakingStages=1` / `CloakDelay=0`: a player whose
     /// `SensorsSight=` unit really deposits the sensor grid must see a fully
     /// cloaked enemy (state 2) as the Ghost Miner's steady 50% ghost. The
