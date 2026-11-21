@@ -783,11 +783,14 @@ mod tests {
     }
 
     /// MO's `[General] CloakingStages=1` / `CloakDelay=0`: a player whose
-    /// `SensorsSight=` unit really deposits the sensor grid must see an enemy
-    /// cloak-capable unit as the Ghost Miner's steady 50% ghost on every
-    /// frame, including the state-0 frames Ares parks the unit in. Unlike the
-    /// older fixture this walks the whole chain: Unlimbo's sensor deposit, the
-    /// fog lookup in `Seen::of`, and `DrawState::for_entity`.
+    /// `SensorsSight=` unit really deposits the sensor grid must see a fully
+    /// cloaked enemy (state 2) as the Ghost Miner's steady 50% ghost. The
+    /// 2026-11-21 replay showed `cloak_state=2` for every correctly drawn
+    /// ghost. Once that unit decloaks to state 0 (fire / elite cloak), the
+    /// very same sensed cell must draw an opaque body instead: the 2026-11-22
+    /// real-machine report had it stuck as a 50% ghost. This walks the whole
+    /// chain: Unlimbo's sensor deposit, the fog lookup in `Seen::of`, and
+    /// `DrawState::for_entity`.
     #[test]
     fn mo_sensed_cloak_capable_enemy_draws_a_steady_ghost_from_the_real_sensor_grid() {
         use crate::map::playfield::PlayfieldBounds;
@@ -821,10 +824,9 @@ mod tests {
             sim.fog().has_sensor_for_house(viewer, 40, 30),
             "Unlimbo deposits the SensorsSight circle for the local house"
         );
-        // State 0 is the MO single-stage flicker frame: the unit owns a cloak
-        // runtime but native GetVisualState would answer a fully opaque 0.
+        // state 2 = fully cloaked, the state every real-machine ghost showed.
         let mut cloak = crate::sim::cloak_disguise::CloakRuntime::new(0);
-        cloak.set_state_for_test(0);
+        cloak.set_state_for_test(2);
         sim.entity_mut_for_test(target).unwrap().cloak = Some(Box::new(cloak));
         let frame = crate::app::presentation::frame::PresentationFrame::of_test(&sim, &rules);
         let record = frame.object(target).cloned().expect("captured object");
@@ -838,6 +840,22 @@ mod tests {
             "the same 50% selector the real-machine draw plan carried"
         );
         assert_ne!(decision.state.fx_flags & FX_CLOAK, 0, "FX_CLOAK");
+
+        // Same unit, same sensed cell, but now fully decloaked (state 0):
+        // native GetVisualState answers an opaque 0 and the ghost shortcut
+        // must not keep drawing it at 50% (real-machine report 2026-11-22).
+        sim.entity_mut_for_test(target)
+            .unwrap()
+            .cloak
+            .as_mut()
+            .unwrap()
+            .set_state_for_test(0);
+        let frame = crate::app::presentation::frame::PresentationFrame::of_test(&sim, &rules);
+        let record = frame.object(target).cloned().expect("captured object");
+        assert_eq!(record.seen.visual_character, 0, "decloaked unit is opaque");
+        let decision = DrawState::for_entity(&record, 0, 3, ObserverDrawContext::default());
+        assert!(decision.visible, "the opaque body is still drawn");
+        assert_eq!(decision.state.fx_params[0], 1.0, "no TRANSLUCENCY_50");
 
         // Without the grid the same state-0 unit keeps its opaque native body.
         let mut plain = crate::sim::world::Simulation::with_seed(0x5E45_0A01);
