@@ -28,7 +28,7 @@ impl Simulation {
         &mut self,
         rules: &RuleSet,
         overlay_registry: Option<&OverlayTypeRegistry>,
-        effects: FrameEffects<'_>,
+        effects: &mut FrameEffects<'_>,
     ) {
         // One-frame channel: drain it even when no script is installed, so a
         // long battle cannot grow the list without bound.
@@ -151,7 +151,7 @@ impl Simulation {
         owner: InternedId,
         rules: &RuleSet,
         overlay_registry: Option<&OverlayTypeRegistry>,
-        effects: FrameEffects<'_>,
+        effects: &mut FrameEffects<'_>,
     ) {
         for command in commands {
             match command {
@@ -262,7 +262,7 @@ fn detonate_invisible_bullet(
     damage: i32,
     impact: ProjectileCoord,
     owner: InternedId,
-    effects: FrameEffects<'_>,
+    effects: &mut FrameEffects<'_>,
 ) {
     let Some(warhead) = rules.warhead(warhead_name) else {
         log::debug!("script warhead '{warhead_name}' is not registered; skipped");
@@ -392,7 +392,7 @@ mod frame_dispatch_tests {
                 33,
                 TickLane::Ordinary,
                 false,
-                FrameEffects::default(),
+                &mut FrameEffects::default(),
             )
             .expect("an idle frame completes");
 
@@ -413,7 +413,7 @@ mod frame_dispatch_tests {
         let rules = RuleSet::empty_for_test();
         sim.script_bullet_hits.push(queued_hit());
 
-        sim.dispatch_script_frame(&rules, None, FrameEffects::default());
+        sim.dispatch_script_frame(&rules, None, &mut FrameEffects::default());
 
         assert!(sim.script_bullet_hits.is_empty());
     }

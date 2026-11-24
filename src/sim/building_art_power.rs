@@ -460,7 +460,7 @@ mod tests {
             true,
             &rules,
             None,
-            crate::sim::world::FrameEffects::default(),
+            &mut crate::sim::world::FrameEffects::default(),
         );
         let anim = sim.entities().get(id).unwrap().building_art.anim_slots[3].unwrap();
         assert_eq!(sim.anim(anim).unwrap().runtime().paused, rules.ares_form());
@@ -477,7 +477,7 @@ mod tests {
             true,
             &rules,
             None,
-            crate::sim::world::FrameEffects::default(),
+            &mut crate::sim::world::FrameEffects::default(),
         );
         let anim = sim.entities().get(id).unwrap().building_art.anim_slots[3].unwrap();
         assert!(
@@ -488,7 +488,7 @@ mod tests {
             id,
             &rules,
             None,
-            crate::sim::world::FrameEffects::default(),
+            &mut crate::sim::world::FrameEffects::default(),
         );
         assert!(!sim.anim(anim).unwrap().runtime().paused);
         sim.substrate
@@ -513,13 +513,13 @@ mod tests {
             id,
             &rules,
             None,
-            crate::sim::world::FrameEffects::default(),
+            &mut crate::sim::world::FrameEffects::default(),
         );
         sim.visit_anim(
             anim,
             &rules,
             None,
-            crate::sim::world::FrameEffects::default(),
+            &mut crate::sim::world::FrameEffects::default(),
         )
         .unwrap();
         assert_eq!(sim.anim(anim).unwrap().runtime().current_frame, 0);
@@ -535,13 +535,13 @@ mod tests {
             id,
             &rules,
             None,
-            crate::sim::world::FrameEffects::default(),
+            &mut crate::sim::world::FrameEffects::default(),
         );
         sim.visit_anim(
             anim,
             &rules,
             None,
-            crate::sim::world::FrameEffects::default(),
+            &mut crate::sim::world::FrameEffects::default(),
         )
         .unwrap();
         assert_eq!(sim.anim(anim).unwrap().runtime().current_frame, 1);
@@ -784,7 +784,7 @@ mod tests {
                 id,
                 &rules,
                 None,
-                crate::sim::world::FrameEffects::default(),
+                &mut crate::sim::world::FrameEffects::default(),
             );
             let entity = sim.entities().get(id).unwrap();
             assert_eq!(

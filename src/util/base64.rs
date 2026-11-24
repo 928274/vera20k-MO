@@ -6,6 +6,17 @@
 //! ## Dependency rules
 //! - Part of util/ — no dependencies on game modules.
 
+// Outside data reaches this module: it refuses bad input, never panics.
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable
+    )
+)]
+
 /// Decode a base64 string to raw bytes.
 ///
 /// Skips any whitespace/newline characters (map files store base64 data across
@@ -30,17 +41,18 @@ pub fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
         sextet_buf.push(val);
     }
 
-    if !(sextet_buf.len() + padding).is_multiple_of(4) {
-        return Err(format!(
-            "Invalid base64: length {} (+ {} padding) is not a multiple of 4",
-            sextet_buf.len(),
-            padding
-        ));
+    // Community map editors wrap IsoMapPack5 at a fixed column and can leave
+    // the final group one sextet short, or append stray `=` padding. Keep the
+    // whole groups and drop that tail instead of refusing the map: outside
+    // data must not stop the game, and well-formed data still decodes exactly
+    // as before (the decode loop below only emits bytes for 2/3/4-sextet
+    // groups, so a lone trailing sextet contributes nothing).
+    if sextet_buf.len() % 4 == 1 {
+        sextet_buf.pop();
     }
 
     // Each group of 4 sextets → 3 bytes. Final group may produce 1 or 2 bytes.
     let full_groups: usize = sextet_buf.len() / 4;
-    let remainder: usize = sextet_buf.len() % 4;
     let mut output: Vec<u8> = Vec::with_capacity(full_groups * 3 + 2);
 
     for group in sextet_buf.chunks(4) {
@@ -63,12 +75,6 @@ pub fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
             let combined: u32 = (group[0] as u32) << 18 | (group[1] as u32) << 12;
             output.push((combined >> 16) as u8);
         }
-    }
-
-    // If there was padding, trim the extra bytes from the last full group.
-    if remainder == 0 && padding > 0 {
-        let trim: usize = output.len().saturating_sub(padding);
-        output.truncate(trim);
     }
 
     Ok(output)
@@ -134,5 +140,32 @@ mod tests {
         // [0x00, 0xFF, 0x80] = AP+A
         let result: Vec<u8> = base64_decode("AP+A").unwrap();
         assert_eq!(result, vec![0x00, 0xFF, 0x80]);
+    }
+
+    /// Lenient tail handling must leave well-formed data byte-for-byte alone.
+    #[test]
+    fn test_padded_roundtrip_is_unchanged() {
+        for bytes in [
+            b"Hello".to_vec(),
+            b"Hello!".to_vec(),
+            vec![0x00, 0xFF, 0x80],
+            Vec::new(),
+        ] {
+            let encoded = base64_encode(&bytes);
+            assert_eq!(base64_decode(&encoded).unwrap(), bytes, "{encoded}");
+        }
+    }
+
+    /// Community map editors wrap IsoMapPack5 at a fixed column and can leave
+    /// one sextet past the last full group (length % 4 == 1). Drop that tail
+    /// instead of refusing the map.
+    #[test]
+    fn test_short_final_group_is_dropped() {
+        assert_eq!(base64_decode("QUJDQ").unwrap(), b"ABC".to_vec());
+    }
+
+    #[test]
+    fn test_stray_padding_is_ignored() {
+        assert_eq!(base64_decode("QUJD====").unwrap(), b"ABC".to_vec());
     }
 }

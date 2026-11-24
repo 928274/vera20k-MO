@@ -13,6 +13,17 @@
 //! ## Dependency rules
 //! - Part of util/ — no dependencies on game modules.
 
+// Outside data reaches this module: it refuses bad input, never panics.
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable
+    )
+)]
+
 use std::fmt;
 
 /// Errors during LZO decompression.
@@ -218,7 +229,16 @@ pub fn decompress_chunks(data: &[u8], maximum_output: usize) -> Result<Vec<u8>, 
             break;
         }
         if pos + src_len > data.len() {
-            return Err(LzoError::InputTruncated);
+            // Community map packs can end with a final block whose payload is
+            // shorter than its header claims. Keep the complete blocks that
+            // decoded instead of refusing the map; outside data must not stop
+            // the game.
+            log::warn!(
+                "LZO: input truncated at {pos} of {} bytes (block wants {src_len}); keeping {} decoded bytes",
+                data.len(),
+                output.len()
+            );
+            break;
         }
 
         let start = output.len();
@@ -473,6 +493,29 @@ mod tests {
         let written: usize = lzo1x_decompress(&input, &mut output).expect("Should decompress");
         assert_eq!(written, 5);
         assert_eq!(&output[..5], b"Hello");
+    }
+
+    /// A community map pack can end with a block header whose advertised
+    /// source length exceeds the remaining bytes. Keep the complete blocks
+    /// that decoded instead of refusing the map.
+    #[test]
+    fn truncated_final_chunk_keeps_the_decoded_prefix() {
+        let literal: Vec<u8> = vec![17 + 5, b'H', b'e', b'l', b'l', b'o', 0x11, 0x00, 0x00];
+        let mut chunks = Vec::new();
+        chunks.extend_from_slice(&(literal.len() as u16).to_le_bytes());
+        chunks.extend_from_slice(&5u16.to_le_bytes());
+        chunks.extend_from_slice(&literal);
+        let complete = chunks.clone();
+        // A second block claims 100 compressed bytes but only two remain.
+        chunks.extend_from_slice(&100u16.to_le_bytes());
+        chunks.extend_from_slice(&100u16.to_le_bytes());
+        chunks.extend_from_slice(&[0, 0]);
+
+        assert_eq!(decompress_chunks(&complete, 64).unwrap(), b"Hello");
+        assert_eq!(
+            decompress_chunks(&chunks, 64).expect("truncated tail is tolerated"),
+            b"Hello".to_vec()
+        );
     }
 
     #[test]

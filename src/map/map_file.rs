@@ -11,6 +11,17 @@
 //! ## Dependency rules
 //! - Part of map/ — depends on assets/ (MIX archives), rules/ (INI parser), util/ (base64, lzo).
 
+// Outside data reaches this module: it refuses bad input, never panics.
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable
+    )
+)]
+
 use std::borrow::Cow;
 use std::collections::HashMap;
 #[cfg(any(test, feature = "test-support"))]
@@ -622,18 +633,19 @@ fn pick_map_ini(archive: &MixArchive, transferred: bool) -> Result<IniFile, MapE
             validate_transfer_text(data)?;
         }
         match IniFile::from_bytes(data) {
-            Ok(ini) if ini.section("Map").is_some() => {
-                if !transferred {
-                    return Ok(ini);
+            Ok(ini) => match ini.section("Map").map(|map| map.name == "Map") {
+                Some(_) if !transferred => return Ok(ini),
+                Some(exact_name) => {
+                    if selected.is_some() || !exact_name {
+                        return Err(MapError::InvalidTransferContent("Ambiguous MIX map member"));
+                    }
+                    selected = Some(ini);
                 }
-                if selected.is_some() || ini.section("Map").unwrap().name != "Map" {
-                    return Err(MapError::InvalidTransferContent("Ambiguous MIX map member"));
-                }
-                selected = Some(ini);
-            }
-            Ok(ini) if transferred => validate_map_description(&ini)?,
+                None if transferred => validate_map_description(&ini)?,
+                None => {}
+            },
             Err(error) if transferred => return Err(error.into()),
-            _ => {}
+            Err(_) => {}
         }
     }
     selected.ok_or(MapError::MissingIsoMapPack)
@@ -747,10 +759,15 @@ fn parse_iso_map_pack_records(
     while offset < decompressed.len() {
         let remaining: usize = decompressed.len() - offset;
         if remaining < CELL_HEADER_SIZE {
-            return Err(MapError::CellDataTruncated {
-                expected: CELL_HEADER_SIZE,
-                actual: remaining,
-            });
+            // A truncated LZO tail can leave fewer than a cell header after the
+            // last whole record. Keep the cells that decoded; a short *record*
+            // (4..10 bytes) is still rejected below.
+            log::warn!(
+                "IsoMapPack5: dropping {} trailing bytes after {} cells",
+                remaining,
+                cells.len()
+            );
+            break;
         }
 
         let x: i16 = i16::from_le_bytes([decompressed[offset], decompressed[offset + 1]]);
@@ -1260,18 +1277,18 @@ mod tests {
         assert_eq!(cells[0].tile_index, 7);
     }
 
+    /// A truncated LZO tail can leave fewer than four bytes after the last
+    /// whole cell record. Keep the cells that decoded instead of failing the
+    /// map load; a short *record* (4..10 bytes) is still rejected below.
     #[test]
-    fn gsi_02_09_incomplete_header_is_an_error() {
+    fn gsi_02_09_incomplete_header_tail_is_dropped() {
         for actual in 1..CELL_HEADER_SIZE {
             let mut bytes = iso_map_record(1, 0, 1, 0, 0).to_vec();
             bytes.extend(std::iter::repeat_n(1, actual));
-            assert!(matches!(
-                parse_iso_map_pack_records(&bytes, crate::map::cell_index::CellGrid::Retail),
-                Err(MapError::CellDataTruncated {
-                    expected: CELL_HEADER_SIZE,
-                    actual: got,
-                }) if got == actual
-            ));
+            let parsed =
+                parse_iso_map_pack_records(&bytes, crate::map::cell_index::CellGrid::Retail)
+                    .expect("a short final tail keeps the cells that decoded");
+            assert_eq!(parsed.cells.len(), 1, "tail of {actual} bytes");
         }
     }
 
