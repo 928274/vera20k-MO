@@ -1,5 +1,5 @@
 // ============================================================================
-// GBION 卫星定位离子炮 —— 演出脚本（Rhai）
+// GBION 卫星定位离子炮 —— 蓄能攻击脚本（Rhai）
 //
 // 放置位置：<游戏目录>/vera20k/DynamicPatcher/GBIONIonShowScript.rhai
 // 绑定方式：文件名即 [Unit] Script= 的名字（大小写不敏感），本脚本对应
@@ -56,10 +56,10 @@ fn cfg() {
         beam_height: 50000,
 
         // 触发与节奏
-        quake_projectile: "AAW",     // 地震炮抛射体：对同一目标命中 2 次开演
+        quake_projectile: "AAW",     // 地震炮抛射体：对同一目标命中 2 次触发
         quake_hits: 2,
-        air_frames: 60,              // 锁定飞行目标满 60 帧开演（地震炮打不到空中）
-        start_delay: 10,             // 开演延迟
+        air_frames: 60,              // 锁定飞行目标满 60 帧触发（地震炮打不到空中）
+        start_delay: 10,             // 触发延迟
         start_radius: 166,           // 起始半径
         start_angle: -180,
         line_speed: 24,
@@ -132,7 +132,7 @@ fn on_detonate(ctx, state) {
 fn on_update(ctx, state) {
     let cfg = cfg();
     if state.active {
-        // 每帧重读目标坐标：演出跟着目标走；目标没了就停在原地。
+        // 每帧重读目标坐标：跟着目标走；目标没了就停在原地。
         if ctx.has_target {
             state.center = ctx.anchor;
             state.height = ctx.height;
@@ -160,7 +160,7 @@ fn on_update(ctx, state) {
         state.quake_hits = 0;
         state.quake_target = ctx.target;
     }
-    // 第二条触发：地震炮打不到空中，所以锁定飞行目标满 60 帧也开演。
+    // 第二条触发：地震炮打不到空中，所以锁定飞行目标满 60 帧也触发。
     if ctx.has_target && ctx.air {
         if state.air_target != ctx.target {
             state.air_frames = 0;
